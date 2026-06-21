@@ -69,12 +69,17 @@ Agent runtime protocol:
 
 - `heartbeatAgent`
 - `claimRuntimeRun`
+- `claimRuntimeRunDetailed`
 - `completeRuntimeRun`
 - `callAgent`
 - `callAgentAt`
+- `runRuntimePullLoop`
+- `connectRuntimeWebSocket`
 
-The package exposes runtime protocol types, but it does not include adapters
-such as command, Codex, OpenClaw, or local HTTP backend runners.
+The package includes the base runtime integration layer: pull loop, websocket
+connect/reconnect, assignment callbacks, `run.event`, and `run.result`
+submission. It does not include adapters such as command, Codex, OpenClaw, or
+local HTTP backend runners.
 
 ## Development
 

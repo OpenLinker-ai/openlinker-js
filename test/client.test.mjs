@@ -253,10 +253,138 @@ test("claimRuntimeRun returns undefined on empty 204 claim", async () => {
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     runtimeToken: "ol_live_runtime",
-    fetch: async () => new Response(null, { status: 204 }),
+    fetch: async () => new Response(null, {
+      status: 204,
+      headers: {
+        "retry-after": "3",
+        "x-openlinker-max-claim-wait-seconds": "30",
+      },
+    }),
   });
 
   assert.equal(await client.claimRuntimeRun(), undefined);
+  const detailed = await client.claimRuntimeRunDetailed();
+  assert.equal(detailed.run, undefined);
+  assert.equal(detailed.retryAfterMs, 3000);
+  assert.equal(detailed.maxClaimWaitSeconds, 30);
+});
+
+test("runRuntimePullLoop claims assignments with runtime token", async () => {
+  const calls = [];
+  const assignments = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    runtimeToken: "ol_live_runtime",
+    fetch: async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init.method,
+        authorization: new Headers(init.headers).get("authorization"),
+      });
+      if (String(url).endsWith("/agent-runtime/heartbeat")) {
+        return jsonResponse({
+          agent_id: "agent-1",
+          availability_status: "healthy",
+          consecutive_failures: 0,
+          pending_run_count: 1,
+          claim_now: true,
+          next_claim_after_seconds: 0,
+          recommended_heartbeat_after_seconds: 60,
+          max_claim_wait_seconds: 30,
+        });
+      }
+      if (String(url).includes("/agent-runtime/runs/claim")) {
+        return jsonResponse({
+          run_id: "run-loop",
+          agent_id: "agent-1",
+          input: "hello",
+          metadata: { source: "test" },
+          source: "api",
+          result_endpoint: "/api/v1/agent-runtime/runs/run-loop/result",
+          result_method: "POST",
+          result_required: true,
+          a2a: { current_run_id: "run-loop", call_agent_endpoint: "/api/v1/agent-runtime/call-agent", call_agent_method: "POST", runtime_token_type: "scoped", runtime_scopes: ["agent:call"] },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await client.runRuntimePullLoop({
+    onAssigned: (assignment) => assignments.push(assignment),
+  }, {
+    waitSeconds: 2,
+    heartbeatMs: 1,
+    emptyRetryMs: 1,
+    maxRuns: 1,
+  });
+
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].type, "run.assigned");
+  assert.equal(assignments[0].run_id, "run-loop");
+  assert.equal(assignments[0].input, "hello");
+  assert.deepEqual(calls.map((call) => call.authorization), ["Bearer ol_live_runtime", "Bearer ol_live_runtime"]);
+  assert.equal(calls[1].url, "https://core.example.com/api/v1/agent-runtime/runs/claim?wait=2");
+});
+
+test("connectRuntimeWebSocket handles assignment and sends event/result", async () => {
+  const sockets = [];
+  const ready = [];
+  const assignments = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com/api/v1",
+    runtimeToken: "ol_live_ws",
+    fetch: async () => {
+      throw new Error("fetch should not be used for websocket");
+    },
+  });
+
+  const connection = await client.connectRuntimeWebSocket({
+    onReady: (message) => ready.push(message),
+    onAssigned: (assignment) => assignments.push(assignment),
+  }, {
+    webSocketFactory: (url, options) => {
+      const socket = new FakeRuntimeWebSocket(url, options);
+      sockets.push(socket);
+      return socket;
+    },
+    reconnect: false,
+  });
+
+  const socket = sockets[0];
+  assert.equal(socket.url, "wss://core.example.com/api/v1/agent-runtime/ws");
+  assert.equal(socket.options.headers.authorization, "Bearer ol_live_ws");
+  socket.open();
+  await connection.ready;
+  socket.message({ type: "runtime.ready", agent_id: "agent-1" });
+  socket.message({
+    type: "run.assigned",
+    run_id: "run-ws",
+    agent_id: "agent-1",
+    input: { task: "ws" },
+    source: "api",
+    result_required: true,
+    a2a: { current_run_id: "run-ws", call_agent_endpoint: "/api/v1/agent-runtime/call-agent", call_agent_method: "POST", runtime_token_type: "scoped", runtime_scopes: ["agent:call"] },
+  });
+  await nextTick();
+
+  assert.equal(ready[0].agent_id, "agent-1");
+  assert.equal(assignments[0].run_id, "run-ws");
+  assert.deepEqual(assignments[0].input, { task: "ws" });
+
+  connection.sendRunEvent("run-ws", { event_type: "run.message.delta", payload: "hi" });
+  connection.completeRun("run-ws", {
+    status: "success",
+    output: { answer: "ok" },
+    duration_ms: 12,
+  });
+
+  assert.equal(socket.sent[0].type, "run.event");
+  assert.equal(socket.sent[0].event_type, "run.message.delta");
+  assert.equal(socket.sent[1].type, "run.result");
+  assert.equal(socket.sent[1].status, "success");
+  assert.equal(socket.sent[1].duration_ms, 12);
+  connection.close();
 });
 
 function jsonResponse(body, init = {}) {
@@ -266,4 +394,49 @@ function jsonResponse(body, init = {}) {
     ...init,
     headers,
   });
+}
+
+class FakeRuntimeWebSocket {
+  readyState = 0;
+  sent = [];
+  listeners = new Map();
+
+  constructor(url, options) {
+    this.url = url;
+    this.options = options;
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  send(data) {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close() {
+    this.readyState = 3;
+    this.emit("close", {});
+  }
+
+  open() {
+    this.readyState = 1;
+    this.emit("open", {});
+  }
+
+  message(value) {
+    this.emit("message", { data: JSON.stringify(value) });
+  }
+
+  emit(type, event) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+    }
+  }
+}
+
+function nextTick() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }

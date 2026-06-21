@@ -236,6 +236,19 @@ export interface RuntimePullRunResponse {
   a2a?: AgentA2AContext;
 }
 
+export interface RuntimeAssignment {
+  type?: string;
+  run_id: string;
+  agent_id?: string;
+  input?: JsonValue;
+  metadata?: JsonValue;
+  source?: string;
+  result_endpoint?: string;
+  result_method?: string;
+  result_required?: boolean;
+  a2a?: AgentA2AContext;
+}
+
 export interface AgentEvent {
   event_type: string;
   payload?: JsonValue;
