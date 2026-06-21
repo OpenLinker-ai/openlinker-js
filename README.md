@@ -71,6 +71,7 @@ Agent runtime protocol:
 - `claimRuntimeRun`
 - `completeRuntimeRun`
 - `callAgent`
+- `callAgentAt`
 
 The package exposes runtime protocol types, but it does not include adapters
 such as command, Codex, OpenClaw, or local HTTP backend runners.

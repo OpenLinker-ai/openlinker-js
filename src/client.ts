@@ -5,6 +5,7 @@ import type {
   CallAgentRequest,
   ClaimRuntimeRunParams,
   JsonObject,
+  JsonValue,
   ListAgentsParams,
   ListItemsResponse,
   ListRunEventsParams,
@@ -279,9 +280,17 @@ export class OpenLinkerClient {
     request: CallAgentRequest,
     options: RequestOptions = {},
   ): Promise<RunResponse> {
+    return this.callAgentAt("", request, options);
+  }
+
+  async callAgentAt(
+    endpoint: string,
+    request: CallAgentRequest,
+    options: RequestOptions = {},
+  ): Promise<RunResponse> {
     return this.request(
       "POST",
-      "/agent-runtime/call-agent",
+      endpoint || "/agent-runtime/call-agent",
       toCallAgentRequestBody(request),
       await this.withRuntimeToken(options),
     );
@@ -333,8 +342,15 @@ export class OpenLinkerClient {
   }
 
   private url(path: string, query?: URLSearchParams): string {
-    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    const url = new URL(`${this.baseUrl}/api/v1${normalizedPath}`);
+    let url: URL;
+    if (path.startsWith("http://") || path.startsWith("https://")) {
+      url = new URL(path);
+    } else {
+      const normalizedPath = path
+        .replace(/^\/+/, "")
+        .replace(/^api\/v1\/?/, "");
+      url = new URL(`${this.baseUrl}/api/v1/${normalizedPath}`);
+    }
     query?.forEach((value, key) => {
       url.searchParams.append(key, value);
     });
@@ -398,8 +414,8 @@ function appendQuery(
 
 function toRunRequestBody(request: RunAgentRequest): {
   agent_id: string;
-  input: JsonObject;
-  metadata?: JsonObject;
+  input: JsonValue;
+  metadata?: JsonValue;
 } {
   return {
     agent_id: request.agentId,
@@ -413,8 +429,8 @@ function toCallAgentRequestBody(request: CallAgentRequest): {
   parent_run_id?: string;
   target_agent_id: string;
   reason?: string;
-  input: JsonObject;
-  metadata?: JsonObject;
+  input: JsonValue;
+  metadata?: JsonValue;
 } {
   return {
     ...(request.currentRunId ? { current_run_id: request.currentRunId } : {}),

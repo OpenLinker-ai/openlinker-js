@@ -213,14 +213,20 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     reason: "delegate",
     input: { query: "child" },
   });
+  const childAt = await client.callAgentAt("/api/v1/agent-runtime/call-agent", {
+    currentRunId: "run-1",
+    targetAgentId: "target-agent",
+    input: "child",
+  });
 
   assert.equal(heartbeat.agent_id, "agent-1");
   assert.equal(claimed.run_id, "run-1");
   assert.equal(completed.run_id, "run-1");
   assert.equal(child.run_id, "child-1");
+  assert.equal(childAt.run_id, "child-1");
   assert.deepEqual(
     calls.map((call) => call.headers.get("authorization")),
-    ["Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime"],
+    ["Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime"],
   );
   assert.equal(calls[1].url, "https://core.example.com/api/v1/agent-runtime/runs/claim?wait=25");
   assert.deepEqual(calls[2].body, {
@@ -234,6 +240,12 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     target_agent_id: "target-agent",
     reason: "delegate",
     input: { query: "child" },
+  });
+  assert.equal(calls[4].url, "https://core.example.com/api/v1/agent-runtime/call-agent");
+  assert.deepEqual(calls[4].body, {
+    current_run_id: "run-1",
+    target_agent_id: "target-agent",
+    input: "child",
   });
 });
 

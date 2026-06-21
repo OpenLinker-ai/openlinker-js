@@ -128,14 +128,14 @@ export interface AgentCardResponse {
 
 export interface RunAgentRequest {
   agentId: string;
-  input: JsonObject;
-  metadata?: JsonObject;
+  input: JsonValue;
+  metadata?: JsonValue;
 }
 
 export interface RunResponse {
   run_id: string;
   status: RunStatus | string;
-  output?: JsonObject;
+  output?: JsonValue;
   error_code?: string;
   error_message?: string;
   cost_cents: number;
@@ -144,9 +144,9 @@ export interface RunResponse {
   parent_run_id?: string;
   caller_agent_id?: string;
   billing_mode?: string;
-  requirement_evidence?: JsonObject;
-  evidence_summary?: JsonObject;
-  next_action?: JsonObject;
+  requirement_evidence?: JsonValue;
+  evidence_summary?: JsonValue;
+  next_action?: JsonValue;
 }
 
 export interface RunEventResponse {
@@ -155,7 +155,7 @@ export interface RunEventResponse {
   parent_run_id?: string;
   sequence: number;
   event_type: string;
-  payload: JsonObject;
+  payload: JsonValue;
   created_at: string;
 }
 
@@ -173,7 +173,7 @@ export interface RunArtifactResponse {
   run_id: string;
   artifact_type: string;
   title: string;
-  content: JsonObject;
+  content: JsonValue;
   visibility: string;
   source_artifact_id?: string;
   mime_type?: string;
@@ -190,7 +190,7 @@ export interface RunMessageResponse {
   event_sequence?: number;
   role: string;
   content: string;
-  payload: JsonObject;
+  payload: JsonValue;
   created_at: string;
 }
 
@@ -227,8 +227,8 @@ export interface ClaimRuntimeRunParams {
 export interface RuntimePullRunResponse {
   run_id: string;
   agent_id: string;
-  input: JsonObject;
-  metadata?: JsonObject;
+  input: JsonValue;
+  metadata?: JsonValue;
   source: string;
   result_endpoint: string;
   result_method: string;
@@ -238,7 +238,7 @@ export interface RuntimePullRunResponse {
 
 export interface AgentEvent {
   event_type: string;
-  payload?: JsonObject;
+  payload?: JsonValue;
 }
 
 export interface AgentError {
@@ -248,7 +248,7 @@ export interface AgentError {
 
 export interface RuntimePullResultRequest {
   status: "success" | "failed" | "timeout";
-  output?: JsonObject;
+  output?: JsonValue;
   events?: AgentEvent[];
   error?: AgentError;
   duration_ms?: number;
@@ -259,8 +259,8 @@ export interface CallAgentRequest {
   parentRunId?: string;
   targetAgentId: string;
   reason?: string;
-  input: JsonObject;
-  metadata?: JsonObject;
+  input: JsonValue;
+  metadata?: JsonValue;
 }
 
 export interface RuntimeWSClientMessage {
@@ -268,9 +268,9 @@ export interface RuntimeWSClientMessage {
   id?: string;
   run_id?: string;
   event_type?: string;
-  payload?: JsonObject;
+  payload?: JsonValue;
   status?: string;
-  output?: JsonObject;
+  output?: JsonValue;
   events?: AgentEvent[];
   error?: AgentError;
   duration_ms?: number;
@@ -281,8 +281,8 @@ export interface RuntimeWSServerMessage {
   id?: string;
   run_id?: string;
   agent_id?: string;
-  input?: JsonObject;
-  metadata?: JsonObject;
+  input?: JsonValue;
+  metadata?: JsonValue;
   source?: string;
   result_endpoint?: string;
   result_method?: string;
