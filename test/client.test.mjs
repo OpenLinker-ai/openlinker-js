@@ -387,6 +387,47 @@ test("connectRuntimeWebSocket handles assignment and sends event/result", async 
   connection.close();
 });
 
+test("connectRuntimeWebSocket reconnects after close", async () => {
+  const sockets = [];
+  const assignments = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    runtimeToken: "ol_live_ws",
+    fetch: async () => {
+      throw new Error("fetch should not be used for websocket");
+    },
+  });
+
+  const connection = await client.connectRuntimeWebSocket({
+    onAssigned: (assignment) => assignments.push(assignment),
+  }, {
+    reconnect: true,
+    reconnectMinMs: 1,
+    reconnectMaxMs: 2,
+    webSocketFactory: (url, options) => {
+      const socket = new FakeRuntimeWebSocket(url, options);
+      sockets.push(socket);
+      return socket;
+    },
+  });
+
+  sockets[0].open();
+  await connection.ready;
+  sockets[0].close();
+  await waitFor(() => sockets.length === 2);
+  sockets[1].open();
+  sockets[1].message({
+    type: "run.assigned",
+    run_id: "run-reconnect",
+    input: "after reconnect",
+  });
+  await waitFor(() => assignments.length === 1);
+
+  assert.equal(assignments[0].run_id, "run-reconnect");
+  assert.equal(assignments[0].input, "after reconnect");
+  connection.close();
+});
+
 function jsonResponse(body, init = {}) {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
@@ -439,4 +480,14 @@ class FakeRuntimeWebSocket {
 
 function nextTick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function waitFor(predicate, timeoutMs = 1000) {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("timed out waiting for condition");
+    }
+    await nextTick();
+  }
 }
