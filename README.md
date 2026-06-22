@@ -77,9 +77,9 @@ Agent runtime protocol:
 - `connectRuntimeWebSocket`
 
 The package includes the base runtime integration layer: pull loop, websocket
-connect/reconnect, assignment callbacks, `run.event`, and `run.result`
-submission. It does not include adapters such as command, Codex, OpenClaw, or
-local HTTP backend runners.
+connect/reconnect, heartbeat messages, assignment callbacks, `run.event`, and
+`run.result` submission. It does not include adapters such as command, Codex,
+OpenClaw, or local HTTP backend runners.
 
 ## Development
 

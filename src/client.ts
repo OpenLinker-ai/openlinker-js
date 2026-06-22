@@ -102,6 +102,7 @@ export type RuntimeWebSocketFactory = (
 
 export interface RuntimeWebSocketOptions extends RequestOptions {
   endpoint?: string | undefined;
+  heartbeatMs?: number | undefined;
   reconnect?: boolean | undefined;
   reconnectMinMs?: number | undefined;
   reconnectMaxMs?: number | undefined;
@@ -745,6 +746,7 @@ class RuntimeWebSocketConnectionImpl implements RuntimeWebSocketConnection {
   readonly #webSocketFactory: RuntimeWebSocketFactory;
   #socket: RuntimeWebSocketLike | undefined;
   #closed = false;
+  #heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   #reconnectDelayMs: number;
   #resolveReady!: () => void;
   #readyResolved = false;
@@ -772,6 +774,7 @@ class RuntimeWebSocketConnectionImpl implements RuntimeWebSocketConnection {
 
   close(code?: number, reason?: string): void {
     this.#closed = true;
+    this.#stopHeartbeat();
     this.#socket?.close(code, reason);
   }
 
@@ -813,6 +816,7 @@ class RuntimeWebSocketConnectionImpl implements RuntimeWebSocketConnection {
         this.#readyResolved = true;
         this.#resolveReady();
       }
+      this.#startHeartbeat(socket);
     });
     this.#listen(socket, "message", (event) => {
       void this.#handleMessage((event as { data?: unknown }).data);
@@ -821,6 +825,7 @@ class RuntimeWebSocketConnectionImpl implements RuntimeWebSocketConnection {
       void this.#handlers.onError?.(event);
     });
     this.#listen(socket, "close", () => {
+      this.#stopHeartbeat();
       if (!this.#closed && this.#options.reconnect !== false) {
         this.#scheduleReconnect();
       }
@@ -854,6 +859,35 @@ class RuntimeWebSocketConnectionImpl implements RuntimeWebSocketConnection {
     const maxDelay = this.#options.reconnectMaxMs ?? 10_000;
     this.#reconnectDelayMs = Math.min(delay * 2, maxDelay);
     setTimeout(() => this.#connect(), delay);
+  }
+
+  #startHeartbeat(socket: RuntimeWebSocketLike): void {
+    this.#stopHeartbeat();
+    const heartbeatMs = this.#options.heartbeatMs ?? 60_000;
+    if (heartbeatMs <= 0) {
+      return;
+    }
+    this.#heartbeatTimer = setInterval(() => {
+      if (this.#closed || this.#socket !== socket) {
+        return;
+      }
+      try {
+        this.#send({
+          type: "heartbeat",
+          id: `heartbeat-${Date.now()}`,
+        });
+      } catch (error) {
+        void this.#handlers.onError?.(error);
+      }
+    }, heartbeatMs);
+  }
+
+  #stopHeartbeat(): void {
+    if (this.#heartbeatTimer === undefined) {
+      return;
+    }
+    clearInterval(this.#heartbeatTimer);
+    this.#heartbeatTimer = undefined;
   }
 
   async #handleMessage(raw: unknown): Promise<void> {

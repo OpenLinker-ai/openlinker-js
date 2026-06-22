@@ -69,6 +69,65 @@ test("runAgent maps camelCase input to Core request body", async () => {
   });
 });
 
+test("endpoint helpers encode paths, queries, and async headers", async () => {
+  const calls = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com/api/v1/",
+    accessToken: async () => "ol_live_async",
+    headers: async () => ({ "x-default": "base" }),
+    fetch: async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init.method,
+        headers: new Headers(init.headers),
+        body: init.body ? JSON.parse(init.body) : undefined,
+      });
+      return jsonResponse({
+        run_id: "run-helper",
+        status: "success",
+        output: { ok: true },
+        cost_cents: 0,
+        duration_ms: 1,
+        items: [],
+        events: [],
+      });
+    },
+  });
+
+  await client.getAgent("agent/one");
+  await client.getAgentCard("agent/one", { extended: true });
+  await client.startAgentRun({
+    agentId: "agent-1",
+    input: "hello",
+    metadata: { trace_id: "trace-helper" },
+  }, {
+    headers: { authorization: "Bearer ol_override", "x-default": "override" },
+  });
+  await client.getRun("run helper");
+  await client.listRunEvents("run helper", { afterSequence: 2, limit: 10 });
+  await client.listRunArtifacts("run helper");
+  await client.listRunMessages("run helper");
+
+  assert.deepEqual(calls.map((call) => call.url), [
+    "https://core.example.com/api/v1/agents/agent%2Fone",
+    "https://core.example.com/api/v1/agents/agent%2Fone/agent-card.extended.json",
+    "https://core.example.com/api/v1/runs",
+    "https://core.example.com/api/v1/runs/run%20helper",
+    "https://core.example.com/api/v1/runs/run%20helper/events?after_sequence=2&limit=10",
+    "https://core.example.com/api/v1/runs/run%20helper/artifacts",
+    "https://core.example.com/api/v1/runs/run%20helper/messages",
+  ]);
+  assert.deepEqual(calls[2].body, {
+    agent_id: "agent-1",
+    input: "hello",
+    metadata: { trace_id: "trace-helper" },
+  });
+  assert.equal(calls[0].headers.get("authorization"), "Bearer ol_live_async");
+  assert.equal(calls[2].headers.get("authorization"), "Bearer ol_override");
+  assert.equal(calls[2].headers.get("x-default"), "override");
+  assert.equal(calls[2].headers.get("content-type"), "application/json");
+});
+
 test("standard Core errors become OpenLinkerError", async () => {
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
@@ -93,6 +152,44 @@ test("standard Core errors become OpenLinkerError", async () => {
       assert.equal(error.message, "missing scope");
       assert.equal(error.requestId, "req-1");
       assert.deepEqual(error.details, { scope: "agents:run" });
+      return true;
+    },
+  );
+});
+
+test("fallback Core errors and 204 responses preserve retry metadata", async () => {
+  const retryAt = new Date(Date.now() + 2_000).toUTCString();
+  let requestCount = 0;
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    accessToken: "ol_live_user",
+    fetch: async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response(null, { status: 204 });
+      }
+      return new Response("temporarily unavailable", {
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: {
+          "retry-after": retryAt,
+          "x-correlation-id": "corr-1",
+        },
+      });
+    },
+  });
+
+  assert.equal(await client.completeRuntimeRun("run-204", { status: "success" }), undefined);
+  await assert.rejects(
+    () => client.getRun("run-503"),
+    (error) => {
+      assert.ok(error instanceof OpenLinkerError);
+      assert.equal(error.status, 503);
+      assert.equal(error.code, "HTTP_503");
+      assert.equal(error.message, "Service Unavailable");
+      assert.equal(error.requestId, "corr-1");
+      assert.equal(error.responseBody, "temporarily unavailable");
+      assert.ok(error.retryAfterMs > 0 && error.retryAfterMs <= 10_000);
       return true;
     },
   );
@@ -140,6 +237,49 @@ test("streamRunEvents parses run SSE events", async () => {
   assert.equal(events[0].event, "run.completed");
   assert.deepEqual(events[0].data.payload, { ok: true });
   assert.equal(closed, true);
+});
+
+test("streamRunEvents handles comments, plain text, buffered lines, and missing bodies", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        ": keep-alive",
+        "event: run.message.delta",
+        "data: plain text",
+        "",
+        "event:",
+        "data: {\"ok\":true}",
+      ].join("\r\n")));
+      controller.close();
+    },
+  });
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (url) => {
+      if (String(url).includes("missing-body")) {
+        return new Response(null, { status: 200 });
+      }
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+
+  const events = [];
+  await client.streamRunEvents("run-plain", {
+    onEvent: (event) => events.push(event),
+  });
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].event, "run.message.delta");
+  assert.equal(events[0].data, "plain text");
+  assert.equal(events[1].event, "message");
+  assert.deepEqual(events[1].data, { ok: true });
+  await assert.rejects(
+    () => client.streamRunEvents("missing-body"),
+    /does not expose a body/,
+  );
 });
 
 test("runtime methods use runtime token and protocol endpoints", async () => {
@@ -267,6 +407,59 @@ test("claimRuntimeRun returns undefined on empty 204 claim", async () => {
   assert.equal(detailed.run, undefined);
   assert.equal(detailed.retryAfterMs, 3000);
   assert.equal(detailed.maxClaimWaitSeconds, 30);
+});
+
+test("runRuntimePullLoop reports heartbeat and claim errors before stopOnEmpty", async () => {
+  const errors = [];
+  let heartbeatCalls = 0;
+  let claimCalls = 0;
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    runtimeToken: "ol_live_runtime",
+    fetch: async (url) => {
+      if (String(url).endsWith("/agent-runtime/heartbeat")) {
+        heartbeatCalls += 1;
+        if (heartbeatCalls === 1) {
+          return jsonResponse({ error: { code: "HEARTBEAT_BUSY", message: "busy" } }, { status: 503 });
+        }
+        return jsonResponse({
+          agent_id: "agent-1",
+          availability_status: "healthy",
+          consecutive_failures: 0,
+          pending_run_count: 0,
+          claim_now: false,
+          next_claim_after_seconds: 1,
+          recommended_heartbeat_after_seconds: 60,
+          max_claim_wait_seconds: 30,
+        });
+      }
+      if (String(url).includes("/agent-runtime/runs/claim")) {
+        claimCalls += 1;
+        if (claimCalls === 1) {
+          return jsonResponse({ error: { code: "CLAIM_BACKOFF", message: "back off" } }, { status: 429 });
+        }
+        return new Response(null, {
+          status: 204,
+          headers: { "retry-after": "0" },
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await client.runRuntimePullLoop({
+    onError: (error) => errors.push(error),
+  }, {
+    waitSeconds: 1,
+    heartbeatMs: 0,
+    emptyRetryMs: 1,
+    stopOnEmpty: true,
+  });
+
+  assert.equal(heartbeatCalls, 2);
+  assert.equal(claimCalls, 2);
+  assert.equal(errors.length, 2);
+  assert.deepEqual(errors.map((error) => error.code), ["HEARTBEAT_BUSY", "CLAIM_BACKOFF"]);
 });
 
 test("runRuntimePullLoop claims assignments with runtime token", async () => {
@@ -428,6 +621,90 @@ test("connectRuntimeWebSocket reconnects after close", async () => {
   connection.close();
 });
 
+test("connectRuntimeWebSocket sends heartbeats and reports edge errors", async () => {
+  let socket;
+  let connection;
+  const messages = [];
+  const errors = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    runtimeToken: "ol_live_ws",
+    fetch: async () => {
+      throw new Error("fetch should not be used for websocket");
+    },
+  });
+
+  try {
+    connection = await client.connectRuntimeWebSocket({
+      onMessage: (message) => messages.push(message),
+      onError: (error) => errors.push(error),
+    }, {
+      endpoint: "ws://runtime.example.test/ws",
+      heartbeatMs: 1,
+      reconnect: false,
+      protocols: ["openlinker-runtime"],
+      webSocketFactory: (url, options) => {
+        socket = new LegacyRuntimeWebSocket(url, options);
+        return socket;
+      },
+    });
+
+    assert.equal(socket.url, "ws://runtime.example.test/ws");
+    assert.deepEqual(socket.options.protocols, ["openlinker-runtime"]);
+    socket.open();
+    await connection.ready;
+    await waitFor(() => socket.sent.some((message) => message.type === "heartbeat"));
+
+    socket.messageBuffer({ type: "error", error: { code: "RUNTIME_BAD", message: "bad runtime" } });
+    socket.message({ type: "error", error: { message: "loose runtime" } });
+    socket.messageRaw("{");
+    socket.error({ type: "network-error" });
+    await waitFor(() => errors.length >= 4 && messages.length >= 2);
+
+    const errorMessages = errors.map((error) => error?.message ?? JSON.stringify(error)).join("\n");
+    assert.match(errorMessages, /RUNTIME_BAD: bad runtime/);
+    assert.match(errorMessages, /loose runtime/);
+    assert.ok(errors.some((error) => error instanceof SyntaxError));
+    assert.ok(errors.some((error) => error?.type === "network-error"));
+
+    socket.close();
+    assert.throws(
+      () => connection.sendRunEvent("run-closed", { event_type: "run.message.delta" }),
+      /runtime websocket is not open/,
+    );
+  } finally {
+    connection?.close();
+  }
+});
+
+test("connectRuntimeWebSocket requires a WebSocket implementation by default", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
+  Object.defineProperty(globalThis, "WebSocket", {
+    configurable: true,
+    writable: true,
+    value: undefined,
+  });
+  try {
+    const client = new OpenLinkerClient({
+      baseUrl: "https://core.example.com",
+      runtimeToken: "ol_live_ws",
+      fetch: async () => {
+        throw new Error("fetch should not be used for websocket");
+      },
+    });
+    await assert.rejects(
+      () => client.connectRuntimeWebSocket({}, { reconnect: false }),
+      /requires a WebSocket implementation/,
+    );
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(globalThis, "WebSocket", descriptor);
+    } else {
+      delete globalThis.WebSocket;
+    }
+  }
+});
+
 function jsonResponse(body, init = {}) {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
@@ -475,6 +752,50 @@ class FakeRuntimeWebSocket {
     for (const listener of this.listeners.get(type) ?? []) {
       listener(event);
     }
+  }
+}
+
+class LegacyRuntimeWebSocket {
+  readyState = 0;
+  sent = [];
+  onopen = null;
+  onmessage = null;
+  onerror = null;
+  onclose = null;
+
+  constructor(url, options) {
+    this.url = url;
+    this.options = options;
+  }
+
+  send(data) {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close() {
+    this.readyState = 3;
+    this.onclose?.({});
+  }
+
+  open() {
+    this.readyState = 1;
+    this.onopen?.({});
+  }
+
+  message(value) {
+    this.messageRaw(JSON.stringify(value));
+  }
+
+  messageBuffer(value) {
+    this.onmessage?.({ data: new TextEncoder().encode(JSON.stringify(value)).buffer });
+  }
+
+  messageRaw(data) {
+    this.onmessage?.({ data });
+  }
+
+  error(event) {
+    this.onerror?.(event);
   }
 }
 
