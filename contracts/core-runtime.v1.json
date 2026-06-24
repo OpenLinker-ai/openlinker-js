@@ -56,6 +56,8 @@
     "RuntimePullResultRequest",
     "RuntimeWSClientMessage",
     "RuntimeWSServerMessage",
-    "CallAgentRequest"
+    "CallAgentRequest",
+    "TaskCallbackConfig",
+    "TaskCallbackSubscription"
   ]
 }

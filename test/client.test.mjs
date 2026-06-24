@@ -352,6 +352,12 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     targetAgentId: "target-agent",
     reason: "delegate",
     input: { query: "child" },
+    taskCallback: {
+      url: "https://caller.example.com/a2a/events",
+      token: "caller-token",
+      eventTypes: ["run.completed", "run.failed", "run.canceled"],
+      metadata: { client: "js-sdk" },
+    },
   });
   const childAt = await client.callAgentAt("/api/v1/agent-runtime/call-agent", {
     currentRunId: "run-1",
@@ -380,6 +386,12 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     target_agent_id: "target-agent",
     reason: "delegate",
     input: { query: "child" },
+    task_callback: {
+      url: "https://caller.example.com/a2a/events",
+      token: "caller-token",
+      eventTypes: ["run.completed", "run.failed", "run.canceled"],
+      metadata: { client: "js-sdk" },
+    },
   });
   assert.equal(calls[4].url, "https://core.example.com/api/v1/agent-runtime/call-agent");
   assert.deepEqual(calls[4].body, {

@@ -582,7 +582,9 @@ function toCallAgentRequestBody(request: CallAgentRequest): {
   reason?: string;
   input: JsonValue;
   metadata?: JsonValue;
+  task_callback?: JsonValue;
 } {
+  const taskCallback = request.taskCallback ?? request.pushNotification ?? request.pushNotificationConfig;
   return {
     ...(request.currentRunId ? { current_run_id: request.currentRunId } : {}),
     ...(request.parentRunId ? { parent_run_id: request.parentRunId } : {}),
@@ -590,7 +592,24 @@ function toCallAgentRequestBody(request: CallAgentRequest): {
     ...(request.reason ? { reason: request.reason } : {}),
     input: request.input,
     ...(request.metadata ? { metadata: request.metadata } : {}),
+    ...(taskCallback ? { task_callback: toTaskCallbackBody(taskCallback) } : {}),
   };
+}
+
+function toTaskCallbackBody(config: NonNullable<CallAgentRequest["taskCallback"]>): JsonObject {
+  const body: JsonObject = {};
+  if (config.url) body.url = config.url;
+  if (config.token) body.token = config.token;
+  if (config.authentication) {
+    body.authentication = {
+      ...(config.authentication.scheme ? { scheme: config.authentication.scheme } : {}),
+      ...(config.authentication.credentials ? { credentials: config.authentication.credentials } : {}),
+    };
+  }
+  if (config.metadata) body.metadata = config.metadata;
+  if (config.eventTypes) body.eventTypes = config.eventTypes;
+  if (config.event_types) body.event_types = config.event_types;
+  return body;
 }
 
 async function resolveMaybe<T>(

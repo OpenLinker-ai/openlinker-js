@@ -132,6 +132,33 @@ export interface RunAgentRequest {
   metadata?: JsonValue;
 }
 
+export interface TaskCallbackAuthentication {
+  scheme?: string;
+  credentials?: string;
+}
+
+export interface TaskCallbackConfig {
+  url?: string;
+  token?: string;
+  authentication?: TaskCallbackAuthentication;
+  metadata?: JsonValue;
+  eventTypes?: string[];
+  event_types?: string[];
+}
+
+export interface TaskCallbackSubscription {
+  id: string;
+  run_id: string;
+  target_url: string;
+  event_types: string[];
+  auth_scheme?: string;
+  status: string;
+  consecutive_failures: number;
+  secret?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RunResponse {
   run_id: string;
   status: RunStatus | string;
@@ -144,6 +171,7 @@ export interface RunResponse {
   parent_run_id?: string;
   caller_agent_id?: string;
   billing_mode?: string;
+  task_callback?: TaskCallbackSubscription;
   requirement_evidence?: JsonValue;
   evidence_summary?: JsonValue;
   next_action?: JsonValue;
@@ -274,6 +302,9 @@ export interface CallAgentRequest {
   reason?: string;
   input: JsonValue;
   metadata?: JsonValue;
+  taskCallback?: TaskCallbackConfig;
+  pushNotification?: TaskCallbackConfig;
+  pushNotificationConfig?: TaskCallbackConfig;
 }
 
 export interface RuntimeWSClientMessage {
