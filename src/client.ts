@@ -16,10 +16,12 @@ import type {
   RuntimePullResultRequest,
   RuntimePullRunResponse,
   RuntimeWSServerMessage,
+  PlatformRunCallbackConfig,
   RunAgentRequest,
   RunArtifactResponse,
   RunMessageResponse,
   RunResponse,
+  TaskCallbackConfig,
 } from "./types.js";
 
 export type FetchLike = (
@@ -223,11 +225,38 @@ export class OpenLinkerClient {
     return this.request("POST", "/run", toRunRequestBody(request), options);
   }
 
+  async runAgentWithCallbacks(
+    request: RunAgentRequest,
+    options: RequestOptions = {},
+  ): Promise<RunResponse> {
+    const callback = platformCallbackFromRunRequest(request);
+    if (!callback) {
+      return this.runAgent(request, options);
+    }
+    const started = await this.startAgentRun(request, options);
+    await this.streamPlatformRunCallbacks(started.run_id, callback, options, true);
+    return this.getRun(started.run_id, options);
+  }
+
   async startAgentRun(
     request: RunAgentRequest,
     options: RequestOptions = {},
   ): Promise<RunResponse> {
     return this.request("POST", "/runs", toRunRequestBody(request), options);
+  }
+
+  async startAgentRunWithCallbacks(
+    request: RunAgentRequest,
+    options: RequestOptions = {},
+  ): Promise<RunResponse> {
+    const started = await this.startAgentRun(request, options);
+    const callback = platformCallbackFromRunRequest(request);
+    if (callback) {
+      void this.streamPlatformRunCallbacks(started.run_id, callback, options, false).catch(async (error) => {
+        await callback.onError?.(error);
+      });
+    }
+    return started;
   }
 
   async getRun(
@@ -302,6 +331,56 @@ export class OpenLinkerClient {
     }
 
     await readEventStream(response.body, handlers);
+  }
+
+  private async streamPlatformRunCallbacks(
+    runId: string,
+    callback: PlatformRunCallbackConfig,
+    options: RequestOptions,
+    untilTerminal: boolean,
+  ): Promise<StreamRunEvent | undefined> {
+    const controller = new AbortController();
+    const externalSignal = options.signal;
+    const abortFromExternal = () => controller.abort();
+    if (externalSignal?.aborted) {
+      controller.abort();
+    } else {
+      externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+    }
+    let terminal: StreamRunEvent | undefined;
+    try {
+      const handlers: StreamRunEventHandlers = {
+        onEvent: async (event) => {
+          if (matchesPlatformCallbackEvent(callback, event)) {
+            await callback.onEvent?.(event);
+          }
+        },
+        onTerminal: async (event) => {
+          terminal = event;
+          await callback.onTerminal?.(event);
+          if (untilTerminal) {
+            controller.abort();
+          }
+        },
+      };
+      if (callback.onClose) {
+        handlers.onClose = callback.onClose;
+      }
+      await this.streamRunEvents(runId, {
+        ...handlers,
+      }, {
+        ...options,
+        signal: controller.signal,
+        afterSequence: callback.afterSequence,
+      });
+    } catch (error) {
+      if (!(untilTerminal && terminal && isAbortError(error))) {
+        throw error;
+      }
+    } finally {
+      externalSignal?.removeEventListener("abort", abortFromExternal);
+    }
+    return terminal;
   }
 
   async heartbeatAgent(
@@ -567,12 +646,41 @@ function toRunRequestBody(request: RunAgentRequest): {
   agent_id: string;
   input: JsonValue;
   metadata?: JsonValue;
+  task_callback?: JsonValue;
 } {
+  const taskCallback = webhookCallbackFromRunRequest(request)
+    ?? request.taskCallback
+    ?? request.pushNotification
+    ?? request.pushNotificationConfig;
   return {
     agent_id: request.agentId,
     input: request.input,
     ...(request.metadata ? { metadata: request.metadata } : {}),
+    ...(taskCallback ? { task_callback: toTaskCallbackBody(taskCallback) } : {}),
   };
+}
+
+function webhookCallbackFromRunRequest(request: RunAgentRequest): TaskCallbackConfig | undefined {
+  const callback = request.callback;
+  if (!callback) return undefined;
+  if ("mode" in callback && callback.mode === "webhook") return callback;
+  if ("url" in callback && callback.url) return callback as TaskCallbackConfig;
+  return undefined;
+}
+
+function platformCallbackFromRunRequest(request: RunAgentRequest): PlatformRunCallbackConfig | undefined {
+  const callback = request.callback;
+  if (!callback) return undefined;
+  if ("mode" in callback && callback.mode === "webhook") return undefined;
+  if ("url" in callback && callback.url) return undefined;
+  return callback as PlatformRunCallbackConfig;
+}
+
+function matchesPlatformCallbackEvent(
+  callback: PlatformRunCallbackConfig,
+  event: StreamRunEvent,
+): boolean {
+  return !callback.eventTypes?.length || callback.eventTypes.includes(event.event);
 }
 
 function toCallAgentRequestBody(request: CallAgentRequest): {
@@ -596,10 +704,11 @@ function toCallAgentRequestBody(request: CallAgentRequest): {
   };
 }
 
-function toTaskCallbackBody(config: NonNullable<CallAgentRequest["taskCallback"]>): JsonObject {
+function toTaskCallbackBody(config: TaskCallbackConfig): JsonObject {
   const body: JsonObject = {};
   if (config.url) body.url = config.url;
   if (config.token) body.token = config.token;
+  if (config.secret) body.secret = config.secret;
   if (config.authentication) {
     body.authentication = {
       ...(config.authentication.scheme ? { scheme: config.authentication.scheme } : {}),

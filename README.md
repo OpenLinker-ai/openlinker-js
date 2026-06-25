@@ -44,6 +44,58 @@ await openlinker.streamRunEvents(run.run_id, {
 });
 ```
 
+Platform-hosted callbacks do not require a public callback URL:
+
+```ts
+const result = await openlinker.runAgentWithCallbacks({
+  agentId: agents.items[0].id,
+  input: { query: "Summarize this dataset" },
+  callback: {
+    mode: "platform",
+    eventTypes: ["run.message.delta"],
+    onEvent(event) {
+      console.log("callback", event);
+    },
+  },
+});
+```
+
+External webhook callbacks are still available for server integrations. The
+SDK builds the callback config and can generate a signing secret when one is
+not supplied:
+
+```ts
+import { createWebhookRunCallback } from "@openlinker/sdk";
+
+const callback = createWebhookRunCallback({
+  url: process.env.OPENLINKER_CALLBACK_URL!,
+  secret: process.env.OPENLINKER_CALLBACK_SECRET,
+  eventTypes: ["run.completed", "run.failed"],
+});
+
+await openlinker.startAgentRun({
+  agentId: agents.items[0].id,
+  input: { query: "Summarize this dataset" },
+  callback,
+});
+```
+
+Use the same secret in your webhook handler to verify the raw request body:
+
+```ts
+import { verifyTaskCallbackHeaders } from "@openlinker/sdk";
+
+const rawBody = await request.text();
+const ok = await verifyTaskCallbackHeaders(
+  rawBody,
+  process.env.OPENLINKER_CALLBACK_SECRET!,
+  request.headers,
+);
+if (!ok) {
+  return new Response("invalid signature", { status: 401 });
+}
+```
+
 ## Core Surface
 
 The interim contract source is
@@ -58,7 +110,9 @@ Application-side calls:
 - `getAgent`
 - `getAgentCard`
 - `runAgent`
+- `runAgentWithCallbacks`
 - `startAgentRun`
+- `startAgentRunWithCallbacks`
 - `getRun`
 - `listRunEvents`
 - `listRunArtifacts`

@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { OpenLinkerClient, OpenLinkerError } from "../dist/index.js";
+import {
+  OpenLinkerClient,
+  OpenLinkerError,
+  createWebhookRunCallback,
+  generateTaskCallbackSecret,
+  signTaskCallbackPayload,
+  taskCallbackSignatureFromHeaders,
+  verifyTaskCallbackHeaders,
+  verifyTaskCallbackSignature,
+} from "../dist/index.js";
 
 test("listAgents builds Core API URL and authorization header", async () => {
   const calls = [];
@@ -58,6 +67,13 @@ test("runAgent maps camelCase input to Core request body", async () => {
     agentId: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     metadata: { trace_id: "trace-1" },
+    pushNotificationConfig: {
+      url: "https://caller.example.com/a2a/events",
+      token: "caller-token",
+      secret: "caller-secret",
+      eventTypes: ["run.completed", "run.failed"],
+      metadata: { client: "js-sdk" },
+    },
   });
 
   assert.equal(response.run_id, "run-1");
@@ -66,7 +82,170 @@ test("runAgent maps camelCase input to Core request body", async () => {
     agent_id: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     metadata: { trace_id: "trace-1" },
+    task_callback: {
+      url: "https://caller.example.com/a2a/events",
+      token: "caller-token",
+      secret: "caller-secret",
+      eventTypes: ["run.completed", "run.failed"],
+      metadata: { client: "js-sdk" },
+    },
   });
+});
+
+test("createWebhookRunCallback passes external callback URL and generated secret", async () => {
+  const calls = [];
+  const callback = createWebhookRunCallback({
+    url: " https://caller.example.com/openlinker/events ",
+    token: "caller-token",
+    eventTypes: ["run.completed", "run.failed"],
+    metadata: { client: "js-sdk" },
+  });
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return jsonResponse({
+        run_id: "run-webhook",
+        status: "running",
+        task_callback: {
+          id: "callback-1",
+          run_id: "run-webhook",
+          target_url: callback.url,
+          event_types: callback.eventTypes,
+          status: "active",
+          consecutive_failures: 0,
+          secret: callback.secret,
+          created_at: "2026-06-25T00:00:00Z",
+          updated_at: "2026-06-25T00:00:00Z",
+        },
+      });
+    },
+  });
+
+  assert.equal(callback.url, "https://caller.example.com/openlinker/events");
+  assert.match(callback.secret, /^[0-9a-f]{64}$/);
+
+  await client.startAgentRun({
+    agentId: "00000000-0000-0000-0000-000000000001",
+    input: { query: "hello" },
+    callback,
+  });
+
+  assert.equal(calls[0].url, "https://core.example.com/api/v1/runs");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    agent_id: "00000000-0000-0000-0000-000000000001",
+    input: { query: "hello" },
+    task_callback: {
+      url: "https://caller.example.com/openlinker/events",
+      token: "caller-token",
+      secret: callback.secret,
+      eventTypes: ["run.completed", "run.failed"],
+      metadata: { client: "js-sdk" },
+    },
+  });
+});
+
+test("task callback signature helpers verify external webhook payloads", async () => {
+  const secret = generateTaskCallbackSecret();
+  const payload = JSON.stringify({
+    event_type: "run.completed",
+    run_id: "run-1",
+  });
+  const signature = await signTaskCallbackPayload(payload, secret);
+  const headerValue = `sha256=${signature}`;
+
+  assert.match(secret, /^[0-9a-f]{64}$/);
+  assert.equal(await verifyTaskCallbackSignature(payload, secret, headerValue), true);
+  assert.equal(await verifyTaskCallbackSignature(payload + "\n", secret, headerValue), false);
+  assert.equal(
+    await verifyTaskCallbackHeaders(
+      payload,
+      secret,
+      new Headers({ "X-OpenLinker-Signature": headerValue }),
+    ),
+    true,
+  );
+  assert.equal(
+    await verifyTaskCallbackHeaders(payload, secret, { "x-openlinker-signature": headerValue }),
+    true,
+  );
+  assert.equal(taskCallbackSignatureFromHeaders({ "x-openlinker-signature": [headerValue] }), headerValue);
+});
+
+test("runAgentWithCallbacks uses platform run stream without external callback URL", async () => {
+  const calls = [];
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode([
+        "id: 1",
+        "event: run.message.delta",
+        'data: {"event_id":"event-1","run_id":"run-platform","sequence":1,"event_type":"run.message.delta","payload":{"text":"working"},"created_at":"2026-06-21T00:00:00Z"}',
+        "",
+        "id: 2",
+        "event: run.completed",
+        'data: {"event_id":"event-2","run_id":"run-platform","sequence":2,"event_type":"run.completed","payload":{"status":"success"},"created_at":"2026-06-21T00:00:01Z"}',
+        "",
+        "",
+      ].join("\n")));
+      controller.close();
+    },
+  });
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "https://core.example.com/api/v1/runs") {
+        return jsonResponse({
+          run_id: "run-platform",
+          status: "running",
+          cost_cents: 0,
+          duration_ms: 0,
+        });
+      }
+      if (String(url) === "https://core.example.com/api/v1/runs/run-platform/stream") {
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      if (String(url) === "https://core.example.com/api/v1/runs/run-platform") {
+        return jsonResponse({
+          run_id: "run-platform",
+          status: "success",
+          output: { ok: true },
+          cost_cents: 0,
+          duration_ms: 12,
+        });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  const events = [];
+  const terminal = [];
+  const response = await client.runAgentWithCallbacks({
+    agentId: "00000000-0000-0000-0000-000000000001",
+    input: { query: "hello" },
+    callback: {
+      mode: "platform",
+      eventTypes: ["run.message.delta"],
+      onEvent: (event) => events.push(event),
+      onTerminal: (event) => terminal.push(event),
+    },
+  });
+
+  assert.equal(response.status, "success");
+  assert.equal(calls[0].url, "https://core.example.com/api/v1/runs");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    agent_id: "00000000-0000-0000-0000-000000000001",
+    input: { query: "hello" },
+  });
+  assert.equal(calls[1].url, "https://core.example.com/api/v1/runs/run-platform/stream");
+  assert.equal(calls[2].url, "https://core.example.com/api/v1/runs/run-platform");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].event, "run.message.delta");
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].event, "run.completed");
 });
 
 test("endpoint helpers encode paths, queries, and async headers", async () => {
@@ -355,6 +534,7 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     taskCallback: {
       url: "https://caller.example.com/a2a/events",
       token: "caller-token",
+      secret: "caller-secret",
       eventTypes: ["run.completed", "run.failed", "run.canceled"],
       metadata: { client: "js-sdk" },
     },
@@ -389,6 +569,7 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     task_callback: {
       url: "https://caller.example.com/a2a/events",
       token: "caller-token",
+      secret: "caller-secret",
       eventTypes: ["run.completed", "run.failed", "run.canceled"],
       metadata: { client: "js-sdk" },
     },

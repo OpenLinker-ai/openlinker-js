@@ -1,4 +1,17 @@
 export { OpenLinkerClient, OpenLinkerError } from "./client.js";
+export {
+  createWebhookRunCallback,
+  generateTaskCallbackSecret,
+  signTaskCallbackPayload,
+  taskCallbackSignatureFromHeaders,
+  verifyTaskCallbackHeaders,
+  verifyTaskCallbackSignature,
+} from "./webhook.js";
+export type {
+  CreateWebhookRunCallbackOptions,
+  TaskCallbackHeaderSource,
+  TaskCallbackPayloadInput,
+} from "./webhook.js";
 export type {
   FetchLike,
   ClaimRuntimeRunResult,

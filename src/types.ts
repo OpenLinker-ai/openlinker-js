@@ -130,7 +130,27 @@ export interface RunAgentRequest {
   agentId: string;
   input: JsonValue;
   metadata?: JsonValue;
+  callback?: RunCallbackConfig;
+  taskCallback?: TaskCallbackConfig;
+  pushNotification?: TaskCallbackConfig;
+  pushNotificationConfig?: TaskCallbackConfig;
 }
+
+export interface PlatformRunCallbackConfig {
+  mode?: "platform";
+  eventTypes?: string[];
+  afterSequence?: number;
+  onEvent?: (event: unknown) => void | Promise<void>;
+  onTerminal?: (event: unknown) => void | Promise<void>;
+  onClose?: () => void | Promise<void>;
+  onError?: (error: unknown) => void | Promise<void>;
+}
+
+export interface WebhookRunCallbackConfig extends TaskCallbackConfig {
+  mode: "webhook";
+}
+
+export type RunCallbackConfig = PlatformRunCallbackConfig | WebhookRunCallbackConfig;
 
 export interface TaskCallbackAuthentication {
   scheme?: string;
@@ -140,6 +160,7 @@ export interface TaskCallbackAuthentication {
 export interface TaskCallbackConfig {
   url?: string;
   token?: string;
+  secret?: string;
   authentication?: TaskCallbackAuthentication;
   metadata?: JsonValue;
   eventTypes?: string[];
