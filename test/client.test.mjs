@@ -10,7 +10,9 @@ import {
   extractA2AText,
   generateTaskCallbackSecret,
   newA2ATextMessageParams,
+  normalizeA2ADialect,
   normalizeA2AJsonRpcMethod,
+  normalizeA2AJsonRpcMethodForDialect,
   normalizeA2ATaskState,
   signTaskCallbackPayload,
   taskCallbackSignatureFromHeaders,
@@ -50,7 +52,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
   );
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_live_test");
-  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.1");
+  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.2");
 });
 
 test("runAgent maps camelCase input to Core request body", async () => {
@@ -617,7 +619,7 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
       const body = JSON.parse(init.body);
       const headers = new Headers(init.headers);
       calls.push({ url: String(url), headers, body });
-      if (body.method === "message/send" || body.method === "tasks/get" || body.method === "tasks/cancel") {
+      if (body.method === "SendMessage" || body.method === "GetTask" || body.method === "CancelTask") {
         return jsonResponse({
           jsonrpc: "2.0",
           id: body.id,
@@ -631,14 +633,14 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
           },
         });
       }
-      if (body.method === "tasks/list") {
+      if (body.method === "ListTasks") {
         return jsonResponse({
           jsonrpc: "2.0",
           id: body.id,
           result: { tasks: [{ id: "task-a2a", status: { state: "completed" } }] },
         });
       }
-      if (body.method === "tasks/pushNotificationConfig/set" || body.method === "tasks/pushNotificationConfig/get") {
+      if (body.method === "CreateTaskPushNotificationConfig" || body.method === "GetTaskPushNotificationConfig") {
         return jsonResponse({
           jsonrpc: "2.0",
           id: body.id,
@@ -648,14 +650,14 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
           },
         });
       }
-      if (body.method === "tasks/pushNotificationConfig/list") {
+      if (body.method === "ListTaskPushNotificationConfigs") {
         return jsonResponse({
           jsonrpc: "2.0",
           id: body.id,
           result: { items: [{ taskId: "task-a2a", pushNotificationConfig: { id: "cfg-1" } }] },
         });
       }
-      if (body.method === "tasks/pushNotificationConfig/delete") {
+      if (body.method === "DeleteTaskPushNotificationConfig") {
         return jsonResponse({ jsonrpc: "2.0", id: body.id, result: null });
       }
       throw new Error(`unexpected method ${body.method}`);
@@ -687,7 +689,34 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
   assert.equal(calls[0].url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone");
   assert.equal(calls[0].headers.get("authorization"), "Bearer ol_public");
   assert.equal(calls[0].headers.get("a2a-version"), "1.0");
-  assert.equal(calls[0].body.method, "message/send");
+  assert.equal(calls[0].body.method, "SendMessage");
+  assert.equal(calls[0].body.params.message.kind, undefined);
+  assert.deepEqual(calls[0].body.params.message.parts[0], { text: "hello" });
+});
+
+test("A2A legacy dialect keeps slash methods and legacy message parts", async () => {
+  let received;
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (_url, init) => {
+      received = JSON.parse(init.body);
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: received.id,
+        result: { id: "task-legacy", status: { state: "completed" } },
+      });
+    },
+  });
+
+  await client.a2aSendMessage(
+    "agent-one",
+    newA2ATextMessageParams("msg-legacy", "legacy"),
+    { a2aDialect: "legacy" },
+  );
+
+  assert.equal(received.method, "message/send");
+  assert.equal(received.params.message.kind, "message");
+  assert.deepEqual(received.params.message.parts[0], { text: "legacy", kind: "text" });
 });
 
 test("A2A stream and JSON-RPC errors are parsed", async () => {
@@ -737,8 +766,10 @@ test("A2A stream and JSON-RPC errors are parsed", async () => {
       return true;
     },
   );
-  assert.equal(normalizeA2AJsonRpcMethod("SendMessage"), "message/send");
-  assert.equal(normalizeA2AJsonRpcMethod("ListTaskPushNotificationConfigs"), "tasks/pushNotificationConfig/list");
+  assert.equal(normalizeA2AJsonRpcMethod("SendMessage"), "SendMessage");
+  assert.equal(normalizeA2AJsonRpcMethod("ListTaskPushNotificationConfigs"), "ListTaskPushNotificationConfigs");
+  assert.equal(normalizeA2AJsonRpcMethodForDialect("SendMessage", "legacy"), "message/send");
+  assert.equal(normalizeA2ADialect("0.3"), "legacy");
   assert.equal(normalizeA2ATaskState("TASK_STATE_CANCELLED"), "canceled");
   assert.equal(a2aTaskStateRunStatus("TASK_STATE_REJECTED"), "failed");
 });

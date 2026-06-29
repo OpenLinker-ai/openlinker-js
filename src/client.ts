@@ -1,4 +1,5 @@
 import type {
+  A2ADialect,
   A2AJsonRpcResponse,
   A2AMessageSendParams,
   A2APushNotificationConfig,
@@ -54,6 +55,10 @@ export interface OpenLinkerClientOptions {
 export interface RequestOptions {
   signal?: AbortSignal | undefined;
   headers?: HeadersInit | undefined;
+}
+
+export interface A2ARequestOptions extends RequestOptions {
+  a2aDialect?: A2ADialect | undefined;
 }
 
 export interface StreamRunEventsOptions extends RequestOptions {
@@ -205,7 +210,7 @@ export class OpenLinkerClient {
     this.#runtimeToken = options.runtimeToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
-    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.1";
+    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.2";
   }
 
   async listAgents(
@@ -488,7 +493,7 @@ export class OpenLinkerClient {
     endpointOrSlug: string,
     method: string,
     params?: JsonValue,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<T> {
     const response = await this.request<A2AJsonRpcResponse<T>>(
       "POST",
@@ -496,8 +501,8 @@ export class OpenLinkerClient {
       {
         jsonrpc: "2.0",
         id: `openlinker-a2a-${Date.now()}`,
-        method: normalizeA2AJsonRpcMethod(method),
-        ...(params !== undefined ? { params } : {}),
+        method: normalizeA2AJsonRpcMethodForDialect(method, options.a2aDialect),
+        ...(params !== undefined ? { params: normalizeA2AParamsForDialect(params, options.a2aDialect) } : {}),
       },
       withA2AVersion(options),
     );
@@ -510,61 +515,61 @@ export class OpenLinkerClient {
   async a2aSendMessage(
     endpointOrSlug: string,
     params: A2AMessageSendParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATask> {
-    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "message/send", params as unknown as JsonValue, options);
+    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "SendMessage", params as unknown as JsonValue, options);
   }
 
   async a2aStreamMessage(
     endpointOrSlug: string,
     params: A2AMessageSendParams,
     handlers: A2AStreamEventHandlers = {},
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<void> {
-    return this.a2aStream(endpointOrSlug, "message/stream", params as unknown as JsonValue, handlers, options);
+    return this.a2aStream(endpointOrSlug, "SendStreamingMessage", params as unknown as JsonValue, handlers, options);
   }
 
   async a2aGetTask(
     endpointOrSlug: string,
     params: A2ATaskQueryParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATask> {
-    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "tasks/get", params as unknown as JsonValue, options);
+    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "GetTask", params as unknown as JsonValue, options);
   }
 
   async a2aListTasks(
     endpointOrSlug: string,
     params: A2ATaskListParams = {},
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATaskListResponse> {
-    return this.a2aJsonRpc<A2ATaskListResponse>(endpointOrSlug, "tasks/list", params as JsonValue, options);
+    return this.a2aJsonRpc<A2ATaskListResponse>(endpointOrSlug, "ListTasks", params as JsonValue, options);
   }
 
   async a2aCancelTask(
     endpointOrSlug: string,
     params: A2ATaskQueryParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATask> {
-    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "tasks/cancel", params as unknown as JsonValue, options);
+    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "CancelTask", params as unknown as JsonValue, options);
   }
 
   async a2aResubscribeTask(
     endpointOrSlug: string,
     params: A2ATaskQueryParams,
     handlers: A2AStreamEventHandlers = {},
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<void> {
-    return this.a2aStream(endpointOrSlug, "tasks/resubscribe", params as unknown as JsonValue, handlers, options);
+    return this.a2aStream(endpointOrSlug, "SubscribeToTask", params as unknown as JsonValue, handlers, options);
   }
 
   async a2aSetTaskPushNotificationConfig(
     endpointOrSlug: string,
     params: A2ATaskPushConfigParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATaskPushNotificationConfig> {
     return this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
       endpointOrSlug,
-      "tasks/pushNotificationConfig/set",
+      "CreateTaskPushNotificationConfig",
       params as unknown as JsonValue,
       options,
     );
@@ -573,11 +578,11 @@ export class OpenLinkerClient {
   async a2aGetTaskPushNotificationConfig(
     endpointOrSlug: string,
     params: A2ATaskPushConfigParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATaskPushNotificationConfig> {
     return this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
       endpointOrSlug,
-      "tasks/pushNotificationConfig/get",
+      "GetTaskPushNotificationConfig",
       params as unknown as JsonValue,
       options,
     );
@@ -586,11 +591,11 @@ export class OpenLinkerClient {
   async a2aListTaskPushNotificationConfigs(
     endpointOrSlug: string,
     params: A2ATaskPushConfigParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<A2ATaskPushConfigList> {
     return this.a2aJsonRpc<A2ATaskPushConfigList>(
       endpointOrSlug,
-      "tasks/pushNotificationConfig/list",
+      "ListTaskPushNotificationConfigs",
       params as unknown as JsonValue,
       options,
     );
@@ -599,11 +604,11 @@ export class OpenLinkerClient {
   async a2aDeleteTaskPushNotificationConfig(
     endpointOrSlug: string,
     params: A2ATaskPushConfigParams,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<void> {
     await this.a2aJsonRpc<JsonValue>(
       endpointOrSlug,
-      "tasks/pushNotificationConfig/delete",
+      "DeleteTaskPushNotificationConfig",
       params as unknown as JsonValue,
       options,
     );
@@ -611,9 +616,9 @@ export class OpenLinkerClient {
 
   async a2aGetExtendedAgentCard(
     endpointOrSlug: string,
-    options: RequestOptions = {},
+    options: A2ARequestOptions = {},
   ): Promise<AgentCardResponse> {
-    return this.a2aJsonRpc<AgentCardResponse>(endpointOrSlug, "agent/getExtendedCard", {}, options);
+    return this.a2aJsonRpc<AgentCardResponse>(endpointOrSlug, "GetExtendedAgentCard", {}, options);
   }
 
   private async a2aStream(
@@ -621,7 +626,7 @@ export class OpenLinkerClient {
     method: string,
     params: JsonValue,
     handlers: A2AStreamEventHandlers,
-    options: RequestOptions,
+    options: A2ARequestOptions,
   ): Promise<void> {
     const response = await this.fetchRaw(
       "POST",
@@ -629,8 +634,8 @@ export class OpenLinkerClient {
       {
         jsonrpc: "2.0",
         id: `openlinker-a2a-${Date.now()}`,
-        method: normalizeA2AJsonRpcMethod(method),
-        params,
+        method: normalizeA2AJsonRpcMethodForDialect(method, options.a2aDialect),
+        params: normalizeA2AParamsForDialect(params, options.a2aDialect),
       },
       withA2AVersion(options),
       undefined,
@@ -851,14 +856,13 @@ export function newA2ATextMessageParams(
   messageId: string,
   text: string,
   acceptedOutputModes: string[] = ["application/json", "text/plain", "text/markdown"],
+  dialect: A2ADialect = "current",
 ): A2AMessageSendParams {
-  return {
+  return normalizeA2AMessageSendParamsForDialect({
     message: {
-      kind: "message",
       messageId: messageId || `msg-${Date.now()}`,
       role: "user",
       parts: [{
-        kind: "text",
         text,
       }],
     },
@@ -866,51 +870,211 @@ export function newA2ATextMessageParams(
       blocking: true,
       acceptedOutputModes,
     },
-  };
+  }, dialect);
+}
+
+export function newA2ALegacyTextMessageParams(
+  messageId: string,
+  text: string,
+  acceptedOutputModes: string[] = ["application/json", "text/plain", "text/markdown"],
+): A2AMessageSendParams {
+  return newA2ATextMessageParams(messageId, text, acceptedOutputModes, "legacy");
 }
 
 export function normalizeA2AJsonRpcMethod(method: string): string {
+  return normalizeA2AJsonRpcMethodForDialect(method, "current");
+}
+
+export function normalizeA2AJsonRpcMethodForDialect(method: string, dialect: A2ADialect = "current"): string {
+  const [current, legacy] = normalizeA2AJsonRpcMethodPair(method);
+  return normalizeA2ADialect(dialect) === "legacy" ? legacy : current;
+}
+
+export function normalizeA2ADialect(dialect: A2ADialect = "current"): "current" | "legacy" | string {
+  switch (String(dialect).trim().toLowerCase()) {
+    case "":
+    case "1":
+    case "1.0":
+    case "1.0.0":
+    case "v1":
+    case "v1.0":
+    case "current":
+    case "canonical":
+    case "pascal":
+    case "pascalcase":
+      return "current";
+    case "0.3":
+    case "0.3.0":
+    case "v0.3":
+    case "legacy":
+    case "slash":
+    case "path":
+      return "legacy";
+    default:
+      return String(dialect).trim();
+  }
+}
+
+function normalizeA2AJsonRpcMethodPair(method: string): [string, string] {
   switch (method.trim()) {
     case "message/send":
     case "message:send":
     case "SendMessage":
-      return "message/send";
+      return ["SendMessage", "message/send"];
     case "message/stream":
     case "message:stream":
     case "SendStreamingMessage":
-      return "message/stream";
+      return ["SendStreamingMessage", "message/stream"];
     case "tasks/get":
     case "GetTask":
-      return "tasks/get";
+      return ["GetTask", "tasks/get"];
     case "tasks/list":
     case "ListTasks":
-      return "tasks/list";
+      return ["ListTasks", "tasks/list"];
     case "tasks/cancel":
     case "CancelTask":
-      return "tasks/cancel";
+      return ["CancelTask", "tasks/cancel"];
     case "tasks/resubscribe":
     case "SubscribeToTask":
-      return "tasks/resubscribe";
+      return ["SubscribeToTask", "tasks/resubscribe"];
     case "tasks/pushNotificationConfig/set":
     case "SetTaskPushNotificationConfig":
     case "CreateTaskPushNotificationConfig":
-      return "tasks/pushNotificationConfig/set";
+      return ["CreateTaskPushNotificationConfig", "tasks/pushNotificationConfig/set"];
     case "tasks/pushNotificationConfig/get":
     case "GetTaskPushNotificationConfig":
-      return "tasks/pushNotificationConfig/get";
+      return ["GetTaskPushNotificationConfig", "tasks/pushNotificationConfig/get"];
     case "tasks/pushNotificationConfig/list":
     case "ListTaskPushNotificationConfigs":
     case "ListTaskPushNotificationConfig":
-      return "tasks/pushNotificationConfig/list";
+      return ["ListTaskPushNotificationConfigs", "tasks/pushNotificationConfig/list"];
     case "tasks/pushNotificationConfig/delete":
     case "DeleteTaskPushNotificationConfig":
-      return "tasks/pushNotificationConfig/delete";
+      return ["DeleteTaskPushNotificationConfig", "tasks/pushNotificationConfig/delete"];
     case "agent/getExtendedCard":
     case "GetExtendedAgentCard":
-      return "agent/getExtendedCard";
+      return ["GetExtendedAgentCard", "agent/getExtendedCard"];
     default:
-      return method.trim();
+      return [method.trim(), method.trim()];
   }
+}
+
+export function normalizeA2AParamsForDialect(params: JsonValue, dialect: A2ADialect = "current"): JsonValue {
+  if (!isRecord(params) || !isRecord(params.message)) {
+    return params;
+  }
+  return normalizeA2AMessageSendParamsForDialect(params as unknown as A2AMessageSendParams, dialect) as unknown as JsonValue;
+}
+
+export function normalizeA2AMessageSendParamsForDialect(
+  params: A2AMessageSendParams,
+  dialect: A2ADialect = "current",
+): A2AMessageSendParams {
+  return {
+    ...params,
+    message: normalizeA2AMessageForDialect(params.message, dialect),
+  };
+}
+
+export function normalizeA2AMessageForDialect(
+  message: A2AMessageSendParams["message"],
+  dialect: A2ADialect = "current",
+): A2AMessageSendParams["message"] {
+  const normalized = {
+    ...message,
+    parts: normalizeA2APartsForDialect(message.parts ?? [], dialect),
+  };
+  if (normalizeA2ADialect(dialect) === "legacy") {
+    return {
+      ...normalized,
+      kind: normalized.kind ?? "message",
+    };
+  }
+  const { kind: _kind, ...current } = normalized;
+  return current;
+}
+
+function normalizeA2APartsForDialect(parts: JsonObject[], dialect: A2ADialect): JsonObject[] {
+  return parts.map((part) => normalizeA2ADialect(dialect) === "legacy"
+    ? normalizeA2APartForLegacy(part)
+    : normalizeA2APartForCurrent(part));
+}
+
+function normalizeA2APartForCurrent(part: JsonObject): JsonObject {
+  const kind = a2aPartKind(part);
+  if (kind === "file") {
+    const legacyFile = isRecord(part.file) ? part.file as JsonObject : part;
+    return normalizeA2AFilePartForCurrent(legacyFile);
+  }
+  const { kind: _kind, type: _type, ...current } = part;
+  return current;
+}
+
+function normalizeA2AFilePartForCurrent(source: JsonObject): JsonObject {
+  const out: JsonObject = {};
+  const url = firstA2APartString(source, "url", "uri");
+  if (url) out.url = url;
+  const raw = firstA2APartValue(source, "raw", "fileWithBytes", "bytes");
+  if (raw !== undefined) out.raw = raw;
+  const filename = firstA2APartString(source, "filename", "fileName", "name");
+  if (filename) out.filename = filename;
+  const mediaType = firstA2APartString(source, "mediaType", "mimeType");
+  if (mediaType) out.mediaType = mediaType;
+  if (source.metadata !== undefined) out.metadata = source.metadata;
+  return out;
+}
+
+function normalizeA2APartForLegacy(part: JsonObject): JsonObject {
+  const kind = a2aPartKind(part);
+  const { type: _type, ...legacy } = part;
+  if (kind === "text" || kind === "data") {
+    return { ...legacy, kind };
+  }
+  if (kind !== "file") {
+    return legacy;
+  }
+  const file: JsonObject = isRecord(legacy.file) ? { ...(legacy.file as JsonObject) } : {};
+  const uri = firstA2APartString(part, "url", "uri");
+  if (uri) file.uri = uri;
+  const bytes = firstA2APartValue(part, "raw", "fileWithBytes", "bytes");
+  if (bytes !== undefined) file.fileWithBytes = bytes;
+  const name = firstA2APartString(part, "filename", "fileName", "name");
+  if (name) file.name = name;
+  const mimeType = firstA2APartString(part, "mediaType", "mimeType");
+  if (mimeType) file.mimeType = mimeType;
+  return {
+    ...legacy,
+    kind: "file",
+    ...(Object.keys(file).length ? { file } : {}),
+  };
+}
+
+function a2aPartKind(part: JsonObject): string {
+  if (typeof part.kind === "string" && part.kind) return part.kind.toLowerCase();
+  if (typeof part.type === "string" && part.type) return part.type.toLowerCase();
+  if (part.text !== undefined) return "text";
+  if (part.data !== undefined) return "data";
+  if (part.file !== undefined || part.url !== undefined || part.raw !== undefined) return "file";
+  return "";
+}
+
+function firstA2APartString(source: JsonObject, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function firstA2APartValue(source: JsonObject, ...keys: string[]): JsonValue | undefined {
+  for (const key of keys) {
+    if (source[key] !== undefined) {
+      return source[key];
+    }
+  }
+  return undefined;
 }
 
 export function normalizeA2ATaskState(state: string): string {

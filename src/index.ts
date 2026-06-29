@@ -4,8 +4,14 @@ export {
   OpenLinkerError,
   a2aTaskStateRunStatus,
   extractA2AText,
+  newA2ALegacyTextMessageParams,
   newA2ATextMessageParams,
+  normalizeA2ADialect,
   normalizeA2AJsonRpcMethod,
+  normalizeA2AJsonRpcMethodForDialect,
+  normalizeA2AMessageForDialect,
+  normalizeA2AMessageSendParamsForDialect,
+  normalizeA2AParamsForDialect,
   normalizeA2ATaskState,
 } from "./client.js";
 export {
@@ -22,6 +28,7 @@ export type {
   TaskCallbackPayloadInput,
 } from "./webhook.js";
 export type {
+  A2ARequestOptions,
   FetchLike,
   ClaimRuntimeRunResult,
   OpenLinkerClientOptions,

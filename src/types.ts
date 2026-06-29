@@ -4,6 +4,8 @@ export interface JsonObject {
   [key: string]: JsonValue | undefined;
 }
 
+export type A2ADialect = "current" | "legacy" | string;
+
 export type ConnectionMode =
   | "direct_http"
   | "mcp_server"
