@@ -1,6 +1,6 @@
 {
   "name": "@openlinker/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "TypeScript client SDK for OpenLinker Core APIs.",
   "type": "module",
   "license": "Apache-2.0",

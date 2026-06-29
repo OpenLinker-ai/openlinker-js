@@ -44,7 +44,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
   );
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_live_test");
-  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk-js/0.0.0");
+  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.0");
 });
 
 test("runAgent maps camelCase input to Core request body", async () => {

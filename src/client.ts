@@ -180,7 +180,7 @@ export class OpenLinkerClient {
     this.#runtimeToken = options.runtimeToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
-    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk-js/0.0.0";
+    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.0";
   }
 
   async listAgents(
