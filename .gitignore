@@ -5,6 +5,7 @@
 
 # Dependencies and test output
 node_modules/
+dist/
 coverage/
 
 # Editor / OS
