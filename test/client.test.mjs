@@ -620,15 +620,28 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
       const headers = new Headers(init.headers);
       calls.push({ url: String(url), headers, body });
       if (body.method === "SendMessage" || body.method === "GetTask" || body.method === "CancelTask") {
+        if (body.method === "SendMessage") {
+          return jsonResponse({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              task: {
+                id: "task-a2a",
+                status: {
+                  state: "TASK_STATE_COMPLETED",
+                  message: { parts: [{ text: "done" }] },
+                },
+              },
+            },
+          });
+        }
         return jsonResponse({
           jsonrpc: "2.0",
           id: body.id,
           result: {
-            kind: "task",
             id: "task-a2a",
             status: {
               state: "TASK_STATE_COMPLETED",
-              message: { parts: [{ kind: "text", text: "done" }] },
             },
           },
         });
@@ -646,7 +659,8 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
           id: body.id,
           result: {
             taskId: "task-a2a",
-            pushNotificationConfig: { id: "cfg-1", url: "https://caller.example/a2a/events" },
+            id: "cfg-1",
+            url: "https://caller.example/a2a/events",
           },
         });
       }
@@ -654,7 +668,7 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
         return jsonResponse({
           jsonrpc: "2.0",
           id: body.id,
-          result: { items: [{ taskId: "task-a2a", pushNotificationConfig: { id: "cfg-1" } }] },
+          result: { configs: [{ taskId: "task-a2a", id: "cfg-1" }] },
         });
       }
       if (body.method === "DeleteTaskPushNotificationConfig") {
@@ -666,7 +680,7 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
 
   const task = await client.a2aSendMessage("agent/one", newA2ATextMessageParams("msg-1", "hello"));
   await client.a2aGetTask("agent/one", { id: "task-a2a" });
-  await client.a2aListTasks("agent/one", { status: "completed" });
+  await client.a2aListTasks("agent/one", { status: "completed", pageSize: 5 });
   await client.a2aCancelTask("agent/one", { id: "task-a2a" });
   await client.a2aSetTaskPushNotificationConfig("agent/one", {
     id: "task-a2a",
@@ -691,9 +705,38 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
   assert.equal(calls[0].headers.get("a2a-version"), "1.0");
   assert.equal(calls[0].body.method, "SendMessage");
   assert.equal(calls[0].body.params.message.kind, undefined);
+  assert.equal(calls[0].body.params.message.role, "ROLE_USER");
   assert.deepEqual(calls[0].body.params.message.parts[0], { text: "hello" });
   assert.equal(calls[0].body.params.configuration.returnImmediately, false);
   assert.equal(calls[0].body.params.configuration.blocking, undefined);
+  assert.equal(calls[2].body.params.status, "completed");
+  assert.equal(calls[2].body.params.pageSize, 5);
+  assert.equal(calls[4].body.params.taskId, "task-a2a");
+  assert.equal(calls[4].body.params.url, "https://caller.example/a2a/events");
+  assert.equal(calls[4].body.params.pushNotificationConfig, undefined);
+  assert.equal(calls[6].body.params.taskId, "task-a2a");
+  assert.equal(calls[6].body.params.id, undefined);
+});
+
+test("A2A send message response supports direct message payloads", async () => {
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { message: { role: "ROLE_AGENT", parts: [{ text: "no task" }] } },
+      });
+    },
+  });
+
+  const response = await client.a2aSendMessageResponse("agent-one", newA2ATextMessageParams("msg-1", "hello"));
+  assert.equal(extractA2AText(response.message), "no task");
+  await assert.rejects(
+    () => client.a2aSendMessage("agent-one", newA2ATextMessageParams("msg-2", "hello")),
+    /returned a message/,
+  );
 });
 
 test("A2A legacy dialect keeps slash methods and legacy message parts", async () => {

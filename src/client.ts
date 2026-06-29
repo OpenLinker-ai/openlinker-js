@@ -3,6 +3,7 @@ import type {
   A2AJsonRpcResponse,
   A2AMessageSendParams,
   A2APushNotificationConfig,
+  A2ASendMessageResponse,
   A2AStreamEvent,
   A2AStreamEventHandlers,
   A2AStreamResponse,
@@ -517,7 +518,23 @@ export class OpenLinkerClient {
     params: A2AMessageSendParams,
     options: A2ARequestOptions = {},
   ): Promise<A2ATask> {
-    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "SendMessage", params as unknown as JsonValue, options);
+    const response = await this.a2aSendMessageResponse(endpointOrSlug, params, options);
+    if (response.task) {
+      return response.task;
+    }
+    if (response.message) {
+      throw new Error("A2A SendMessage returned a message; use a2aSendMessageResponse to handle message payloads");
+    }
+    throw new Error("A2A SendMessage returned an empty response");
+  }
+
+  async a2aSendMessageResponse(
+    endpointOrSlug: string,
+    params: A2AMessageSendParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ASendMessageResponse> {
+    const result = await this.a2aJsonRpc<JsonValue>(endpointOrSlug, "SendMessage", params as unknown as JsonValue, options);
+    return decodeA2ASendMessageResponse(result);
   }
 
   async a2aStreamMessage(
@@ -567,12 +584,13 @@ export class OpenLinkerClient {
     params: A2ATaskPushConfigParams,
     options: A2ARequestOptions = {},
   ): Promise<A2ATaskPushNotificationConfig> {
-    return this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
+    const result = await this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
       endpointOrSlug,
       "CreateTaskPushNotificationConfig",
-      params as unknown as JsonValue,
+      normalizeA2ATaskPushConfigParamsForDialect(params, options.a2aDialect) as JsonValue,
       options,
     );
+    return normalizeA2ATaskPushNotificationConfigResult(result);
   }
 
   async a2aGetTaskPushNotificationConfig(
@@ -580,12 +598,13 @@ export class OpenLinkerClient {
     params: A2ATaskPushConfigParams,
     options: A2ARequestOptions = {},
   ): Promise<A2ATaskPushNotificationConfig> {
-    return this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
+    const result = await this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
       endpointOrSlug,
       "GetTaskPushNotificationConfig",
-      params as unknown as JsonValue,
+      normalizeA2ATaskPushConfigParamsForDialect(params, options.a2aDialect) as JsonValue,
       options,
     );
+    return normalizeA2ATaskPushNotificationConfigResult(result);
   }
 
   async a2aListTaskPushNotificationConfigs(
@@ -593,12 +612,13 @@ export class OpenLinkerClient {
     params: A2ATaskPushConfigParams,
     options: A2ARequestOptions = {},
   ): Promise<A2ATaskPushConfigList> {
-    return this.a2aJsonRpc<A2ATaskPushConfigList>(
+    const result = await this.a2aJsonRpc<A2ATaskPushConfigList>(
       endpointOrSlug,
       "ListTaskPushNotificationConfigs",
-      params as unknown as JsonValue,
+      normalizeA2ATaskPushConfigParamsForDialect(params, options.a2aDialect) as JsonValue,
       options,
     );
+    return normalizeA2ATaskPushConfigListResult(result);
   }
 
   async a2aDeleteTaskPushNotificationConfig(
@@ -609,7 +629,7 @@ export class OpenLinkerClient {
     await this.a2aJsonRpc<JsonValue>(
       endpointOrSlug,
       "DeleteTaskPushNotificationConfig",
-      params as unknown as JsonValue,
+      normalizeA2ATaskPushConfigParamsForDialect(params, options.a2aDialect) as JsonValue,
       options,
     );
   }
@@ -959,11 +979,62 @@ function normalizeA2AJsonRpcMethodPair(method: string): [string, string] {
   }
 }
 
+function decodeA2ASendMessageResponse(result: JsonValue | undefined): A2ASendMessageResponse {
+  if (!isRecord(result)) {
+    return {};
+  }
+  if (isRecord(result.task) || isRecord(result.message)) {
+    return result as unknown as A2ASendMessageResponse;
+  }
+  if (typeof result.id === "string" || isRecord(result.status)) {
+    return { task: result as unknown as A2ATask };
+  }
+  if (typeof result.role === "string" || Array.isArray(result.parts) || typeof result.messageId === "string") {
+    return { message: result as unknown as A2AMessageSendParams["message"] };
+  }
+  return {};
+}
+
+function normalizeA2ATaskPushNotificationConfigResult(
+  config: A2ATaskPushNotificationConfig,
+): A2ATaskPushNotificationConfig {
+  const push = pushConfigFromA2ATaskPushNotificationConfig(config);
+  const out: A2ATaskPushNotificationConfig = {
+    ...config,
+    pushNotificationConfig: push,
+  };
+  setOptional(out, "id", config.id ?? push.id);
+  setOptional(out, "url", config.url ?? push.url);
+  setOptional(out, "token", config.token ?? push.token);
+  setOptional(out, "secret", config.secret ?? push.secret);
+  setOptional(out, "authentication", config.authentication ?? push.authentication);
+  setOptional(out, "metadata", config.metadata ?? push.metadata);
+  setOptional(out, "eventTypes", config.eventTypes ?? push.eventTypes);
+  setOptional(out, "event_types", config.event_types ?? push.event_types);
+  return out;
+}
+
+function normalizeA2ATaskPushConfigListResult(list: A2ATaskPushConfigList): A2ATaskPushConfigList {
+  const configs = (list.configs?.length ? list.configs : list.items ?? [])
+    .map((config) => normalizeA2ATaskPushNotificationConfigResult(config));
+  return {
+    ...list,
+    configs,
+    items: configs,
+  };
+}
+
 export function normalizeA2AParamsForDialect(params: JsonValue, dialect: A2ADialect = "current"): JsonValue {
-  if (!isRecord(params) || !isRecord(params.message)) {
+  if (!isRecord(params)) {
     return params;
   }
-  return normalizeA2AMessageSendParamsForDialect(params as unknown as A2AMessageSendParams, dialect) as unknown as JsonValue;
+  if (isRecord(params.message)) {
+    return normalizeA2AMessageSendParamsForDialect(params as unknown as A2AMessageSendParams, dialect) as unknown as JsonValue;
+  }
+  if (isA2ATaskPushConfigParams(params)) {
+    return normalizeA2ATaskPushConfigParamsForDialect(params as unknown as A2ATaskPushConfigParams, dialect) as unknown as JsonValue;
+  }
+  return params;
 }
 
 export function normalizeA2AMessageSendParamsForDialect(
@@ -995,7 +1066,151 @@ export function normalizeA2ASendConfigurationForDialect(
   if (blocking !== undefined) {
     current.returnImmediately = !blocking;
   }
+  if (current.taskPushNotificationConfig) {
+    current.taskPushNotificationConfig = normalizeA2ATaskPushNotificationConfigForDialect(
+      current.taskPushNotificationConfig,
+      dialect,
+    );
+  }
   return current;
+}
+
+export function normalizeA2ATaskPushConfigParamsForDialect(
+  params: A2ATaskPushConfigParams,
+  dialect: A2ADialect = "current",
+): JsonObject | A2ATaskPushConfigParams {
+  if (normalizeA2ADialect(dialect) === "legacy") {
+    return params;
+  }
+  const out: JsonObject = {};
+  const taskId = trimString(params.taskId) || trimString(params.id);
+  if (taskId) out.taskId = taskId;
+  let configId = trimString(params.pushNotificationConfigId) || trimString(params.pushNotificationConfig?.id);
+  if (!configId && trimString(params.taskId)) {
+    configId = trimString(params.id);
+  }
+  if (configId) out.id = configId;
+  mergeA2APushConfigFields(out, pushConfigFromA2ATaskPushParams(params));
+  if (params.pageSize !== undefined) out.pageSize = params.pageSize;
+  if (trimString(params.pageToken)) out.pageToken = trimString(params.pageToken);
+  return out;
+}
+
+export function normalizeA2ATaskPushNotificationConfigForDialect(
+  config: A2ATaskPushNotificationConfig,
+  dialect: A2ADialect = "current",
+): A2ATaskPushNotificationConfig {
+  if (normalizeA2ADialect(dialect) === "legacy") {
+    return config;
+  }
+  const push = pushConfigFromA2ATaskPushNotificationConfig(config);
+  const out: A2ATaskPushNotificationConfig = { ...config };
+  setOptional(out, "id", push.id);
+  setOptional(out, "url", push.url);
+  setOptional(out, "token", push.token);
+  setOptional(out, "secret", push.secret);
+  setOptional(out, "authentication", push.authentication);
+  setOptional(out, "metadata", push.metadata);
+  setOptional(out, "eventTypes", push.eventTypes);
+  setOptional(out, "event_types", push.event_types);
+  delete out.pushNotificationConfig;
+  return out;
+}
+
+function isA2ATaskPushConfigParams(value: JsonObject): boolean {
+  return "pushNotificationConfig" in value ||
+    "pushNotificationConfigId" in value ||
+    "taskId" in value ||
+    "url" in value ||
+    "authentication" in value;
+}
+
+function pushConfigFromA2ATaskPushParams(params: A2ATaskPushConfigParams): A2APushNotificationConfig {
+  const fallback: A2APushNotificationConfig = {};
+  if (params.taskId && params.id) fallback.id = params.id;
+  setOptional(fallback, "url", params.url);
+  setOptional(fallback, "token", params.token);
+  setOptional(fallback, "secret", params.secret);
+  setOptional(fallback, "authentication", params.authentication);
+  setOptional(fallback, "metadata", params.metadata);
+  setOptional(fallback, "eventTypes", params.eventTypes);
+  setOptional(fallback, "event_types", params.event_types);
+  return mergeA2APushConfig(params.pushNotificationConfig ?? {}, fallback);
+}
+
+function pushConfigFromA2ATaskPushNotificationConfig(config: A2ATaskPushNotificationConfig): A2APushNotificationConfig {
+  const fallback: A2APushNotificationConfig = {};
+  setOptional(fallback, "id", config.id);
+  setOptional(fallback, "url", config.url);
+  setOptional(fallback, "token", config.token);
+  setOptional(fallback, "secret", config.secret);
+  setOptional(fallback, "authentication", config.authentication);
+  setOptional(fallback, "metadata", config.metadata);
+  setOptional(fallback, "eventTypes", config.eventTypes);
+  setOptional(fallback, "event_types", config.event_types);
+  return mergeA2APushConfig(config.pushNotificationConfig ?? {}, fallback);
+}
+
+function mergeA2APushConfig(base: A2APushNotificationConfig, fallback: A2APushNotificationConfig): A2APushNotificationConfig {
+  const out: A2APushNotificationConfig = {
+    ...fallback,
+    ...base,
+  };
+  setOptional(out, "authentication", base.authentication ?? fallback.authentication);
+  setOptional(out, "metadata", base.metadata ?? fallback.metadata);
+  setOptional(out, "eventTypes", base.eventTypes ?? fallback.eventTypes);
+  setOptional(out, "event_types", base.event_types ?? fallback.event_types);
+  return out;
+}
+
+function mergeA2APushConfigFields(out: JsonObject, config: A2APushNotificationConfig): void {
+  if (trimString(config.url)) out.url = trimString(config.url);
+  if (trimString(config.token)) out.token = trimString(config.token);
+  if (trimString(config.secret)) out.secret = trimString(config.secret);
+  if (config.authentication) out.authentication = config.authentication as unknown as JsonValue;
+  if (config.metadata) out.metadata = config.metadata;
+  if (config.eventTypes?.length) out.eventTypes = config.eventTypes;
+  if (config.event_types?.length) out.event_types = config.event_types;
+}
+
+function normalizeA2ARoleForCurrent(role: string | undefined): string | undefined {
+  switch ((role ?? "").trim().toLowerCase()) {
+    case "user":
+    case "role_user":
+      return "ROLE_USER";
+    case "agent":
+    case "assistant":
+    case "role_agent":
+      return "ROLE_AGENT";
+    case "unspecified":
+    case "role_unspecified":
+      return "ROLE_UNSPECIFIED";
+    default:
+      return role;
+  }
+}
+
+function normalizeA2ARoleForLegacy(role: string | undefined): string | undefined {
+  switch ((role ?? "").trim().toLowerCase()) {
+    case "role_user":
+      return "user";
+    case "role_agent":
+      return "agent";
+    case "role_unspecified":
+      return undefined;
+    default:
+      return role;
+  }
+}
+
+function trimString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function setOptional<T extends object, K extends keyof T>(target: T, key: K, value: T[K] | undefined): void {
+  if (value !== undefined) {
+    target[key] = value;
+  }
 }
 
 export function normalizeA2AMessageForDialect(
@@ -1007,12 +1222,21 @@ export function normalizeA2AMessageForDialect(
     parts: normalizeA2APartsForDialect(message.parts ?? [], dialect),
   };
   if (normalizeA2ADialect(dialect) === "legacy") {
-    return {
+    const legacy = {
       ...normalized,
       kind: normalized.kind ?? "message",
     };
+    const role = normalizeA2ARoleForLegacy(normalized.role);
+    if (role !== undefined) legacy.role = role;
+    return legacy;
   }
   const { kind: _kind, ...current } = normalized;
+  const role = normalizeA2ARoleForCurrent(current.role);
+  if (role !== undefined) {
+    current.role = role;
+  } else {
+    delete current.role;
+  }
   return current;
 }
 

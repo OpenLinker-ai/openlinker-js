@@ -382,8 +382,17 @@ export interface A2APushAuthenticationInfo {
 }
 
 export interface A2ATaskPushNotificationConfig {
-  taskId: string;
-  pushNotificationConfig: A2APushNotificationConfig;
+  tenant?: string;
+  id?: string;
+  taskId?: string;
+  url?: string;
+  token?: string;
+  secret?: string;
+  authentication?: A2APushAuthenticationInfo;
+  metadata?: JsonObject;
+  eventTypes?: string[];
+  event_types?: string[];
+  pushNotificationConfig?: A2APushNotificationConfig;
 }
 
 export interface A2ATaskPushConfigParams {
@@ -391,10 +400,26 @@ export interface A2ATaskPushConfigParams {
   taskId?: string;
   pushNotificationConfigId?: string;
   pushNotificationConfig?: A2APushNotificationConfig;
+  url?: string;
+  token?: string;
+  secret?: string;
+  authentication?: A2APushAuthenticationInfo;
+  metadata?: JsonObject;
+  eventTypes?: string[];
+  event_types?: string[];
+  pageSize?: number;
+  pageToken?: string;
 }
 
 export interface A2ATaskPushConfigList {
-  items: A2ATaskPushNotificationConfig[];
+  configs?: A2ATaskPushNotificationConfig[];
+  nextPageToken?: string;
+  items?: A2ATaskPushNotificationConfig[];
+}
+
+export interface A2ASendMessageResponse {
+  task?: A2ATask;
+  message?: A2AMessage;
 }
 
 export interface A2ATaskQueryParams {
