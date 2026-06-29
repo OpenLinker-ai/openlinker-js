@@ -156,7 +156,8 @@ Authenticated run checks are only attempted when `OPENLINKER_API_KEY` and
 ## Contributing and Security
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for development rules and
-[SECURITY.md](./SECURITY.md) for vulnerability reporting.
+[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for conduct expectations.
+See [SECURITY.md](./SECURITY.md) for vulnerability reporting.
 
 ## License
 
