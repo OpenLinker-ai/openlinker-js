@@ -152,3 +152,12 @@ OPENLINKER_API_ROOT=http://localhost:8080/api/v1 make validate-sdk-core-smoke
 
 Authenticated run checks are only attempted when `OPENLINKER_API_KEY` and
 `OPENLINKER_SDK_SMOKE_RUN_ID` are set.
+
+## Contributing and Security
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development rules and
+[SECURITY.md](./SECURITY.md) for vulnerability reporting.
+
+## License
+
+Apache-2.0. See [LICENSE](./LICENSE).
