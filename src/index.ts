@@ -12,6 +12,7 @@ export {
   normalizeA2AMessageForDialect,
   normalizeA2AMessageSendParamsForDialect,
   normalizeA2AParamsForDialect,
+  normalizeA2ASendConfigurationForDialect,
   normalizeA2ATaskState,
 } from "./client.js";
 export {

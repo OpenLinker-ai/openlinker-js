@@ -210,7 +210,7 @@ export class OpenLinkerClient {
     this.#runtimeToken = options.runtimeToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
-    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.2";
+    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.3";
   }
 
   async listAgents(
@@ -970,10 +970,32 @@ export function normalizeA2AMessageSendParamsForDialect(
   params: A2AMessageSendParams,
   dialect: A2ADialect = "current",
 ): A2AMessageSendParams {
-  return {
+  const normalized: A2AMessageSendParams = {
     ...params,
     message: normalizeA2AMessageForDialect(params.message, dialect),
   };
+  if (params.configuration) {
+    normalized.configuration = normalizeA2ASendConfigurationForDialect(params.configuration, dialect);
+  }
+  return normalized;
+}
+
+export function normalizeA2ASendConfigurationForDialect(
+  configuration: NonNullable<A2AMessageSendParams["configuration"]>,
+  dialect: A2ADialect = "current",
+): NonNullable<A2AMessageSendParams["configuration"]> {
+  if (normalizeA2ADialect(dialect) === "legacy") {
+    const { returnImmediately, ...legacy } = configuration;
+    if (returnImmediately !== undefined) {
+      legacy.blocking = !returnImmediately;
+    }
+    return legacy;
+  }
+  const { blocking, ...current } = configuration;
+  if (blocking !== undefined) {
+    current.returnImmediately = !blocking;
+  }
+  return current;
 }
 
 export function normalizeA2AMessageForDialect(

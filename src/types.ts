@@ -359,6 +359,7 @@ export interface A2AMessageSendParams {
 export interface A2ASendConfiguration {
   acceptedOutputModes?: string[];
   blocking?: boolean;
+  returnImmediately?: boolean;
   pushNotificationConfig?: A2APushNotificationConfig;
   taskPushNotificationConfig?: A2ATaskPushNotificationConfig;
   historyLength?: number;

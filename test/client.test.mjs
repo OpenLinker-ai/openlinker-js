@@ -52,7 +52,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
   );
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_live_test");
-  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.2");
+  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.3");
 });
 
 test("runAgent maps camelCase input to Core request body", async () => {
@@ -692,6 +692,8 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
   assert.equal(calls[0].body.method, "SendMessage");
   assert.equal(calls[0].body.params.message.kind, undefined);
   assert.deepEqual(calls[0].body.params.message.parts[0], { text: "hello" });
+  assert.equal(calls[0].body.params.configuration.returnImmediately, false);
+  assert.equal(calls[0].body.params.configuration.blocking, undefined);
 });
 
 test("A2A legacy dialect keeps slash methods and legacy message parts", async () => {
@@ -717,6 +719,8 @@ test("A2A legacy dialect keeps slash methods and legacy message parts", async ()
   assert.equal(received.method, "message/send");
   assert.equal(received.params.message.kind, "message");
   assert.deepEqual(received.params.message.parts[0], { text: "legacy", kind: "text" });
+  assert.equal(received.params.configuration.blocking, true);
+  assert.equal(received.params.configuration.returnImmediately, undefined);
 });
 
 test("A2A stream and JSON-RPC errors are parsed", async () => {
