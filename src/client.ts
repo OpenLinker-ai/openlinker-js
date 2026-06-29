@@ -1,4 +1,17 @@
 import type {
+  A2AJsonRpcResponse,
+  A2AMessageSendParams,
+  A2APushNotificationConfig,
+  A2AStreamEvent,
+  A2AStreamEventHandlers,
+  A2AStreamResponse,
+  A2ATask,
+  A2ATaskListParams,
+  A2ATaskListResponse,
+  A2ATaskPushConfigList,
+  A2ATaskPushConfigParams,
+  A2ATaskPushNotificationConfig,
+  A2ATaskQueryParams,
   AgentCardResponse,
   AgentDetailResponse,
   AgentEvent,
@@ -147,6 +160,18 @@ export class OpenLinkerError extends Error {
   }
 }
 
+export class OpenLinkerA2AError extends Error {
+  readonly code: string | number;
+  readonly data: JsonValue | undefined;
+
+  constructor(error: { code: string | number; message: string; data?: JsonValue }) {
+    super(error.message || `A2A JSON-RPC error ${error.code}`);
+    this.name = "OpenLinkerA2AError";
+    this.code = error.code;
+    this.data = error.data;
+  }
+}
+
 export class OpenLinkerClient {
   readonly baseUrl: string;
 
@@ -180,7 +205,7 @@ export class OpenLinkerClient {
     this.#runtimeToken = options.runtimeToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
-    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.0";
+    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.1";
   }
 
   async listAgents(
@@ -459,6 +484,167 @@ export class OpenLinkerClient {
     );
   }
 
+  async a2aJsonRpc<T = JsonValue>(
+    endpointOrSlug: string,
+    method: string,
+    params?: JsonValue,
+    options: RequestOptions = {},
+  ): Promise<T> {
+    const response = await this.request<A2AJsonRpcResponse<T>>(
+      "POST",
+      a2aPath(endpointOrSlug),
+      {
+        jsonrpc: "2.0",
+        id: `openlinker-a2a-${Date.now()}`,
+        method: normalizeA2AJsonRpcMethod(method),
+        ...(params !== undefined ? { params } : {}),
+      },
+      withA2AVersion(options),
+    );
+    if (response.error) {
+      throw new OpenLinkerA2AError(response.error);
+    }
+    return response.result as T;
+  }
+
+  async a2aSendMessage(
+    endpointOrSlug: string,
+    params: A2AMessageSendParams,
+    options: RequestOptions = {},
+  ): Promise<A2ATask> {
+    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "message/send", params as unknown as JsonValue, options);
+  }
+
+  async a2aStreamMessage(
+    endpointOrSlug: string,
+    params: A2AMessageSendParams,
+    handlers: A2AStreamEventHandlers = {},
+    options: RequestOptions = {},
+  ): Promise<void> {
+    return this.a2aStream(endpointOrSlug, "message/stream", params as unknown as JsonValue, handlers, options);
+  }
+
+  async a2aGetTask(
+    endpointOrSlug: string,
+    params: A2ATaskQueryParams,
+    options: RequestOptions = {},
+  ): Promise<A2ATask> {
+    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "tasks/get", params as unknown as JsonValue, options);
+  }
+
+  async a2aListTasks(
+    endpointOrSlug: string,
+    params: A2ATaskListParams = {},
+    options: RequestOptions = {},
+  ): Promise<A2ATaskListResponse> {
+    return this.a2aJsonRpc<A2ATaskListResponse>(endpointOrSlug, "tasks/list", params as JsonValue, options);
+  }
+
+  async a2aCancelTask(
+    endpointOrSlug: string,
+    params: A2ATaskQueryParams,
+    options: RequestOptions = {},
+  ): Promise<A2ATask> {
+    return this.a2aJsonRpc<A2ATask>(endpointOrSlug, "tasks/cancel", params as unknown as JsonValue, options);
+  }
+
+  async a2aResubscribeTask(
+    endpointOrSlug: string,
+    params: A2ATaskQueryParams,
+    handlers: A2AStreamEventHandlers = {},
+    options: RequestOptions = {},
+  ): Promise<void> {
+    return this.a2aStream(endpointOrSlug, "tasks/resubscribe", params as unknown as JsonValue, handlers, options);
+  }
+
+  async a2aSetTaskPushNotificationConfig(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: RequestOptions = {},
+  ): Promise<A2ATaskPushNotificationConfig> {
+    return this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
+      endpointOrSlug,
+      "tasks/pushNotificationConfig/set",
+      params as unknown as JsonValue,
+      options,
+    );
+  }
+
+  async a2aGetTaskPushNotificationConfig(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: RequestOptions = {},
+  ): Promise<A2ATaskPushNotificationConfig> {
+    return this.a2aJsonRpc<A2ATaskPushNotificationConfig>(
+      endpointOrSlug,
+      "tasks/pushNotificationConfig/get",
+      params as unknown as JsonValue,
+      options,
+    );
+  }
+
+  async a2aListTaskPushNotificationConfigs(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: RequestOptions = {},
+  ): Promise<A2ATaskPushConfigList> {
+    return this.a2aJsonRpc<A2ATaskPushConfigList>(
+      endpointOrSlug,
+      "tasks/pushNotificationConfig/list",
+      params as unknown as JsonValue,
+      options,
+    );
+  }
+
+  async a2aDeleteTaskPushNotificationConfig(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: RequestOptions = {},
+  ): Promise<void> {
+    await this.a2aJsonRpc<JsonValue>(
+      endpointOrSlug,
+      "tasks/pushNotificationConfig/delete",
+      params as unknown as JsonValue,
+      options,
+    );
+  }
+
+  async a2aGetExtendedAgentCard(
+    endpointOrSlug: string,
+    options: RequestOptions = {},
+  ): Promise<AgentCardResponse> {
+    return this.a2aJsonRpc<AgentCardResponse>(endpointOrSlug, "agent/getExtendedCard", {}, options);
+  }
+
+  private async a2aStream(
+    endpointOrSlug: string,
+    method: string,
+    params: JsonValue,
+    handlers: A2AStreamEventHandlers,
+    options: RequestOptions,
+  ): Promise<void> {
+    const response = await this.fetchRaw(
+      "POST",
+      a2aPath(endpointOrSlug),
+      {
+        jsonrpc: "2.0",
+        id: `openlinker-a2a-${Date.now()}`,
+        method: normalizeA2AJsonRpcMethod(method),
+        params,
+      },
+      withA2AVersion(options),
+      undefined,
+      "text/event-stream",
+    );
+    if (!response.ok) {
+      throw await errorFromResponse(response);
+    }
+    if (!response.body) {
+      throw new Error("OpenLinker A2A stream response does not expose a body");
+    }
+    await readA2AEventStream(response.body, handlers);
+  }
+
   async runRuntimePullLoop(
     handlers: RuntimeHandlers,
     options: RuntimePullLoopOptions = {},
@@ -640,6 +826,148 @@ function appendQuery(
     return;
   }
   query.set(name, String(value));
+}
+
+function a2aPath(endpointOrSlug: string): string {
+  const value = endpointOrSlug.trim();
+  if (value.startsWith("http://") || value.startsWith("https://")) {
+    return value;
+  }
+  return `/a2a/agents/${encodeURIComponent(value)}`;
+}
+
+function withA2AVersion(options: RequestOptions): RequestOptions {
+  const headers = new Headers(options.headers);
+  if (!headers.has("a2a-version")) {
+    headers.set("a2a-version", "1.0");
+  }
+  return {
+    ...options,
+    headers,
+  };
+}
+
+export function newA2ATextMessageParams(
+  messageId: string,
+  text: string,
+  acceptedOutputModes: string[] = ["application/json", "text/plain", "text/markdown"],
+): A2AMessageSendParams {
+  return {
+    message: {
+      kind: "message",
+      messageId: messageId || `msg-${Date.now()}`,
+      role: "user",
+      parts: [{
+        kind: "text",
+        text,
+      }],
+    },
+    configuration: {
+      blocking: true,
+      acceptedOutputModes,
+    },
+  };
+}
+
+export function normalizeA2AJsonRpcMethod(method: string): string {
+  switch (method.trim()) {
+    case "message/send":
+    case "message:send":
+    case "SendMessage":
+      return "message/send";
+    case "message/stream":
+    case "message:stream":
+    case "SendStreamingMessage":
+      return "message/stream";
+    case "tasks/get":
+    case "GetTask":
+      return "tasks/get";
+    case "tasks/list":
+    case "ListTasks":
+      return "tasks/list";
+    case "tasks/cancel":
+    case "CancelTask":
+      return "tasks/cancel";
+    case "tasks/resubscribe":
+    case "SubscribeToTask":
+      return "tasks/resubscribe";
+    case "tasks/pushNotificationConfig/set":
+    case "SetTaskPushNotificationConfig":
+    case "CreateTaskPushNotificationConfig":
+      return "tasks/pushNotificationConfig/set";
+    case "tasks/pushNotificationConfig/get":
+    case "GetTaskPushNotificationConfig":
+      return "tasks/pushNotificationConfig/get";
+    case "tasks/pushNotificationConfig/list":
+    case "ListTaskPushNotificationConfigs":
+    case "ListTaskPushNotificationConfig":
+      return "tasks/pushNotificationConfig/list";
+    case "tasks/pushNotificationConfig/delete":
+    case "DeleteTaskPushNotificationConfig":
+      return "tasks/pushNotificationConfig/delete";
+    case "agent/getExtendedCard":
+    case "GetExtendedAgentCard":
+      return "agent/getExtendedCard";
+    default:
+      return method.trim();
+  }
+}
+
+export function normalizeA2ATaskState(state: string): string {
+  const normalized = state.trim().toLowerCase()
+    .replace(/^task_state_/, "")
+    .replaceAll("-", "_");
+  switch (normalized) {
+    case "submitted":
+      return "submitted";
+    case "working":
+      return "working";
+    case "completed":
+    case "complete":
+    case "success":
+    case "succeeded":
+      return "completed";
+    case "canceled":
+    case "cancelled":
+      return "canceled";
+    case "failed":
+    case "failure":
+    case "error":
+      return "failed";
+    case "rejected":
+      return "rejected";
+    case "input_required":
+      return "input_required";
+    case "auth_required":
+      return "auth_required";
+    case "unknown":
+    case "unspecified":
+      return "unknown";
+    default:
+      return normalized;
+  }
+}
+
+export function a2aTaskStateRunStatus(state: string): "success" | "failed" {
+  switch (normalizeA2ATaskState(state)) {
+    case "":
+    case "completed":
+      return "success";
+    case "failed":
+    case "canceled":
+    case "rejected":
+    case "input_required":
+    case "auth_required":
+      return "failed";
+    default:
+      return "success";
+  }
+}
+
+export function extractA2AText(value: unknown): string {
+  const parts: string[] = [];
+  collectA2AText(value, parts);
+  return parts.join("\n");
 }
 
 function toRunRequestBody(request: RunAgentRequest): {
@@ -1166,6 +1494,132 @@ async function readEventStream(
   }
   await dispatch();
   await handlers.onClose?.();
+}
+
+async function readA2AEventStream(
+  body: ReadableStream<Uint8Array>,
+  handlers: A2AStreamEventHandlers,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "message";
+  let eventId: string | undefined;
+  let dataLines: string[] = [];
+
+  const dispatch = async (): Promise<void> => {
+    if (dataLines.length === 0) {
+      eventName = "message";
+      eventId = undefined;
+      return;
+    }
+    const rawData = dataLines.join("\n");
+    let data: unknown = rawData;
+    let result: A2AStreamResponse | undefined;
+    try {
+      data = JSON.parse(rawData);
+      if (isRecord(data) && isRecord(data.error)) {
+        const code = data.error.code;
+        const message = data.error.message;
+        const a2aError: { code: string | number; message: string; data?: JsonValue } = {
+          code: typeof code === "string" || typeof code === "number" ? code : "A2A_ERROR",
+          message: typeof message === "string" ? message : "A2A stream returned an error",
+        };
+        if (data.error.data !== undefined) {
+          a2aError.data = data.error.data as JsonValue;
+        }
+        throw new OpenLinkerA2AError(a2aError);
+      }
+      const maybeResult = isRecord(data) && "result" in data ? data.result : data;
+      if (isRecord(maybeResult)) {
+        result = maybeResult as unknown as A2AStreamResponse;
+      }
+    } catch (error) {
+      if (error instanceof OpenLinkerA2AError) {
+        throw error;
+      }
+    }
+    const event: A2AStreamEvent = {
+      event: eventName,
+      data,
+      ...(result ? { result } : {}),
+    };
+    if (eventId !== undefined) {
+      event.id = eventId;
+    }
+    await handlers.onEvent?.(event);
+    eventName = "message";
+    eventId = undefined;
+    dataLines = [];
+  };
+
+  const handleLine = async (line: string): Promise<void> => {
+    if (line === "") {
+      await dispatch();
+      return;
+    }
+    if (line.startsWith(":")) {
+      return;
+    }
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    let value = separator === -1 ? "" : line.slice(separator + 1);
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+    switch (field) {
+      case "event":
+        eventName = value || "message";
+        break;
+      case "data":
+        dataLines.push(value);
+        break;
+      case "id":
+        eventId = value;
+        break;
+      default:
+        break;
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).replace(/\r$/, "");
+      buffer = buffer.slice(newlineIndex + 1);
+      await handleLine(line);
+      newlineIndex = buffer.indexOf("\n");
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.length > 0) {
+    await handleLine(buffer.replace(/\r$/, ""));
+  }
+  await dispatch();
+  await handlers.onClose?.();
+}
+
+function collectA2AText(value: unknown, parts: string[]): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectA2AText(item, parts);
+    }
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  if (typeof value.text === "string" && value.text.trim()) {
+    parts.push(value.text.trim());
+  }
+  for (const key of ["parts", "artifacts", "history", "message", "messages", "result", "status"]) {
+    collectA2AText(value[key], parts);
+  }
 }
 
 function isTerminalRunEvent(event: StreamRunEvent): boolean {

@@ -1,4 +1,13 @@
-export { OpenLinkerClient, OpenLinkerError } from "./client.js";
+export {
+  OpenLinkerA2AError,
+  OpenLinkerClient,
+  OpenLinkerError,
+  a2aTaskStateRunStatus,
+  extractA2AText,
+  newA2ATextMessageParams,
+  normalizeA2AJsonRpcMethod,
+  normalizeA2ATaskState,
+} from "./client.js";
 export {
   createWebhookRunCallback,
   generateTaskCallbackSecret,

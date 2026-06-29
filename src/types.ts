@@ -328,6 +328,165 @@ export interface CallAgentRequest {
   pushNotificationConfig?: TaskCallbackConfig;
 }
 
+export interface A2AJsonRpcRequest {
+  jsonrpc: "2.0";
+  id?: string | number;
+  method: string;
+  params?: JsonValue;
+}
+
+export interface A2AJsonRpcError {
+  code: string | number;
+  message: string;
+  data?: JsonValue;
+}
+
+export interface A2AJsonRpcResponse<T = JsonValue> {
+  jsonrpc?: "2.0";
+  id?: string | number;
+  result?: T;
+  error?: A2AJsonRpcError;
+}
+
+export interface A2AMessageSendParams {
+  message: A2AMessage;
+  configuration?: A2ASendConfiguration;
+  metadata?: JsonObject;
+}
+
+export interface A2ASendConfiguration {
+  acceptedOutputModes?: string[];
+  blocking?: boolean;
+  pushNotificationConfig?: A2APushNotificationConfig;
+  taskPushNotificationConfig?: A2ATaskPushNotificationConfig;
+  historyLength?: number;
+}
+
+export interface A2APushNotificationConfig {
+  id?: string;
+  url?: string;
+  token?: string;
+  secret?: string;
+  authentication?: A2APushAuthenticationInfo;
+  metadata?: JsonObject;
+  eventTypes?: string[];
+  event_types?: string[];
+}
+
+export interface A2APushAuthenticationInfo {
+  scheme?: string;
+  credentials?: string;
+}
+
+export interface A2ATaskPushNotificationConfig {
+  taskId: string;
+  pushNotificationConfig: A2APushNotificationConfig;
+}
+
+export interface A2ATaskPushConfigParams {
+  id?: string;
+  taskId?: string;
+  pushNotificationConfigId?: string;
+  pushNotificationConfig?: A2APushNotificationConfig;
+}
+
+export interface A2ATaskPushConfigList {
+  items: A2ATaskPushNotificationConfig[];
+}
+
+export interface A2ATaskQueryParams {
+  id: string;
+  historyLength?: number;
+}
+
+export interface A2ATaskListParams {
+  contextId?: string;
+  status?: string;
+  pageSize?: number;
+  pageToken?: string;
+  historyLength?: number;
+  statusTimestampAfter?: string;
+  includeArtifacts?: boolean;
+}
+
+export interface A2ATaskListResponse {
+  tasks: A2ATask[];
+  nextPageToken?: string;
+  pageSize?: number;
+  totalSize?: number;
+}
+
+export interface A2AMessage {
+  kind?: string;
+  messageId?: string;
+  contextId?: string;
+  taskId?: string;
+  role?: string;
+  parts?: JsonObject[];
+  metadata?: JsonObject;
+}
+
+export interface A2ATask {
+  kind?: string;
+  id: string;
+  contextId?: string;
+  status: A2ATaskStatus;
+  artifacts?: A2AArtifact[];
+  history?: A2AMessage[];
+  metadata?: JsonObject;
+}
+
+export interface A2ATaskStatus {
+  state: string;
+  timestamp?: string;
+  message?: A2AMessage;
+}
+
+export interface A2AArtifact {
+  artifactId?: string;
+  name?: string;
+  parts?: JsonObject[];
+  metadata?: JsonObject;
+}
+
+export interface A2ATaskStatusUpdateEvent {
+  kind?: string;
+  taskId?: string;
+  contextId?: string;
+  status: A2ATaskStatus;
+  final?: boolean;
+  metadata?: JsonObject;
+}
+
+export interface A2ATaskArtifactUpdateEvent {
+  kind?: string;
+  taskId?: string;
+  contextId?: string;
+  artifact: A2AArtifact;
+  append?: boolean;
+  lastChunk?: boolean;
+  metadata?: JsonObject;
+}
+
+export interface A2AStreamResponse {
+  task?: A2ATask;
+  message?: A2AMessage;
+  statusUpdate?: A2ATaskStatusUpdateEvent;
+  artifactUpdate?: A2ATaskArtifactUpdateEvent;
+}
+
+export interface A2AStreamEvent {
+  id?: string;
+  event: string;
+  data: unknown;
+  result?: A2AStreamResponse;
+}
+
+export interface A2AStreamEventHandlers {
+  onEvent?: (event: A2AStreamEvent) => void | Promise<void>;
+  onClose?: () => void | Promise<void>;
+}
+
 export interface RuntimeWSClientMessage {
   type: string;
   id?: string;

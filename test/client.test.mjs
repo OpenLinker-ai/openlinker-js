@@ -2,10 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  OpenLinkerA2AError,
   OpenLinkerClient,
   OpenLinkerError,
+  a2aTaskStateRunStatus,
   createWebhookRunCallback,
+  extractA2AText,
   generateTaskCallbackSecret,
+  newA2ATextMessageParams,
+  normalizeA2AJsonRpcMethod,
+  normalizeA2ATaskState,
   signTaskCallbackPayload,
   taskCallbackSignatureFromHeaders,
   verifyTaskCallbackHeaders,
@@ -44,7 +50,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
   );
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_live_test");
-  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.0");
+  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.1");
 });
 
 test("runAgent maps camelCase input to Core request body", async () => {
@@ -600,6 +606,141 @@ test("claimRuntimeRun returns undefined on empty 204 claim", async () => {
   assert.equal(detailed.run, undefined);
   assert.equal(detailed.retryAfterMs, 3000);
   assert.equal(detailed.maxClaimWaitSeconds, 30);
+});
+
+test("A2A JSON-RPC client covers task and push notification methods", async () => {
+  const calls = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com/api/v1",
+    accessToken: "ol_public",
+    fetch: async (url, init) => {
+      const body = JSON.parse(init.body);
+      const headers = new Headers(init.headers);
+      calls.push({ url: String(url), headers, body });
+      if (body.method === "message/send" || body.method === "tasks/get" || body.method === "tasks/cancel") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            kind: "task",
+            id: "task-a2a",
+            status: {
+              state: "TASK_STATE_COMPLETED",
+              message: { parts: [{ kind: "text", text: "done" }] },
+            },
+          },
+        });
+      }
+      if (body.method === "tasks/list") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { tasks: [{ id: "task-a2a", status: { state: "completed" } }] },
+        });
+      }
+      if (body.method === "tasks/pushNotificationConfig/set" || body.method === "tasks/pushNotificationConfig/get") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            taskId: "task-a2a",
+            pushNotificationConfig: { id: "cfg-1", url: "https://caller.example/a2a/events" },
+          },
+        });
+      }
+      if (body.method === "tasks/pushNotificationConfig/list") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { items: [{ taskId: "task-a2a", pushNotificationConfig: { id: "cfg-1" } }] },
+        });
+      }
+      if (body.method === "tasks/pushNotificationConfig/delete") {
+        return jsonResponse({ jsonrpc: "2.0", id: body.id, result: null });
+      }
+      throw new Error(`unexpected method ${body.method}`);
+    },
+  });
+
+  const task = await client.a2aSendMessage("agent/one", newA2ATextMessageParams("msg-1", "hello"));
+  await client.a2aGetTask("agent/one", { id: "task-a2a" });
+  await client.a2aListTasks("agent/one", { status: "completed" });
+  await client.a2aCancelTask("agent/one", { id: "task-a2a" });
+  await client.a2aSetTaskPushNotificationConfig("agent/one", {
+    id: "task-a2a",
+    pushNotificationConfig: { url: "https://caller.example/a2a/events" },
+  });
+  await client.a2aGetTaskPushNotificationConfig("agent/one", {
+    id: "task-a2a",
+    pushNotificationConfigId: "cfg-1",
+  });
+  await client.a2aListTaskPushNotificationConfigs("agent/one", { id: "task-a2a" });
+  await client.a2aDeleteTaskPushNotificationConfig("agent/one", {
+    id: "task-a2a",
+    pushNotificationConfigId: "cfg-1",
+  });
+
+  assert.equal(task.id, "task-a2a");
+  assert.equal(a2aTaskStateRunStatus(task.status.state), "success");
+  assert.equal(extractA2AText(task), "done");
+  assert.equal(calls.length, 8);
+  assert.equal(calls[0].url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone");
+  assert.equal(calls[0].headers.get("authorization"), "Bearer ol_public");
+  assert.equal(calls[0].headers.get("a2a-version"), "1.0");
+  assert.equal(calls[0].body.method, "message/send");
+});
+
+test("A2A stream and JSON-RPC errors are parsed", async () => {
+  let requestCount = 0;
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (_url, init) => {
+      requestCount += 1;
+      const body = JSON.parse(init.body);
+      if (requestCount === 1) {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode([
+              "id: 1",
+              "event: task.status",
+              'data: {"jsonrpc":"2.0","result":{"statusUpdate":{"status":{"state":"TASK_STATE_WORKING"}}}}',
+              "",
+              "",
+            ].join("\n")));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: body.id,
+        error: { code: -32603, message: "boom" },
+      });
+    },
+  });
+  const events = [];
+  await client.a2aStreamMessage("agent-one", newA2ATextMessageParams("msg-1", "hello"), {
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(events.length, 1);
+  assert.equal(normalizeA2ATaskState(events[0].result.statusUpdate.status.state), "working");
+  await assert.rejects(
+    () => client.a2aGetTask("agent-one", { id: "task-bad" }),
+    (error) => {
+      assert.ok(error instanceof OpenLinkerA2AError);
+      assert.equal(error.code, -32603);
+      assert.equal(error.message, "boom");
+      return true;
+    },
+  );
+  assert.equal(normalizeA2AJsonRpcMethod("SendMessage"), "message/send");
+  assert.equal(normalizeA2AJsonRpcMethod("ListTaskPushNotificationConfigs"), "tasks/pushNotificationConfig/list");
+  assert.equal(normalizeA2ATaskState("TASK_STATE_CANCELLED"), "canceled");
+  assert.equal(a2aTaskStateRunStatus("TASK_STATE_REJECTED"), "failed");
 });
 
 test("runRuntimePullLoop reports heartbeat and claim errors before stopOnEmpty", async () => {
