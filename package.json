@@ -4,6 +4,25 @@
   "description": "TypeScript client SDK for OpenLinker Core APIs.",
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenLinker-ai/openlinker-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OpenLinker-ai/openlinker-js/issues"
+  },
+  "homepage": "https://github.com/OpenLinker-ai/openlinker-js#readme",
+  "keywords": [
+    "openlinker",
+    "sdk",
+    "ai-agents",
+    "agent-runtime",
+    "a2a",
+    "mcp"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
