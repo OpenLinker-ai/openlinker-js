@@ -96,6 +96,24 @@ if (!ok) {
 }
 ```
 
+## A2A Transports
+
+`@openlinker/sdk` is browser-first for A2A. It supports the JSON-RPC and
+HTTP+JSON/SSE bindings exposed by OpenLinker Core, including send, stream, task
+lookup, task cancel, resubscribe, extended card, and Push Notification Config
+methods.
+
+It does not bundle a native gRPC client. gRPC requires Node-only dependencies
+such as `@grpc/grpc-js` plus generated protobuf code, while this package must
+remain safe for browsers, edge runtimes, and ordinary HTTPS infrastructure. For
+gRPC callers, use `github.com/OpenLinker-ai/openlinker-go` or a separate
+Node-only generated client that reads the Agent Card `GRPC` interface and sends
+the advertised `tenant`.
+
+Operationally, gRPC is an additional A2A transport binding. It does not replace
+JSON-RPC, HTTP+JSON/SSE, or Agent Node's internal `runtime_ws` /
+`runtime_pull` channels.
+
 ## Core Surface
 
 The interim contract source is
