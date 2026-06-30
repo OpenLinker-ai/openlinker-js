@@ -7,17 +7,10 @@ export interface JsonObject {
 export type A2ADialect = "current" | "legacy" | string;
 
 export type ConnectionMode =
-  | "direct_http"
-  | "mcp_server"
-  | "runtime_pull"
-  | "runtime_ws";
+  "direct_http" | "mcp_server" | "runtime_pull" | "runtime_ws";
 
 export type RunStatus =
-  | "running"
-  | "success"
-  | "failed"
-  | "timeout"
-  | "canceled";
+  "running" | "success" | "failed" | "timeout" | "canceled";
 
 export interface ListAgentsParams {
   query?: string;
@@ -132,10 +125,25 @@ export interface RunAgentRequest {
   agentId: string;
   input: JsonValue;
   metadata?: JsonValue;
+  a2aContext?: RunA2AContext;
   callback?: RunCallbackConfig;
   taskCallback?: TaskCallbackConfig;
   pushNotification?: TaskCallbackConfig;
   pushNotificationConfig?: TaskCallbackConfig;
+}
+
+export interface RunA2AContext {
+  protocol_context_id?: string;
+  protocol_task_id?: string;
+  root_context_id?: string;
+  parent_context_id?: string;
+  parent_task_id?: string;
+  parent_run_id?: string;
+  caller_agent_id?: string;
+  target_agent_id?: string;
+  trace_id?: string;
+  reference_task_ids?: string[];
+  source?: string;
 }
 
 export interface PlatformRunCallbackConfig {
@@ -152,7 +160,8 @@ export interface WebhookRunCallbackConfig extends TaskCallbackConfig {
   mode: "webhook";
 }
 
-export type RunCallbackConfig = PlatformRunCallbackConfig | WebhookRunCallbackConfig;
+export type RunCallbackConfig =
+  PlatformRunCallbackConfig | WebhookRunCallbackConfig;
 
 export interface TaskCallbackAuthentication {
   scheme?: string;
@@ -194,6 +203,7 @@ export interface RunResponse {
   parent_run_id?: string;
   caller_agent_id?: string;
   billing_mode?: string;
+  a2a_context?: RunA2AContext;
   task_callback?: TaskCallbackSubscription;
   requirement_evidence?: JsonValue;
   evidence_summary?: JsonValue;
@@ -253,6 +263,13 @@ export interface AgentA2AContext {
   current_run_id: string;
   parent_run_id?: string;
   caller_agent_id?: string;
+  protocol_context_id?: string;
+  protocol_task_id?: string;
+  root_context_id?: string;
+  parent_context_id?: string;
+  parent_task_id?: string;
+  trace_id?: string;
+  reference_task_ids?: string[];
   call_agent_endpoint: string;
   call_agent_method: string;
   runtime_token_type: string;
@@ -325,6 +342,9 @@ export interface CallAgentRequest {
   reason?: string;
   input: JsonValue;
   metadata?: JsonValue;
+  contextId?: string;
+  traceId?: string;
+  referenceTaskIds?: string[];
   taskCallback?: TaskCallbackConfig;
   pushNotification?: TaskCallbackConfig;
   pushNotificationConfig?: TaskCallbackConfig;
@@ -449,6 +469,8 @@ export interface A2AMessage {
   messageId?: string;
   contextId?: string;
   taskId?: string;
+  referenceTaskIds?: string[];
+  extensions?: string[];
   role?: string;
   parts?: JsonObject[];
   metadata?: JsonObject;
@@ -473,6 +495,7 @@ export interface A2ATaskStatus {
 export interface A2AArtifact {
   artifactId?: string;
   name?: string;
+  extensions?: string[];
   parts?: JsonObject[];
   metadata?: JsonObject;
 }

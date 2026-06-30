@@ -641,6 +641,187 @@ export class OpenLinkerClient {
     return this.a2aJsonRpc<AgentCardResponse>(endpointOrSlug, "GetExtendedAgentCard", {}, options);
   }
 
+  async a2aSendMessageHTTP(
+    endpointOrSlug: string,
+    params: A2AMessageSendParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ASendMessageResponse> {
+    const result = await this.request<JsonValue>(
+      "POST",
+      a2aRestPath(endpointOrSlug, "/message:send"),
+      normalizeA2AMessageSendParamsForDialect(params, options.a2aDialect) as unknown as JsonValue,
+      withA2AHTTPJSON(options),
+    );
+    return decodeA2ASendMessageResponse(result);
+  }
+
+  async a2aStreamMessageHTTP(
+    endpointOrSlug: string,
+    params: A2AMessageSendParams,
+    handlers: A2AStreamEventHandlers = {},
+    options: A2ARequestOptions = {},
+  ): Promise<void> {
+    const response = await this.fetchRaw(
+      "POST",
+      a2aRestPath(endpointOrSlug, "/message:stream"),
+      normalizeA2AMessageSendParamsForDialect(params, options.a2aDialect) as unknown as JsonValue,
+      withA2AHTTPJSON(options),
+      undefined,
+      "text/event-stream",
+    );
+    if (!response.ok) {
+      throw await errorFromResponse(response);
+    }
+    if (!response.body) {
+      throw new Error("OpenLinker A2A stream response does not expose a body");
+    }
+    await readA2AEventStream(response.body, handlers);
+  }
+
+  async a2aGetTaskHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskQueryParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ATask> {
+    const query = new URLSearchParams();
+    appendQuery(query, "historyLength", params.historyLength);
+    return this.request<A2ATask>(
+      "GET",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(params.id)}`),
+      undefined,
+      withA2AVersion(options),
+      query,
+    );
+  }
+
+  async a2aListTasksHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskListParams = {},
+    options: A2ARequestOptions = {},
+  ): Promise<A2ATaskListResponse> {
+    return this.request<A2ATaskListResponse>(
+      "GET",
+      a2aRestPath(endpointOrSlug, "/tasks"),
+      undefined,
+      withA2AVersion(options),
+      a2aTaskListQuery(params),
+    );
+  }
+
+  async a2aCancelTaskHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskQueryParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ATask> {
+    return this.request<A2ATask>(
+      "POST",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(params.id)}:cancel`),
+      undefined,
+      withA2AVersion(options),
+    );
+  }
+
+  async a2aResubscribeTaskHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskQueryParams,
+    handlers: A2AStreamEventHandlers = {},
+    options: A2ARequestOptions = {},
+  ): Promise<void> {
+    const query = new URLSearchParams();
+    appendQuery(query, "historyLength", params.historyLength);
+    const response = await this.fetchRaw(
+      "GET",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(params.id)}/subscribe`),
+      undefined,
+      withA2AVersion(options),
+      query,
+      "text/event-stream",
+    );
+    if (!response.ok) {
+      throw await errorFromResponse(response);
+    }
+    if (!response.body) {
+      throw new Error("OpenLinker A2A stream response does not expose a body");
+    }
+    await readA2AEventStream(response.body, handlers);
+  }
+
+  async a2aSetTaskPushNotificationConfigHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ATaskPushNotificationConfig> {
+    const taskId = a2aTaskIdFromPushParams(params);
+    const result = await this.request<A2ATaskPushNotificationConfig>(
+      "POST",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(taskId)}/pushNotificationConfigs`),
+      normalizeA2ATaskPushConfigParamsForDialect(params, options.a2aDialect) as JsonValue,
+      withA2AHTTPJSON(options),
+    );
+    return normalizeA2ATaskPushNotificationConfigResult(result);
+  }
+
+  async a2aGetTaskPushNotificationConfigHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ATaskPushNotificationConfig> {
+    const taskId = a2aTaskIdFromPushParams(params);
+    const configId = a2aPushConfigId(params);
+    const result = await this.request<A2ATaskPushNotificationConfig>(
+      "GET",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(taskId)}/pushNotificationConfigs/${encodeURIComponent(configId)}`),
+      undefined,
+      withA2AVersion(options),
+    );
+    return normalizeA2ATaskPushNotificationConfigResult(result);
+  }
+
+  async a2aListTaskPushNotificationConfigsHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: A2ARequestOptions = {},
+  ): Promise<A2ATaskPushConfigList> {
+    const query = new URLSearchParams();
+    appendQuery(query, "pageSize", params.pageSize);
+    appendQuery(query, "pageToken", params.pageToken);
+    const result = await this.request<A2ATaskPushConfigList>(
+      "GET",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(a2aTaskIdFromPushParams(params))}/pushNotificationConfigs`),
+      undefined,
+      withA2AVersion(options),
+      query,
+    );
+    return normalizeA2ATaskPushConfigListResult(result);
+  }
+
+  async a2aDeleteTaskPushNotificationConfigHTTP(
+    endpointOrSlug: string,
+    params: A2ATaskPushConfigParams,
+    options: A2ARequestOptions = {},
+  ): Promise<void> {
+    const taskId = a2aTaskIdFromPushParams(params);
+    const configId = a2aPushConfigId(params);
+    await this.request<void>(
+      "DELETE",
+      a2aRestPath(endpointOrSlug, `/tasks/${encodeURIComponent(taskId)}/pushNotificationConfigs/${encodeURIComponent(configId)}`),
+      undefined,
+      withA2AVersion(options),
+    );
+  }
+
+  async a2aGetExtendedAgentCardHTTP(
+    endpointOrSlug: string,
+    options: A2ARequestOptions = {},
+  ): Promise<AgentCardResponse> {
+    return this.request<AgentCardResponse>(
+      "GET",
+      a2aRestPath(endpointOrSlug, "/extendedAgentCard"),
+      undefined,
+      withA2AVersion(options),
+    );
+  }
+
   private async a2aStream(
     endpointOrSlug: string,
     method: string,
@@ -861,6 +1042,11 @@ function a2aPath(endpointOrSlug: string): string {
   return `/a2a/agents/${encodeURIComponent(value)}`;
 }
 
+function a2aRestPath(endpointOrSlug: string, path: string): string {
+  const base = a2aPath(endpointOrSlug).replace(/\/+$/, "");
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 function withA2AVersion(options: RequestOptions): RequestOptions {
   const headers = new Headers(options.headers);
   if (!headers.has("a2a-version")) {
@@ -870,6 +1056,28 @@ function withA2AVersion(options: RequestOptions): RequestOptions {
     ...options,
     headers,
   };
+}
+
+function withA2AHTTPJSON(options: RequestOptions): RequestOptions {
+  const versioned = withA2AVersion(options);
+  const headers = new Headers(versioned.headers);
+  headers.set("content-type", "application/a2a+json");
+  return {
+    ...versioned,
+    headers,
+  };
+}
+
+function a2aTaskListQuery(params: A2ATaskListParams): URLSearchParams {
+  const query = new URLSearchParams();
+  appendQuery(query, "contextId", params.contextId);
+  appendQuery(query, "status", params.status);
+  appendQuery(query, "pageSize", params.pageSize);
+  appendQuery(query, "pageToken", params.pageToken);
+  appendQuery(query, "historyLength", params.historyLength);
+  appendQuery(query, "statusTimestampAfter", params.statusTimestampAfter);
+  appendQuery(query, "includeArtifacts", params.includeArtifacts);
+  return query;
 }
 
 export function newA2ATextMessageParams(
@@ -1022,6 +1230,17 @@ function normalizeA2ATaskPushConfigListResult(list: A2ATaskPushConfigList): A2AT
     configs,
     items: configs,
   };
+}
+
+function a2aTaskIdFromPushParams(params: A2ATaskPushConfigParams): string {
+  return (params.taskId || params.id || "").trim();
+}
+
+function a2aPushConfigId(params: A2ATaskPushConfigParams): string {
+  return (params.pushNotificationConfigId
+    || params.pushNotificationConfig?.id
+    || (params.taskId ? params.id : "")
+    || "").trim();
 }
 
 export function normalizeA2AParamsForDialect(params: JsonValue, dialect: A2ADialect = "current"): JsonValue {
@@ -1384,6 +1603,7 @@ function toRunRequestBody(request: RunAgentRequest): {
   agent_id: string;
   input: JsonValue;
   metadata?: JsonValue;
+  a2a_context?: JsonValue;
   task_callback?: JsonValue;
 } {
   const taskCallback = webhookCallbackFromRunRequest(request)
@@ -1394,6 +1614,7 @@ function toRunRequestBody(request: RunAgentRequest): {
     agent_id: request.agentId,
     input: request.input,
     ...(request.metadata ? { metadata: request.metadata } : {}),
+    ...(request.a2aContext ? { a2a_context: request.a2aContext as JsonValue } : {}),
     ...(taskCallback ? { task_callback: toTaskCallbackBody(taskCallback) } : {}),
   };
 }
@@ -1428,6 +1649,9 @@ function toCallAgentRequestBody(request: CallAgentRequest): {
   reason?: string;
   input: JsonValue;
   metadata?: JsonValue;
+  context_id?: string;
+  trace_id?: string;
+  reference_task_ids?: string[];
   task_callback?: JsonValue;
 } {
   const taskCallback = request.taskCallback ?? request.pushNotification ?? request.pushNotificationConfig;
@@ -1438,6 +1662,9 @@ function toCallAgentRequestBody(request: CallAgentRequest): {
     ...(request.reason ? { reason: request.reason } : {}),
     input: request.input,
     ...(request.metadata ? { metadata: request.metadata } : {}),
+    ...(request.contextId ? { context_id: request.contextId } : {}),
+    ...(request.traceId ? { trace_id: request.traceId } : {}),
+    ...(request.referenceTaskIds?.length ? { reference_task_ids: request.referenceTaskIds } : {}),
     ...(taskCallback ? { task_callback: toTaskCallbackBody(taskCallback) } : {}),
   };
 }
@@ -1483,10 +1710,15 @@ async function readResponse<T>(response: Response): Promise<T> {
   }
 
   const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) {
+  if (isJSONContentType(contentType)) {
     return await response.json() as T;
   }
   return await response.text() as T;
+}
+
+function isJSONContentType(contentType: string): boolean {
+  const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return type === "application/json" || type.endsWith("+json");
 }
 
 function retryAfterMs(headers: Headers): number | undefined {

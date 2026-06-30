@@ -75,6 +75,11 @@ test("runAgent maps camelCase input to Core request body", async () => {
     agentId: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     metadata: { trace_id: "trace-1" },
+    a2aContext: {
+      contextId: "ctx-root",
+      taskId: "task-root",
+      traceId: "trace-1",
+    },
     pushNotificationConfig: {
       url: "https://caller.example.com/a2a/events",
       token: "caller-token",
@@ -90,6 +95,11 @@ test("runAgent maps camelCase input to Core request body", async () => {
     agent_id: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     metadata: { trace_id: "trace-1" },
+    a2a_context: {
+      contextId: "ctx-root",
+      taskId: "task-root",
+      traceId: "trace-1",
+    },
     task_callback: {
       url: "https://caller.example.com/a2a/events",
       token: "caller-token",
@@ -539,6 +549,9 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     targetAgentId: "target-agent",
     reason: "delegate",
     input: { query: "child" },
+    contextId: "ctx-sdk",
+    traceId: "trace-sdk",
+    referenceTaskIds: ["task-parent"],
     taskCallback: {
       url: "https://caller.example.com/a2a/events",
       token: "caller-token",
@@ -574,6 +587,9 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
     target_agent_id: "target-agent",
     reason: "delegate",
     input: { query: "child" },
+    context_id: "ctx-sdk",
+    trace_id: "trace-sdk",
+    reference_task_ids: ["task-parent"],
     task_callback: {
       url: "https://caller.example.com/a2a/events",
       token: "caller-token",
@@ -716,6 +732,108 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
   assert.equal(calls[4].body.params.pushNotificationConfig, undefined);
   assert.equal(calls[6].body.params.taskId, "task-a2a");
   assert.equal(calls[6].body.params.id, undefined);
+});
+
+test("A2A HTTP+JSON client covers REST task and push methods", async () => {
+  const calls = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com/api/v1",
+    accessToken: "ol_public",
+    fetch: async (url, init) => {
+      const headers = new Headers(init.headers);
+      const body = init.body ? JSON.parse(init.body) : undefined;
+      const parsed = new URL(String(url));
+      calls.push({ url: String(url), method: init.method, headers, body });
+      assert.equal(headers.get("authorization"), "Bearer ol_public");
+      assert.equal(headers.get("a2a-version"), "1.0");
+      if (init.method === "POST" && parsed.pathname.endsWith("/message:send")) {
+        assert.equal(headers.get("content-type"), "application/a2a+json");
+        assert.equal(body.message.role, "ROLE_USER");
+        return a2aJSONResponse({ task: { id: "task-rest", status: { state: "TASK_STATE_COMPLETED" } } });
+      }
+      if (init.method === "POST" && parsed.pathname.endsWith("/message:stream")) {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode([
+              "event: status-update",
+              'data: {"statusUpdate":{"status":{"state":"TASK_STATE_WORKING"}}}',
+              "",
+              "",
+            ].join("\n")));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest")) {
+        assert.equal(parsed.searchParams.get("historyLength"), "2");
+        return a2aJSONResponse({ id: "task-rest", status: { state: "TASK_STATE_COMPLETED" } });
+      }
+      if (init.method === "GET" && parsed.pathname.endsWith("/tasks")) {
+        assert.equal(parsed.searchParams.get("contextId"), "ctx-rest");
+        assert.equal(parsed.searchParams.get("includeArtifacts"), "true");
+        return a2aJSONResponse({ tasks: [{ id: "task-rest", status: { state: "completed" } }] });
+      }
+      if (init.method === "POST" && parsed.pathname.endsWith("/tasks/task-rest:cancel")) {
+        return a2aJSONResponse({ id: "task-rest", status: { state: "TASK_STATE_CANCELED" } });
+      }
+      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/subscribe")) {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode([
+              "event: task",
+              'data: {"task":{"id":"task-rest","status":{"state":"TASK_STATE_COMPLETED"}}}',
+              "",
+              "",
+            ].join("\n")));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      if (init.method === "POST" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs")) {
+        return a2aJSONResponse({ taskId: "task-rest", id: "cfg-1", url: body.url });
+      }
+      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs/cfg-1")) {
+        return a2aJSONResponse({ taskId: "task-rest", id: "cfg-1" });
+      }
+      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs")) {
+        return a2aJSONResponse({ configs: [{ taskId: "task-rest", id: "cfg-1" }] });
+      }
+      if (init.method === "DELETE" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs/cfg-1")) {
+        return new Response(null, { status: 204 });
+      }
+      if (init.method === "GET" && parsed.pathname.endsWith("/extendedAgentCard")) {
+        return a2aJSONResponse({ name: "REST Agent", description: "", url: "", version: "v1", provider: {}, capabilities: {}, default_input_modes: [], default_output_modes: [], skills: [], authentication: {}, openlinker: {} });
+      }
+      throw new Error(`unexpected REST request ${init.method} ${parsed.pathname}`);
+    },
+  });
+
+  const send = await client.a2aSendMessageHTTP("agent/one", newA2ATextMessageParams("msg-rest", "hello"));
+  assert.equal(send.task.id, "task-rest");
+  const streamEvents = [];
+  await client.a2aStreamMessageHTTP("agent/one", newA2ATextMessageParams("msg-stream", "hello"), {
+    onEvent: (event) => streamEvents.push(event),
+  });
+  assert.equal(streamEvents.length, 1);
+  await client.a2aGetTaskHTTP("agent/one", { id: "task-rest", historyLength: 2 });
+  await client.a2aListTasksHTTP("agent/one", { contextId: "ctx-rest", includeArtifacts: true });
+  await client.a2aCancelTaskHTTP("agent/one", { id: "task-rest" });
+  const subscribeEvents = [];
+  await client.a2aResubscribeTaskHTTP("agent/one", { id: "task-rest" }, {
+    onEvent: (event) => subscribeEvents.push(event),
+  });
+  assert.equal(subscribeEvents.length, 1);
+  const push = { id: "task-rest", pushNotificationConfigId: "cfg-1", pushNotificationConfig: { url: "https://caller.example/a2a/events" } };
+  await client.a2aSetTaskPushNotificationConfigHTTP("agent/one", push);
+  await client.a2aGetTaskPushNotificationConfigHTTP("agent/one", push);
+  await client.a2aListTaskPushNotificationConfigsHTTP("agent/one", push);
+  await client.a2aDeleteTaskPushNotificationConfigHTTP("agent/one", push);
+  const card = await client.a2aGetExtendedAgentCardHTTP("agent/one");
+  assert.equal(card.name, "REST Agent");
+  assert.equal(calls.length, 11);
+  assert.equal(calls[0].url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone/message:send");
 });
 
 test("A2A send message response supports direct message payloads", async () => {
@@ -1120,6 +1238,15 @@ test("connectRuntimeWebSocket requires a WebSocket implementation by default", a
 function jsonResponse(body, init = {}) {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers,
+  });
+}
+
+function a2aJSONResponse(body, init = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("content-type", "application/a2a+json");
   return new Response(JSON.stringify(body), {
     ...init,
     headers,
