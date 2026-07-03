@@ -55,6 +55,28 @@ test("listAgents builds Core API URL and authorization header", async () => {
   assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.3");
 });
 
+test("client rejects oversized API response bodies", async () => {
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async () => new Response("{}", {
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(8 * 1024 * 1024 + 1),
+      },
+    }),
+  });
+
+  await assert.rejects(
+    () => client.listAgents(),
+    (error) => {
+      assert.ok(error instanceof OpenLinkerError);
+      assert.equal(error.status, 200);
+      assert.equal(error.code, "RESPONSE_TOO_LARGE");
+      return true;
+    },
+  );
+});
+
 test("runAgent maps camelCase input to Core request body", async () => {
   const calls = [];
   const client = new OpenLinkerClient({

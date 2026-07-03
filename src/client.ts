@@ -53,6 +53,8 @@ export interface OpenLinkerClientOptions {
   sdkAgent?: string | undefined;
 }
 
+const MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
+
 export interface RequestOptions {
   signal?: AbortSignal | undefined;
   headers?: HeadersInit | undefined;
@@ -175,6 +177,13 @@ export class OpenLinkerA2AError extends Error {
     this.name = "OpenLinkerA2AError";
     this.code = error.code;
     this.data = error.data;
+  }
+}
+
+class ResponseBodyTooLargeError extends Error {
+  constructor() {
+    super(`OpenLinker response body exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`);
+    this.name = "ResponseBodyTooLargeError";
   }
 }
 
@@ -1709,11 +1718,59 @@ async function readResponse<T>(response: Response): Promise<T> {
     return undefined as T;
   }
 
+  let text: string;
+  try {
+    text = await readResponseText(response);
+  } catch (error) {
+    if (error instanceof ResponseBodyTooLargeError) {
+      throw new OpenLinkerError(error.message, {
+        status: response.status,
+        code: "RESPONSE_TOO_LARGE",
+        retryAfterMs: retryAfterMs(response.headers),
+      });
+    }
+    throw error;
+  }
+
   const contentType = response.headers.get("content-type") ?? "";
   if (isJSONContentType(contentType)) {
-    return await response.json() as T;
+    return JSON.parse(text) as T;
   }
-  return await response.text() as T;
+  return text as T;
+}
+
+async function readResponseText(response: Response): Promise<string> {
+  const declaredLength = numberHeader(response.headers, "content-length");
+  if (declaredLength !== undefined && declaredLength > MAX_RESPONSE_BODY_BYTES) {
+    throw new ResponseBodyTooLargeError();
+  }
+  if (!response.body) {
+    return "";
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BODY_BYTES) {
+        await reader.cancel();
+        throw new ResponseBodyTooLargeError();
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return text + decoder.decode();
 }
 
 function isJSONContentType(contentType: string): boolean {
@@ -1799,7 +1856,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function errorFromResponse(response: Response): Promise<OpenLinkerError> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await readResponseText(response);
+  } catch (error) {
+    if (error instanceof ResponseBodyTooLargeError) {
+      return new OpenLinkerError(error.message, {
+        status: response.status,
+        code: "RESPONSE_TOO_LARGE",
+        retryAfterMs: retryAfterMs(response.headers),
+      });
+    }
+    throw error;
+  }
   let parsed: unknown;
   if (text) {
     try {
