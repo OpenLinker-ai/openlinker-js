@@ -46,8 +46,8 @@ export type FetchLike = (
 
 export interface OpenLinkerClientOptions {
   baseUrl: string;
-  accessToken?: string | (() => string | Promise<string | undefined>) | undefined;
-  runtimeToken?: string | (() => string | Promise<string | undefined>) | undefined;
+  userToken?: string | (() => string | Promise<string | undefined>) | undefined;
+  agentToken?: string | (() => string | Promise<string | undefined>) | undefined;
   headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>) | undefined;
   fetch?: FetchLike | undefined;
   sdkAgent?: string | undefined;
@@ -190,11 +190,11 @@ class ResponseBodyTooLargeError extends Error {
 export class OpenLinkerClient {
   readonly baseUrl: string;
 
-  readonly #accessToken:
+  readonly #userToken:
     | string
     | (() => string | Promise<string | undefined>)
     | undefined;
-  readonly #runtimeToken:
+  readonly #agentToken:
     | string
     | (() => string | Promise<string | undefined>)
     | undefined;
@@ -216,8 +216,8 @@ export class OpenLinkerClient {
     }
 
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
-    this.#accessToken = options.accessToken;
-    this.#runtimeToken = options.runtimeToken;
+    this.#userToken = options.userToken;
+    this.#agentToken = options.agentToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
     this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.3";
@@ -430,7 +430,7 @@ export class OpenLinkerClient {
       "POST",
       "/agent-runtime/heartbeat",
       undefined,
-      await this.withRuntimeToken(options),
+      await this.withAgentToken(options),
     );
   }
 
@@ -451,7 +451,7 @@ export class OpenLinkerClient {
       "GET",
       "/agent-runtime/runs/claim",
       undefined,
-      await this.withRuntimeToken(options),
+      await this.withAgentToken(options),
       query,
     );
     if (!response.ok) {
@@ -475,7 +475,7 @@ export class OpenLinkerClient {
       "POST",
       `/agent-runtime/runs/${encodeURIComponent(runId)}/result`,
       result,
-      await this.withRuntimeToken(options),
+      await this.withAgentToken(options),
     );
   }
 
@@ -495,7 +495,7 @@ export class OpenLinkerClient {
       "POST",
       endpoint || "/agent-runtime/call-agent",
       toCallAgentRequestBody(request),
-      await this.withRuntimeToken(options),
+      await this.withAgentToken(options),
     );
   }
 
@@ -994,20 +994,20 @@ export class OpenLinkerClient {
     mergeHeaders(headers, defaultHeaders);
     mergeHeaders(headers, options.headers);
 
-    const token = await resolveMaybe(this.#accessToken);
+    const token = await resolveMaybe(this.#userToken);
     if (token && !headers.has("authorization")) {
       headers.set("authorization", `Bearer ${token}`);
     }
     return headers;
   }
 
-  private async withRuntimeToken(options: RequestOptions): Promise<RequestOptions> {
-    const runtimeToken = await resolveMaybe(this.#runtimeToken);
-    if (!runtimeToken) {
+  private async withAgentToken(options: RequestOptions): Promise<RequestOptions> {
+    const agentToken = await resolveMaybe(this.#agentToken);
+    if (!agentToken) {
       return options;
     }
     const headers = new Headers(options.headers);
-    headers.set("authorization", `Bearer ${runtimeToken}`);
+    headers.set("authorization", `Bearer ${agentToken}`);
     return {
       ...options,
       headers,
@@ -1015,7 +1015,7 @@ export class OpenLinkerClient {
   }
 
   private async runtimeWebSocketHeaders(options: RequestOptions): Promise<Record<string, string>> {
-    const headers = await this.buildHeaders(await this.withRuntimeToken(options), false);
+    const headers = await this.buildHeaders(await this.withAgentToken(options), false);
     const out: Record<string, string> = {};
     headers.forEach((value, key) => {
       out[key] = value;

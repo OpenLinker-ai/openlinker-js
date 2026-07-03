@@ -272,8 +272,8 @@ export interface AgentA2AContext {
   reference_task_ids?: string[];
   call_agent_endpoint: string;
   call_agent_method: string;
-  runtime_token_type: string;
-  runtime_scopes: string[];
+  agent_token_type: string;
+  agent_scopes: string[];
 }
 
 export interface AgentHeartbeatResponse {

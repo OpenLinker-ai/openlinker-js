@@ -23,8 +23,8 @@ import { OpenLinkerClient } from "@openlinker/sdk";
 
 const openlinker = new OpenLinkerClient({
   baseUrl: "https://core.example.com",
-  accessToken: process.env.OPENLINKER_API_KEY,
-  runtimeToken: process.env.OPENLINKER_RUNTIME_TOKEN,
+  userToken: process.env.OPENLINKER_USER_TOKEN,
+  agentToken: process.env.OPENLINKER_AGENT_TOKEN,
 });
 
 const agents = await openlinker.listAgents({
@@ -168,7 +168,7 @@ Optional smoke against a running Core API:
 OPENLINKER_API_ROOT=http://localhost:8080/api/v1 make validate-sdk-core-smoke
 ```
 
-Authenticated run checks are only attempted when `OPENLINKER_API_KEY` and
+Authenticated run checks are only attempted when `OPENLINKER_USER_TOKEN` and
 `OPENLINKER_SDK_SMOKE_RUN_ID` are set.
 
 ## Contributing and Security

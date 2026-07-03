@@ -21,7 +21,7 @@
       "client_method": "heartbeatAgent",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/heartbeat",
-      "auth": "runtime_token",
+      "auth": "agent_token",
       "required_scope": "agent:pull",
       "source": "openlinker-core/pkg/runtime/handler.go"
     },
@@ -29,7 +29,7 @@
       "client_method": "claimRuntimeRun",
       "http_method": "GET",
       "path": "/api/v1/agent-runtime/runs/claim",
-      "auth": "runtime_token",
+      "auth": "agent_token",
       "required_scope": "agent:pull",
       "source": "openlinker-core/pkg/runtime/handler.go"
     },
@@ -37,7 +37,7 @@
       "client_method": "completeRuntimeRun",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/runs/{id}/result",
-      "auth": "runtime_token",
+      "auth": "agent_token",
       "required_scope": "agent:pull",
       "source": "openlinker-core/pkg/runtime/handler.go"
     },
@@ -45,7 +45,7 @@
       "client_method": "callAgent",
       "http_method": "POST",
       "path": "/api/v1/agent-runtime/call-agent",
-      "auth": "runtime_token",
+      "auth": "agent_token",
       "required_scope": "agent:call",
       "source": "openlinker-core/pkg/a2a/handler.go"
     }

@@ -24,7 +24,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
   const calls = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
-    accessToken: "ol_live_test",
+    userToken: "ol_user_test",
     fetch: async (url, init) => {
       calls.push({ url: String(url), init });
       return jsonResponse({
@@ -51,7 +51,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
     "https://core.example.com/api/v1/agents?q=data&page=2&size=5&callable_only=true&tags=sql%2Cfinance",
   );
   const headers = new Headers(calls[0].init.headers);
-  assert.equal(headers.get("authorization"), "Bearer ol_live_test");
+  assert.equal(headers.get("authorization"), "Bearer ol_user_test");
   assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.3");
 });
 
@@ -292,7 +292,7 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
   const calls = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1/",
-    accessToken: async () => "ol_live_async",
+    userToken: async () => "ol_user_async",
     headers: async () => ({ "x-default": "base" }),
     fetch: async (url, init) => {
       calls.push({
@@ -341,7 +341,7 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
     input: "hello",
     metadata: { trace_id: "trace-helper" },
   });
-  assert.equal(calls[0].headers.get("authorization"), "Bearer ol_live_async");
+  assert.equal(calls[0].headers.get("authorization"), "Bearer ol_user_async");
   assert.equal(calls[2].headers.get("authorization"), "Bearer ol_override");
   assert.equal(calls[2].headers.get("x-default"), "override");
   assert.equal(calls[2].headers.get("content-type"), "application/json");
@@ -381,7 +381,7 @@ test("fallback Core errors and 204 responses preserve retry metadata", async () 
   let requestCount = 0;
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    accessToken: "ol_live_user",
+    userToken: "ol_user_user",
     fetch: async () => {
       requestCount += 1;
       if (requestCount === 1) {
@@ -501,12 +501,12 @@ test("streamRunEvents handles comments, plain text, buffered lines, and missing 
   );
 });
 
-test("runtime methods use runtime token and protocol endpoints", async () => {
+test("runtime methods use agent token and protocol endpoints", async () => {
   const calls = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    accessToken: "ol_live_user",
-    runtimeToken: "ol_live_runtime",
+    userToken: "ol_user_user",
+    agentToken: "ol_agent_runtime",
     fetch: async (url, init) => {
       const call = {
         url: String(url),
@@ -595,7 +595,7 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
   assert.equal(childAt.run_id, "child-1");
   assert.deepEqual(
     calls.map((call) => call.headers.get("authorization")),
-    ["Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime", "Bearer ol_live_runtime"],
+    ["Bearer ol_agent_runtime", "Bearer ol_agent_runtime", "Bearer ol_agent_runtime", "Bearer ol_agent_runtime", "Bearer ol_agent_runtime"],
   );
   assert.equal(calls[1].url, "https://core.example.com/api/v1/agent-runtime/runs/claim?wait=25");
   assert.deepEqual(calls[2].body, {
@@ -631,7 +631,7 @@ test("runtime methods use runtime token and protocol endpoints", async () => {
 test("claimRuntimeRun returns undefined on empty 204 claim", async () => {
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    runtimeToken: "ol_live_runtime",
+    agentToken: "ol_agent_runtime",
     fetch: async () => new Response(null, {
       status: 204,
       headers: {
@@ -652,7 +652,7 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
   const calls = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
-    accessToken: "ol_public",
+    userToken: "ol_public",
     fetch: async (url, init) => {
       const body = JSON.parse(init.body);
       const headers = new Headers(init.headers);
@@ -760,7 +760,7 @@ test("A2A HTTP+JSON client covers REST task and push methods", async () => {
   const calls = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
-    accessToken: "ol_public",
+    userToken: "ol_public",
     fetch: async (url, init) => {
       const headers = new Headers(init.headers);
       const body = init.body ? JSON.parse(init.body) : undefined;
@@ -967,7 +967,7 @@ test("runRuntimePullLoop reports heartbeat and claim errors before stopOnEmpty",
   let claimCalls = 0;
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    runtimeToken: "ol_live_runtime",
+    agentToken: "ol_agent_runtime",
     fetch: async (url) => {
       if (String(url).endsWith("/agent-runtime/heartbeat")) {
         heartbeatCalls += 1;
@@ -1014,12 +1014,12 @@ test("runRuntimePullLoop reports heartbeat and claim errors before stopOnEmpty",
   assert.deepEqual(errors.map((error) => error.code), ["HEARTBEAT_BUSY", "CLAIM_BACKOFF"]);
 });
 
-test("runRuntimePullLoop claims assignments with runtime token", async () => {
+test("runRuntimePullLoop claims assignments with agent token", async () => {
   const calls = [];
   const assignments = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    runtimeToken: "ol_live_runtime",
+    agentToken: "ol_agent_runtime",
     fetch: async (url, init) => {
       calls.push({
         url: String(url),
@@ -1048,7 +1048,7 @@ test("runRuntimePullLoop claims assignments with runtime token", async () => {
           result_endpoint: "/api/v1/agent-runtime/runs/run-loop/result",
           result_method: "POST",
           result_required: true,
-          a2a: { current_run_id: "run-loop", call_agent_endpoint: "/api/v1/agent-runtime/call-agent", call_agent_method: "POST", runtime_token_type: "scoped", runtime_scopes: ["agent:call"] },
+          a2a: { current_run_id: "run-loop", call_agent_endpoint: "/api/v1/agent-runtime/call-agent", call_agent_method: "POST", agent_token_type: "scoped", agent_scopes: ["agent:call"] },
         });
       }
       throw new Error(`unexpected URL ${url}`);
@@ -1068,7 +1068,7 @@ test("runRuntimePullLoop claims assignments with runtime token", async () => {
   assert.equal(assignments[0].type, "run.assigned");
   assert.equal(assignments[0].run_id, "run-loop");
   assert.equal(assignments[0].input, "hello");
-  assert.deepEqual(calls.map((call) => call.authorization), ["Bearer ol_live_runtime", "Bearer ol_live_runtime"]);
+  assert.deepEqual(calls.map((call) => call.authorization), ["Bearer ol_agent_runtime", "Bearer ol_agent_runtime"]);
   assert.equal(calls[1].url, "https://core.example.com/api/v1/agent-runtime/runs/claim?wait=2");
 });
 
@@ -1078,7 +1078,7 @@ test("connectRuntimeWebSocket handles assignment and sends event/result", async 
   const assignments = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
-    runtimeToken: "ol_live_ws",
+    agentToken: "ol_agent_ws",
     fetch: async () => {
       throw new Error("fetch should not be used for websocket");
     },
@@ -1098,7 +1098,7 @@ test("connectRuntimeWebSocket handles assignment and sends event/result", async 
 
   const socket = sockets[0];
   assert.equal(socket.url, "wss://core.example.com/api/v1/agent-runtime/ws");
-  assert.equal(socket.options.headers.authorization, "Bearer ol_live_ws");
+  assert.equal(socket.options.headers.authorization, "Bearer ol_agent_ws");
   socket.open();
   await connection.ready;
   socket.message({ type: "runtime.ready", agent_id: "agent-1" });
@@ -1109,7 +1109,7 @@ test("connectRuntimeWebSocket handles assignment and sends event/result", async 
     input: { task: "ws" },
     source: "api",
     result_required: true,
-    a2a: { current_run_id: "run-ws", call_agent_endpoint: "/api/v1/agent-runtime/call-agent", call_agent_method: "POST", runtime_token_type: "scoped", runtime_scopes: ["agent:call"] },
+    a2a: { current_run_id: "run-ws", call_agent_endpoint: "/api/v1/agent-runtime/call-agent", call_agent_method: "POST", agent_token_type: "scoped", agent_scopes: ["agent:call"] },
   });
   await nextTick();
 
@@ -1137,7 +1137,7 @@ test("connectRuntimeWebSocket reconnects after close", async () => {
   const assignments = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    runtimeToken: "ol_live_ws",
+    agentToken: "ol_agent_ws",
     fetch: async () => {
       throw new Error("fetch should not be used for websocket");
     },
@@ -1180,7 +1180,7 @@ test("connectRuntimeWebSocket sends heartbeats and reports edge errors", async (
   const errors = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
-    runtimeToken: "ol_live_ws",
+    agentToken: "ol_agent_ws",
     fetch: async () => {
       throw new Error("fetch should not be used for websocket");
     },
@@ -1239,7 +1239,7 @@ test("connectRuntimeWebSocket requires a WebSocket implementation by default", a
   try {
     const client = new OpenLinkerClient({
       baseUrl: "https://core.example.com",
-      runtimeToken: "ol_live_ws",
+      agentToken: "ol_agent_ws",
       fetch: async () => {
         throw new Error("fetch should not be used for websocket");
       },
