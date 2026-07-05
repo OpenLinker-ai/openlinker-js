@@ -1,11 +1,25 @@
 # @openlinker/sdk
 
-TypeScript client SDK for OpenLinker Core APIs.
+`@openlinker/sdk` is the TypeScript SDK for OpenLinker Core APIs and
+browser/edge-friendly A2A transports. It is intended for web apps, Node.js
+services, edge runtimes, and developer tooling that need to discover Agents,
+start runs, stream events, verify callbacks, or call OpenLinker-hosted A2A
+bindings over ordinary HTTPS infrastructure.
 
-Status: pre-release skeleton. The package is intentionally limited to Core
-registry, client runtime, and Agent runtime protocol APIs. Cloud wallet,
-billing, task marketplace, commercial dashboard, workflow product APIs, and
-adapter implementations are out of scope for this package.
+## Status
+
+This SDK is pre-1.0. The package tracks the Core API and runtime contracts while
+they are still stabilizing. Pin versions or commits and review `CHANGELOG.md`
+before upgrading.
+
+## 中文概览
+
+`@openlinker/sdk` 是 OpenLinker Core 的 TypeScript SDK，面向浏览器、Edge runtime
+和 Node.js 服务。它覆盖 Agent 查询、运行任务、事件流、回调校验、runtime
+pull/WebSocket，以及 A2A JSON-RPC / HTTP+JSON / SSE。
+
+本 SDK 不内置原生 gRPC 客户端，也不包含钱包、扣费、Stripe、提现、商业 Dashboard
+或本地 adapter 实现。
 
 ## Install
 
@@ -13,10 +27,10 @@ adapter implementations are out of scope for this package.
 npm install @openlinker/sdk
 ```
 
-The package is not published yet. Use this directory as the source package
-while the API contract is being finalized.
+The package may still be used from this repository directly while the API
+contract is being finalized.
 
-## Usage
+## Quick Start
 
 ```ts
 import { OpenLinkerClient } from "@openlinker/sdk";
@@ -24,7 +38,6 @@ import { OpenLinkerClient } from "@openlinker/sdk";
 const openlinker = new OpenLinkerClient({
   baseUrl: "https://core.example.com",
   userToken: process.env.OPENLINKER_USER_TOKEN,
-  agentToken: process.env.OPENLINKER_AGENT_TOKEN,
 });
 
 const agents = await openlinker.listAgents({
@@ -44,6 +57,12 @@ await openlinker.streamRunEvents(run.run_id, {
 });
 ```
 
+中文快速开始：安装 `@openlinker/sdk` 后创建 `OpenLinkerClient`，传入 Core API
+地址和 user token，即可查询 Agent、发起 run、监听事件。浏览器代码不要直接暴露
+高权限 token。
+
+## Callbacks
+
 Platform-hosted callbacks do not require a public callback URL:
 
 ```ts
@@ -60,9 +79,7 @@ const result = await openlinker.runAgentWithCallbacks({
 });
 ```
 
-External webhook callbacks are still available for server integrations. The
-SDK builds the callback config and can generate a signing secret when one is
-not supplied:
+External webhook callbacks are available for server integrations:
 
 ```ts
 import { createWebhookRunCallback } from "@openlinker/sdk";
@@ -72,15 +89,9 @@ const callback = createWebhookRunCallback({
   secret: process.env.OPENLINKER_CALLBACK_SECRET,
   eventTypes: ["run.completed", "run.failed"],
 });
-
-await openlinker.startAgentRun({
-  agentId: agents.items[0].id,
-  input: { query: "Summarize this dataset" },
-  callback,
-});
 ```
 
-Use the same secret in your webhook handler to verify the raw request body:
+Verify the raw request body before trusting webhook payloads:
 
 ```ts
 import { verifyTaskCallbackHeaders } from "@openlinker/sdk";
@@ -107,8 +118,7 @@ It does not bundle a native gRPC client. gRPC requires Node-only dependencies
 such as `@grpc/grpc-js` plus generated protobuf code, while this package must
 remain safe for browsers, edge runtimes, and ordinary HTTPS infrastructure. For
 gRPC callers, use `github.com/OpenLinker-ai/openlinker-go` or a separate
-Node-only generated client that reads the Agent Card `GRPC` interface and sends
-the advertised `tenant`.
+Node-only generated client.
 
 Operationally, gRPC is an additional A2A transport binding. It does not replace
 JSON-RPC, HTTP+JSON/SSE, or Agent Node's internal `runtime_ws` /
@@ -119,7 +129,7 @@ JSON-RPC, HTTP+JSON/SSE, or Agent Node's internal `runtime_ws` /
 The interim contract source is
 [`contracts/core-client.v1.json`](./contracts/core-client.v1.json) and
 [`contracts/core-runtime.v1.json`](./contracts/core-runtime.v1.json). They list
-the Core endpoints this package is allowed to wrap until OpenAPI / JSON Schema
+the Core endpoints this package is allowed to wrap until OpenAPI or JSON Schema
 generation is in place.
 
 Application-side calls:
@@ -148,11 +158,6 @@ Agent runtime protocol:
 - `runRuntimePullLoop`
 - `connectRuntimeWebSocket`
 
-The package includes the base runtime integration layer: pull loop, websocket
-connect/reconnect, heartbeat messages, assignment callbacks, `run.event`, and
-`run.result` submission. It does not include adapters such as command, Codex,
-OpenClaw, or local HTTP backend runners.
-
 ## Development
 
 ```bash
@@ -162,7 +167,7 @@ npm run build
 npm test
 ```
 
-Optional smoke against a running Core API:
+Optional smoke test against a running Core API:
 
 ```bash
 OPENLINKER_API_ROOT=http://localhost:8080/api/v1 make validate-sdk-core-smoke
@@ -171,13 +176,25 @@ OPENLINKER_API_ROOT=http://localhost:8080/api/v1 make validate-sdk-core-smoke
 Authenticated run checks are only attempted when `OPENLINKER_USER_TOKEN` and
 `OPENLINKER_SDK_SMOKE_RUN_ID` are set.
 
-## Contributing and Security
+## Security
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development rules and
-[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for conduct expectations.
-Use [SUPPORT.md](./SUPPORT.md) for help, [SECURITY.md](./SECURITY.md) for
-vulnerability reporting, [CHANGELOG.md](./CHANGELOG.md) for release notes, and
-[RELEASE.md](./RELEASE.md) for release checks.
+Keep user tokens, agent tokens, callback secrets, and push credentials out of
+logs and public issue reports. Browser code should use least-privilege tokens
+or a server-side proxy. Report vulnerabilities through [SECURITY.md](./SECURITY.md).
+
+## Contributing
+
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request.
+
+中文贡献提示：SDK 只封装开源 Core 协议，不加入 Cloud 钱包、商业计费或托管市场内部
+接口。改动公共 API 时要同步测试和契约文件。
+
+## Support and Releases
+
+- Help and issue guidance: [SUPPORT.md](./SUPPORT.md)
+- Release checklist: [RELEASE.md](./RELEASE.md)
+- Notable changes: [CHANGELOG.md](./CHANGELOG.md)
+- Conduct expectations: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 
 ## License
 
