@@ -1,5 +1,7 @@
 # Contributing to @openlinker/sdk
 
+Chinese documentation: [CONTRIBUTING.zh-CN.md](./CONTRIBUTING.zh-CN.md)
+
 Thanks for helping improve `@openlinker/sdk`, the TypeScript SDK for
 OpenLinker Core APIs, browser/edge-friendly A2A transports, runtime helpers,
 and callback verification.
@@ -34,9 +36,6 @@ Out of scope:
 - hosted marketplace ranking or private recommendation internals
 - process-level Agent adapters such as command, Codex, OpenClaw, or local
   backend runners
-
-中文提示：这个包要保持浏览器和 Edge runtime 友好，不要加入原生 gRPC 依赖或商业
-Cloud 接口。
 
 ## Pull Request Expectations
 

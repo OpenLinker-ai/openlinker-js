@@ -9,6 +9,11 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Documentation
 
+- Split Chinese documentation into dedicated `*.zh-CN.md` files and kept the
+  default GitHub-facing documentation English-only.
+- Strengthened the README and package metadata for TypeScript SDK, AI agent
+  registry, agent marketplace, A2A/MCP runtime gateway, browser-friendly
+  transports, and self-hosted Agent discoverability.
 - Expanded the README into an English-first open-source entry point with a
   Chinese overview, install instructions, quick start, callback verification,
   A2A transport scope, Core surface, development, security, and contribution

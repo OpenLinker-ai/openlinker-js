@@ -1,5 +1,7 @@
 # Support
 
+Chinese documentation: [SUPPORT.zh-CN.md](./SUPPORT.zh-CN.md)
+
 Use GitHub issues for reproducible bugs, documentation problems, and feature
 requests that fit the `@openlinker/sdk` open-source scope.
 
@@ -24,9 +26,6 @@ requests that fit the `@openlinker/sdk` open-source scope.
 - Include expected behavior, actual behavior, and sanitized logs.
 - Redact user tokens, agent tokens, callback secrets, private URLs, customer
   data, and local `.env` values.
-
-中文提示：请尽量提供最小 TypeScript/JavaScript 复现代码。公开 Issue 里不要贴真实
-token、callback secret、客户数据或私有服务地址。
 
 ## Not Supported Here
 

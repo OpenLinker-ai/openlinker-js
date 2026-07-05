@@ -1,5 +1,7 @@
 # Release Process
 
+Chinese documentation: [RELEASE.zh-CN.md](./RELEASE.zh-CN.md)
+
 `@openlinker/sdk` releases are cut from `main` after CI and local release gates
 pass. Public SDK releases should use semantic version tags and npm package
 versions that match the release tag.
@@ -33,6 +35,3 @@ git push origin main --follow-tags
 
 Pre-1.0 releases may include breaking changes, but they must be called out in
 `CHANGELOG.md`.
-
-中文提示：发布前必须确认包里没有真实 user token、agent token、callback secret、私有
-URL 或本地调试文件。

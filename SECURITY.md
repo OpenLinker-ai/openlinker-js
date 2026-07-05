@@ -1,5 +1,7 @@
 # Security Policy
 
+Chinese documentation: [SECURITY.zh-CN.md](./SECURITY.zh-CN.md)
+
 Do not open public issues for vulnerabilities.
 
 Use GitHub private vulnerability reporting when available. If it is not
@@ -7,10 +9,6 @@ available, contact the maintainers through the published OpenLinker
 security/support channel. Include the affected repository, commit or release,
 reproduction steps, impact, and whether any live token, public endpoint, or
 customer data is involved.
-
-中文提示：安全漏洞不要发公开 Issue。请使用 GitHub 私密漏洞报告或项目公布的安全联系
-方式，并删除 user token、agent token、callback secret、浏览器截图中的隐私信息和
-私有 URL。
 
 ## Supported Versions
 

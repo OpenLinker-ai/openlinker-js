@@ -1,7 +1,7 @@
 {
   "name": "@openlinker/sdk",
   "version": "0.1.4",
-  "description": "TypeScript client SDK for OpenLinker Core APIs.",
+  "description": "TypeScript SDK for OpenLinker, an AI agent registry, agent marketplace, A2A/MCP runtime gateway, and self-hosted agent platform.",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -16,7 +16,11 @@
     "openlinker",
     "sdk",
     "ai-agents",
+    "agent-registry",
+    "agent-marketplace",
     "agent-runtime",
+    "runtime-gateway",
+    "self-hosted-agents",
     "a2a",
     "mcp"
   ],
