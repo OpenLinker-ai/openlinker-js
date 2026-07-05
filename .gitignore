@@ -1,0 +1,14 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Dependencies and test output
+node_modules/
+dist/
+coverage/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

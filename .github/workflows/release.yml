@@ -1,0 +1,81 @@
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package-npm:
+    name: Package npm tarball
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Pack npm tarball
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npm pack --pack-destination dist
+          tarball="$(find dist -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "${tarball}"
+          (cd dist && sha256sum "$(basename "${tarball}")" > "$(basename "${tarball}").sha256")
+          echo "tarball=$(basename "${tarball}")" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlinker-js-npm-package
+          path: |
+            dist/${{ steps.pack.outputs.tarball }}
+            dist/${{ steps.pack.outputs.tarball }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub release artifacts
+    if: github.ref_type == 'tag'
+    needs: package-npm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --generate-notes
+          fi
+          gh release upload "${tag}" dist/* --clobber

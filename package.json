@@ -1,0 +1,56 @@
+{
+  "name": "@openlinker/sdk",
+  "version": "0.1.4",
+  "description": "TypeScript SDK for OpenLinker, an AI agent registry, agent marketplace, A2A/MCP runtime gateway, and self-hosted agent platform.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenLinker-ai/openlinker-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OpenLinker-ai/openlinker-js/issues"
+  },
+  "homepage": "https://github.com/OpenLinker-ai/openlinker-js#readme",
+  "keywords": [
+    "openlinker",
+    "sdk",
+    "ai-agents",
+    "agent-registry",
+    "agent-marketplace",
+    "agent-runtime",
+    "runtime-gateway",
+    "self-hosted-agents",
+    "a2a",
+    "mcp"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "contracts",
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
