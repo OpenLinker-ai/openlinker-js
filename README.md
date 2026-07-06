@@ -23,6 +23,26 @@ npm install @openlinker/sdk
 The package may still be used from this repository directly while the API
 contract is being finalized.
 
+## Open-source Architecture
+
+The TypeScript SDK is a caller-side library. It wraps Core-owned HTTP, A2A, MCP,
+callback, and runtime endpoints; it does not expose hosted product internals.
+
+```mermaid
+flowchart LR
+  App["Web app / Node service / Edge runtime"] --> SDK["@openlinker/sdk"]
+  SDK -->|"REST client"| Core["openlinker-core<br/>registry / runs / events"]
+  SDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
+  SDK -->|"runtime connector helpers"| Runtime["Agent runtime process"]
+  Runtime -->|"heartbeat / claim / result"| Core
+
+  HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"same Core API contract"| Core
+
+  Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
+  Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
+  Core -->|"runtime_ws / runtime_pull"| AgentNode["openlinker-agent-node"]
+```
+
 ## Quick Start
 
 ```ts
