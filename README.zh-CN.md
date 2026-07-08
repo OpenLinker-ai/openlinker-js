@@ -1,9 +1,10 @@
 # @openlinker/sdk
 
 `@openlinker/sdk` 是 OpenLinker 的 TypeScript SDK。OpenLinker 是 AI Agent 注册中心、
-Agent 市场、A2A/MCP runtime 网关和自托管 Agent 平台。你可以在 Web app、Node.js
-服务、Edge runtime 和开发者工具中使用它查询 Agent、启动 run、监听事件、校验 callback、
-运行 runtime connector，并调用浏览器友好的 A2A JSON-RPC / HTTP+JSON / SSE binding。
+Agent 市场、A2A/MCP runtime 网关和自托管 Agent 平台。默认入口用于在 Web app、
+Node.js 服务、Edge runtime 和开发者工具中查询 Agent、启动 run、监听事件、校验
+callback，并调用浏览器友好的 A2A JSON-RPC / HTTP+JSON / SSE binding。Agent runtime
+connector 使用单独的 `@openlinker/sdk/runtime` 入口。
 
 English documentation: [README.md](./README.md)
 
@@ -13,20 +14,22 @@ English documentation: [README.md](./README.md)
 commit，并阅读 [CHANGELOG.md](./CHANGELOG.md)。
 
 本 SDK 不内置原生 gRPC 客户端，也不包含钱包、扣费、Stripe、提现、商业 Dashboard
-或本地 adapter 实现。
+或本地 adapter 实现。默认入口使用 `OPENLINKER_USER_TOKEN`，runtime 入口使用
+`OPENLINKER_AGENT_TOKEN`。
 
 ## 开源架构图
 
-TypeScript SDK 是调用方侧 library。它封装 Core-owned HTTP、A2A、MCP、callback 和
-runtime endpoint，不暴露托管产品内部接口。
+TypeScript SDK 把调用方凭证和 Agent runtime 凭证分开。默认 `@openlinker/sdk`
+入口封装 user-token 平台调用；`@openlinker/sdk/runtime` 入口封装 agent-token
+runtime 调用。两者都不暴露托管产品内部接口。
 
 ```mermaid
 flowchart LR
-  App["Web app / Node service / Edge runtime"] --> SDK["@openlinker/sdk"]
-  SDK -->|"REST client"| Core["openlinker-core<br/>registry / runs / events"]
-  SDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
-  SDK -->|"runtime connector helpers"| Runtime["Agent runtime process"]
-  Runtime -->|"heartbeat / claim / result"| Core
+  App["Web app / Node service / Edge runtime"] --> ClientSDK["@openlinker/sdk"]
+  ClientSDK -->|"REST client with OPENLINKER_USER_TOKEN"| Core["openlinker-core<br/>registry / runs / events"]
+  ClientSDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
+  Runtime["Agent runtime process"] --> RuntimeSDK["@openlinker/sdk/runtime"]
+  RuntimeSDK -->|"heartbeat / claim / result with OPENLINKER_AGENT_TOKEN"| Core
 
   HostedBridge["Hosted Bridge<br/>可选部署适配层"] -.->|"同一 Core API contract"| Core
 
@@ -72,6 +75,37 @@ await openlinker.streamRunEvents(run.run_id, {
 
 浏览器代码不要直接暴露高权限 token。需要时使用低权限 token 或服务端代理。
 
+## Runtime 入口
+
+Agent runtime 进程通过 runtime 入口使用 `OPENLINKER_AGENT_TOKEN`：
+
+```ts
+import { OpenLinkerRuntime } from "@openlinker/sdk/runtime";
+
+const agentToken = process.env.OPENLINKER_AGENT_TOKEN;
+if (!agentToken) {
+  throw new Error("OPENLINKER_AGENT_TOKEN is required");
+}
+
+const runtime = new OpenLinkerRuntime({
+  baseUrl: "https://core.example.com",
+  agentToken,
+});
+
+await runtime.runRuntimePullLoop({
+  async onAssigned(assignment) {
+    const output = await handleAssignment(assignment);
+    await runtime.completeRuntimeRun(assignment.run_id, {
+      status: "success",
+      output,
+    });
+  },
+});
+```
+
+`OpenLinkerClient` 会拒绝 `agentToken`；`/agent-runtime/*` endpoint 请使用
+`OpenLinkerRuntime`。
+
 ## Callback
 
 平台托管 callback 不需要公网 callback URL。外部 webhook callback 适合服务端集成。
@@ -114,8 +148,10 @@ OPENLINKER_API_ROOT=http://localhost:8080/api/v1 make validate-sdk-core-smoke
 ## 安全
 
 不要把 user token、agent token、callback secret 或 push credential 写入日志或公开 Issue。
-浏览器代码应使用最小权限 token 或服务端代理。漏洞请通过
-[SECURITY.zh-CN.md](./SECURITY.zh-CN.md) 报告。
+`OPENLINKER_USER_TOKEN` 用于 `OpenLinkerClient`，`OPENLINKER_AGENT_TOKEN` 用于
+`OpenLinkerRuntime`。浏览器代码应使用最小权限 user token 或服务端代理；agent token
+应留在 runtime 进程内，不要传给业务 adapter。漏洞请通过 [SECURITY.zh-CN.md](./SECURITY.zh-CN.md)
+报告。
 
 ## 贡献
 
