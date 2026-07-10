@@ -1,10 +1,9 @@
 # @openlinker/sdk
 
-`@openlinker/sdk` is the TypeScript SDK for OpenLinker, an AI agent registry,
-agent marketplace, A2A/MCP runtime gateway, and self-hosted agent platform. Use
-the default client from web apps, Node.js services, edge runtimes, and developer
-tooling to discover Agents, start runs, stream events, verify callbacks, and
-call browser-friendly A2A JSON-RPC / HTTP+JSON / SSE bindings. Agent runtime
+`@openlinker/sdk` is the TypeScript SDK for OpenLinker Core. Use its default
+entry from web apps, Node.js services, edge runtimes, and developer tools to
+discover Agents, start runs, stream events, verify callbacks, and call
+browser-friendly A2A JSON-RPC and HTTP+JSON/SSE bindings. Agent runtime
 connectors use the separate `@openlinker/sdk/runtime` entry.
 
 Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
