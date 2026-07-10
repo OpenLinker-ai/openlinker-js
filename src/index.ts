@@ -31,18 +31,11 @@ export type {
 export type {
   A2ARequestOptions,
   FetchLike,
-  ClaimRuntimeRunResult,
   OpenLinkerClientOptions,
   RequestOptions,
-  RuntimeHandlers,
-  RuntimePullLoopOptions,
-  RuntimeWebSocketConnection,
-  RuntimeWebSocketFactory,
-  RuntimeWebSocketFactoryOptions,
-  RuntimeWebSocketLike,
-  RuntimeWebSocketOptions,
   StreamRunEvent,
   StreamRunEventHandlers,
   StreamRunEventsOptions,
+  TokenProvider,
 } from "./client.js";
 export type * from "./types.js";
