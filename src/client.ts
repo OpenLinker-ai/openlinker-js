@@ -44,13 +44,22 @@ export type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+export type TokenProvider =
+  | string
+  | (() => string | undefined | Promise<string | undefined>);
+
 export interface OpenLinkerClientOptions {
   baseUrl: string;
-  userToken?: string | (() => string | Promise<string | undefined>) | undefined;
-  agentToken?: string | (() => string | Promise<string | undefined>) | undefined;
+  userToken?: TokenProvider | undefined;
+  agentToken?: never;
   headers?: HeadersInit | (() => HeadersInit | Promise<HeadersInit>) | undefined;
   fetch?: FetchLike | undefined;
   sdkAgent?: string | undefined;
+}
+
+interface OpenLinkerInternalOptions extends Omit<OpenLinkerClientOptions, "agentToken"> {
+  agentToken?: TokenProvider | undefined;
+  runtimeMode?: boolean | undefined;
 }
 
 const MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
@@ -191,12 +200,10 @@ export class OpenLinkerClient {
   readonly baseUrl: string;
 
   readonly #userToken:
-    | string
-    | (() => string | Promise<string | undefined>)
+    | TokenProvider
     | undefined;
   readonly #agentToken:
-    | string
-    | (() => string | Promise<string | undefined>)
+    | TokenProvider
     | undefined;
   readonly #headers:
     | HeadersInit
@@ -204,10 +211,15 @@ export class OpenLinkerClient {
     | undefined;
   readonly #fetch: FetchLike;
   readonly #sdkAgent: string;
+  readonly #runtimeMode: boolean;
 
-  constructor(options: OpenLinkerClientOptions) {
+  constructor(options: OpenLinkerClientOptions);
+  constructor(options: OpenLinkerInternalOptions) {
     if (!options.baseUrl || !options.baseUrl.trim()) {
       throw new Error("OpenLinkerClient requires baseUrl");
+    }
+    if (options.agentToken && !options.runtimeMode) {
+      throw new Error("OpenLinkerClient does not accept agentToken; use OpenLinkerRuntime from @openlinker/sdk/runtime");
     }
 
     const fetchImpl = options.fetch ?? globalThis.fetch?.bind(globalThis);
@@ -220,7 +232,8 @@ export class OpenLinkerClient {
     this.#agentToken = options.agentToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
-    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.3";
+    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.4";
+    this.#runtimeMode = options.runtimeMode === true;
   }
 
   async listAgents(
@@ -423,7 +436,7 @@ export class OpenLinkerClient {
     return terminal;
   }
 
-  async heartbeatAgent(
+  protected async heartbeatAgent(
     options: RequestOptions = {},
   ): Promise<AgentHeartbeatResponse> {
     return this.request(
@@ -434,14 +447,14 @@ export class OpenLinkerClient {
     );
   }
 
-  async claimRuntimeRun(
+  protected async claimRuntimeRun(
     params: ClaimRuntimeRunParams = {},
     options: RequestOptions = {},
   ): Promise<RuntimePullRunResponse | undefined> {
     return (await this.claimRuntimeRunDetailed(params, options)).run;
   }
 
-  async claimRuntimeRunDetailed(
+  protected async claimRuntimeRunDetailed(
     params: ClaimRuntimeRunParams = {},
     options: RequestOptions = {},
   ): Promise<ClaimRuntimeRunResult> {
@@ -466,7 +479,7 @@ export class OpenLinkerClient {
     return { run: await readResponse<RuntimePullRunResponse>(response) };
   }
 
-  async completeRuntimeRun(
+  protected async completeRuntimeRun(
     runId: string,
     result: RuntimePullResultRequest,
     options: RequestOptions = {},
@@ -479,14 +492,14 @@ export class OpenLinkerClient {
     );
   }
 
-  async callAgent(
+  protected async callAgent(
     request: CallAgentRequest,
     options: RequestOptions = {},
   ): Promise<RunResponse> {
     return this.callAgentAt("", request, options);
   }
 
-  async callAgentAt(
+  protected async callAgentAt(
     endpoint: string,
     request: CallAgentRequest,
     options: RequestOptions = {},
@@ -860,7 +873,7 @@ export class OpenLinkerClient {
     await readA2AEventStream(response.body, handlers);
   }
 
-  async runRuntimePullLoop(
+  protected async runRuntimePullLoop(
     handlers: RuntimeHandlers,
     options: RuntimePullLoopOptions = {},
   ): Promise<void> {
@@ -903,7 +916,7 @@ export class OpenLinkerClient {
     }
   }
 
-  async connectRuntimeWebSocket(
+  protected async connectRuntimeWebSocket(
     handlers: RuntimeHandlers,
     options: RuntimeWebSocketOptions = {},
   ): Promise<RuntimeWebSocketConnection> {
@@ -1002,9 +1015,12 @@ export class OpenLinkerClient {
   }
 
   private async withAgentToken(options: RequestOptions): Promise<RequestOptions> {
+    if (!this.#runtimeMode) {
+      throw new Error("OpenLinkerClient cannot call agent runtime endpoints; use OpenLinkerRuntime from @openlinker/sdk/runtime");
+    }
     const agentToken = await resolveMaybe(this.#agentToken);
     if (!agentToken) {
-      return options;
+      throw new Error("OpenLinkerRuntime requires agentToken");
     }
     const headers = new Headers(options.headers);
     headers.set("authorization", `Bearer ${agentToken}`);

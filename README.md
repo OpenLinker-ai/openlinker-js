@@ -1,10 +1,10 @@
 # @openlinker/sdk
 
-`@openlinker/sdk` is the TypeScript SDK for OpenLinker, an AI agent registry,
-agent marketplace, A2A/MCP runtime gateway, and self-hosted agent platform. Use
-it from web apps, Node.js services, edge runtimes, and developer tooling to
-discover Agents, start runs, stream events, verify callbacks, run runtime
-connectors, and call browser-friendly A2A JSON-RPC / HTTP+JSON / SSE bindings.
+`@openlinker/sdk` is the TypeScript SDK for OpenLinker Core. Use its default
+entry from web apps, Node.js services, edge runtimes, and developer tools to
+discover Agents, start runs, stream events, verify callbacks, and call
+browser-friendly A2A JSON-RPC and HTTP+JSON/SSE bindings. Agent runtime
+connectors use the separate `@openlinker/sdk/runtime` entry.
 
 Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 
@@ -25,16 +25,18 @@ contract is being finalized.
 
 ## Open-source Architecture
 
-The TypeScript SDK is a caller-side library. It wraps Core-owned HTTP, A2A, MCP,
-callback, and runtime endpoints; it does not expose hosted product internals.
+The TypeScript SDK keeps caller and Agent runtime credentials separate. The
+default `@openlinker/sdk` entry wraps user-token platform calls. The
+`@openlinker/sdk/runtime` entry wraps Agent-token runtime calls. Neither entry
+exposes hosted product internals.
 
 ```mermaid
 flowchart LR
-  App["Web app / Node service / Edge runtime"] --> SDK["@openlinker/sdk"]
-  SDK -->|"REST client"| Core["openlinker-core<br/>registry / runs / events"]
-  SDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
-  SDK -->|"runtime connector helpers"| Runtime["Agent runtime process"]
-  Runtime -->|"heartbeat / claim / result"| Core
+  App["Web app / Node service / Edge runtime"] --> ClientSDK["@openlinker/sdk"]
+  ClientSDK -->|"REST client with OPENLINKER_USER_TOKEN"| Core["openlinker-core<br/>registry / runs / events"]
+  ClientSDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
+  Runtime["Agent runtime process"] --> RuntimeSDK["@openlinker/sdk/runtime"]
+  RuntimeSDK -->|"heartbeat / claim / result with OPENLINKER_AGENT_TOKEN"| Core
 
   HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"same Core API contract"| Core
 
@@ -69,6 +71,37 @@ await openlinker.streamRunEvents(run.run_id, {
   },
 });
 ```
+
+## Runtime Entry
+
+Agent runtime processes use `OPENLINKER_AGENT_TOKEN` through the runtime entry:
+
+```ts
+import { OpenLinkerRuntime } from "@openlinker/sdk/runtime";
+
+const agentToken = process.env.OPENLINKER_AGENT_TOKEN;
+if (!agentToken) {
+  throw new Error("OPENLINKER_AGENT_TOKEN is required");
+}
+
+const runtime = new OpenLinkerRuntime({
+  baseUrl: "https://core.example.com",
+  agentToken,
+});
+
+await runtime.runRuntimePullLoop({
+  async onAssigned(assignment) {
+    const output = await handleAssignment(assignment);
+    await runtime.completeRuntimeRun(assignment.run_id, {
+      status: "success",
+      output,
+    });
+  },
+});
+```
+
+`OpenLinkerClient` rejects `agentToken`; use `OpenLinkerRuntime` for
+`/agent-runtime/*` endpoints.
 
 ## Callbacks
 
@@ -156,7 +189,7 @@ Application-side calls:
 - `listRunMessages`
 - `streamRunEvents`
 
-Agent runtime protocol:
+Agent runtime protocol, from `@openlinker/sdk/runtime`:
 
 - `heartbeatAgent`
 - `claimRuntimeRun`
@@ -188,8 +221,11 @@ Authenticated run checks are only attempted when `OPENLINKER_USER_TOKEN` and
 ## Security
 
 Keep user tokens, agent tokens, callback secrets, and push credentials out of
-logs and public issue reports. Browser code should use least-privilege tokens
-or a server-side proxy. Report vulnerabilities through [SECURITY.md](./SECURITY.md).
+logs and public issue reports. Use `OPENLINKER_USER_TOKEN` with
+`OpenLinkerClient`, and `OPENLINKER_AGENT_TOKEN` with `OpenLinkerRuntime`.
+Browser code should use least-privilege user tokens or a server-side proxy.
+Agent tokens should stay in runtime processes and should not be passed to
+business adapters. Report vulnerabilities through [SECURITY.md](./SECURITY.md).
 
 ## Contributing
 

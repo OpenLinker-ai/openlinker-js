@@ -19,6 +19,7 @@ import {
   verifyTaskCallbackHeaders,
   verifyTaskCallbackSignature,
 } from "../dist/index.js";
+import { OpenLinkerRuntime } from "../dist/runtime.js";
 
 test("listAgents builds Core API URL and authorization header", async () => {
   const calls = [];
@@ -52,7 +53,33 @@ test("listAgents builds Core API URL and authorization header", async () => {
   );
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_user_test");
-  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.3");
+  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.4");
+});
+
+test("client rejects agent token and points callers to runtime entry", () => {
+  assert.throws(
+    () => new OpenLinkerClient({
+      baseUrl: "https://core.example.com",
+      agentToken: "ol_agent_runtime",
+      fetch: async () => jsonResponse({}),
+    }),
+    /OpenLinkerRuntime/,
+  );
+});
+
+test("client runtime protocol methods are guarded at runtime", async () => {
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    userToken: "ol_user_test",
+    fetch: async () => {
+      throw new Error("fetch should not be called for guarded runtime methods");
+    },
+  });
+
+  await assert.rejects(
+    () => client.completeRuntimeRun("run-guard", { status: "success" }),
+    /OpenLinkerRuntime/,
+  );
 });
 
 test("client rejects oversized API response bodies", async () => {
@@ -398,7 +425,7 @@ test("fallback Core errors and 204 responses preserve retry metadata", async () 
     },
   });
 
-  assert.equal(await client.completeRuntimeRun("run-204", { status: "success" }), undefined);
+  assert.equal(await client.getRun("run-204"), undefined);
   await assert.rejects(
     () => client.getRun("run-503"),
     (error) => {
@@ -503,9 +530,8 @@ test("streamRunEvents handles comments, plain text, buffered lines, and missing 
 
 test("runtime methods use agent token and protocol endpoints", async () => {
   const calls = [];
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
-    userToken: "ol_user_user",
     agentToken: "ol_agent_runtime",
     fetch: async (url, init) => {
       const call = {
@@ -629,7 +655,7 @@ test("runtime methods use agent token and protocol endpoints", async () => {
 });
 
 test("claimRuntimeRun returns undefined on empty 204 claim", async () => {
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_runtime",
     fetch: async () => new Response(null, {
@@ -965,7 +991,7 @@ test("runRuntimePullLoop reports heartbeat and claim errors before stopOnEmpty",
   const errors = [];
   let heartbeatCalls = 0;
   let claimCalls = 0;
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_runtime",
     fetch: async (url) => {
@@ -1017,7 +1043,7 @@ test("runRuntimePullLoop reports heartbeat and claim errors before stopOnEmpty",
 test("runRuntimePullLoop claims assignments with agent token", async () => {
   const calls = [];
   const assignments = [];
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_runtime",
     fetch: async (url, init) => {
@@ -1076,7 +1102,7 @@ test("connectRuntimeWebSocket handles assignment and sends event/result", async 
   const sockets = [];
   const ready = [];
   const assignments = [];
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com/api/v1",
     agentToken: "ol_agent_ws",
     fetch: async () => {
@@ -1137,7 +1163,7 @@ test("connectRuntimeWebSocket handles assignment and sends event/result", async 
 test("connectRuntimeWebSocket reconnects after close", async () => {
   const sockets = [];
   const assignments = [];
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_ws",
     fetch: async () => {
@@ -1180,7 +1206,7 @@ test("connectRuntimeWebSocket sends heartbeats and reports edge errors", async (
   let connection;
   const messages = [];
   const errors = [];
-  const client = new OpenLinkerClient({
+  const client = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_ws",
     fetch: async () => {
@@ -1239,7 +1265,7 @@ test("connectRuntimeWebSocket requires a WebSocket implementation by default", a
     value: undefined,
   });
   try {
-    const client = new OpenLinkerClient({
+    const client = new OpenLinkerRuntime({
       baseUrl: "https://core.example.com",
       agentToken: "ol_agent_ws",
       fetch: async () => {
