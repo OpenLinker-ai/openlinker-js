@@ -1,10 +1,9 @@
 # @openlinker/sdk
 
-`@openlinker/sdk` 是 OpenLinker 的 TypeScript SDK。OpenLinker 是 AI Agent 注册中心、
-Agent 市场、A2A/MCP runtime 网关和自托管 Agent 平台。默认入口用于在 Web app、
-Node.js 服务、Edge runtime 和开发者工具中查询 Agent、启动 run、监听事件、校验
-callback，并调用浏览器友好的 A2A JSON-RPC / HTTP+JSON / SSE binding。Agent runtime
-connector 使用单独的 `@openlinker/sdk/runtime` 入口。
+`@openlinker/sdk` 是 OpenLinker Core 的 TypeScript SDK。默认入口用于在 Web 应用、
+Node.js 服务、Edge runtime 和开发者工具中查找 Agent、启动运行、监听事件、校验回调，
+并调用浏览器友好的 A2A JSON-RPC 与 HTTP+JSON/SSE 接口。Agent runtime connector
+使用单独的 `@openlinker/sdk/runtime` 入口。
 
 English documentation: [README.md](./README.md)
 
@@ -16,7 +15,6 @@ commit，并阅读 [CHANGELOG.md](./CHANGELOG.md)。
 本 SDK 不内置原生 gRPC 客户端，也不包含钱包、扣费、Stripe、提现、商业 Dashboard
 或本地 adapter 实现。默认入口使用 `OPENLINKER_USER_TOKEN`，runtime 入口使用
 `OPENLINKER_AGENT_TOKEN`。
-
 ## 开源架构图
 
 TypeScript SDK 把调用方凭证和 Agent runtime 凭证分开。默认 `@openlinker/sdk`
