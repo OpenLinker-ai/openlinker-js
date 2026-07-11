@@ -19,6 +19,21 @@ import type {
   RunResponse,
 } from "./types.js";
 
+export const RuntimeProtocolVersion = 2 as const;
+export const RuntimeContractID = "openlinker.runtime.v2" as const;
+export const RuntimeContractDigest =
+  "d83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f" as const;
+export const RuntimeRequiredFeatures = Object.freeze([
+  "lease_fence",
+  "assignment_confirm",
+  "renew",
+  "resume",
+  "event_ack",
+  "result_ack",
+  "cancel",
+  "persistent_spool",
+] as const);
+
 export interface OpenLinkerRuntimeOptions {
   baseUrl: string;
   agentToken: TokenProvider;
