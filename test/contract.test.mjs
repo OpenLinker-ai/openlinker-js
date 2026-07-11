@@ -43,6 +43,17 @@ test("Core client v1 contract maps to implemented SDK methods", async () => {
       `OpenLinkerClient missing contract method ${method}`,
     );
   }
+
+  const runCreationEndpoints = contract.endpoints.filter(
+    (endpoint) => endpoint.http_method === "POST" &&
+      (endpoint.path === "/api/v1/run" || endpoint.path === "/api/v1/runs"),
+  );
+  assert.equal(runCreationEndpoints.length, 2);
+  for (const endpoint of runCreationEndpoints) {
+    assert.deepEqual(endpoint.required_headers, ["Idempotency-Key"]);
+    assert.deepEqual(endpoint.success_statuses, [200, 201, 202]);
+    assert.ok(endpoint.response_fields.includes("replayed"));
+  }
 });
 
 test("Runtime v2 contract matches the exported handshake manifest", async () => {

@@ -7,6 +7,13 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ## Unreleased
 
+### Changed
+
+- Added reliable Run creation to `runAgent` and `startAgentRun`: both methods
+  now send a validated `Idempotency-Key`, generate a secure per-invocation key
+  when omitted, and expose Core's `replayed` result across `201`, `200`, and
+  `202` responses.
+
 ### Documentation
 
 - Split Chinese documentation into dedicated `*.zh-CN.md` files and kept the

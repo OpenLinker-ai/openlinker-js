@@ -60,9 +60,11 @@ const agents = await openlinker.listAgents({
   callableOnly: true,
 });
 
+const idempotencyKey = crypto.randomUUID();
 const run = await openlinker.startAgentRun({
   agentId: agents.items[0].id,
   input: { query: "Summarize this dataset" },
+  idempotencyKey,
 });
 
 await openlinker.streamRunEvents(run.run_id, {
@@ -71,6 +73,36 @@ await openlinker.streamRunEvents(run.run_id, {
   },
 });
 ```
+
+## Reliable Run Creation
+
+`runAgent` and `startAgentRun` send `Idempotency-Key` on every Run creation
+request. Keep one key for one logical operation and reuse it when your
+application retries that operation:
+
+```ts
+const idempotencyKey = crypto.randomUUID();
+const request = {
+  agentId: agents.items[0].id,
+  input: { query: "Summarize this dataset" },
+  idempotencyKey,
+};
+
+const run = await openlinker.startAgentRun(request);
+// A later retry with the same key and semantic request returns the same Run.
+const sameRun = await openlinker.startAgentRun(request);
+console.log(sameRun.run_id, sameRun.replayed);
+```
+
+When `idempotencyKey` is omitted, the SDK generates a cryptographically strong
+key once for that method invocation. That protects the request itself, but a
+separate method call gets a new key and represents a new operation. Explicit
+keys must be 1–255 printable ASCII characters; validation errors never include
+the key value.
+
+Core uses `201` for a newly created Run, `200` for a completed replay, and `202`
+when a replayed Run is still in progress. The SDK accepts all three and exposes
+the result through `RunResponse.replayed`.
 
 ## Runtime Entry
 
@@ -170,7 +202,7 @@ JSON-RPC, HTTP+JSON/SSE, or Agent Node's internal `runtime_ws` /
 
 The interim contract source is
 [`contracts/core-client.v1.json`](./contracts/core-client.v1.json) and
-[`contracts/core-runtime.v1.json`](./contracts/core-runtime.v1.json). They list
+[`contracts/core-runtime.v2.json`](./contracts/core-runtime.v2.json). They list
 the Core endpoints this package is allowed to wrap until OpenAPI or JSON Schema
 generation is in place.
 

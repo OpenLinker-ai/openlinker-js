@@ -113,16 +113,18 @@ test("runAgent maps camelCase input to Core request body", async () => {
       return jsonResponse({
         run_id: "run-1",
         status: "success",
+        replayed: false,
         output: { ok: true },
         cost_cents: 0,
         duration_ms: 12,
-      });
+      }, { status: 201 });
     },
   });
 
   const response = await client.runAgent({
     agentId: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
+    idempotencyKey: "logical-run-1",
     metadata: { trace_id: "trace-1" },
     a2aContext: {
       contextId: "ctx-root",
@@ -139,7 +141,9 @@ test("runAgent maps camelCase input to Core request body", async () => {
   });
 
   assert.equal(response.run_id, "run-1");
+  assert.equal(response.replayed, false);
   assert.equal(calls[0].url, "https://core.example.com/api/v1/run");
+  assert.equal(new Headers(calls[0].init.headers).get("idempotency-key"), "logical-run-1");
   assert.deepEqual(JSON.parse(calls[0].init.body), {
     agent_id: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
@@ -157,6 +161,143 @@ test("runAgent maps camelCase input to Core request body", async () => {
       metadata: { client: "js-sdk" },
     },
   });
+});
+
+test("Run creation accepts 201, 200, and 202 idempotency responses", async () => {
+  const calls = [];
+  const responses = [
+    {
+      status: 201,
+      body: {
+        run_id: "run-status",
+        status: "success",
+        replayed: false,
+        cost_cents: 0,
+        duration_ms: 4,
+      },
+    },
+    {
+      status: 200,
+      body: {
+        run_id: "run-status",
+        status: "success",
+        replayed: true,
+        cost_cents: 0,
+        duration_ms: 4,
+      },
+    },
+    {
+      status: 202,
+      body: {
+        run_id: "run-async-status",
+        status: "running",
+        replayed: true,
+        cost_cents: 0,
+        duration_ms: 0,
+      },
+    },
+  ];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init });
+      const response = responses[calls.length - 1];
+      return jsonResponse(response.body, {
+        status: response.status,
+        headers: { location: `/api/v1/runs/${response.body.run_id}` },
+      });
+    },
+  });
+  const request = {
+    agentId: "00000000-0000-0000-0000-000000000001",
+    input: { query: "retry me" },
+    idempotencyKey: "stable-application-operation",
+  };
+
+  const created = await client.runAgent(request);
+  const replayed = await client.runAgent(request);
+  const runningReplay = await client.startAgentRun({
+    ...request,
+    idempotencyKey: "stable-async-operation",
+  });
+
+  assert.equal(created.replayed, false);
+  assert.equal(replayed.replayed, true);
+  assert.equal(runningReplay.replayed, true);
+  assert.equal(runningReplay.status, "running");
+  assert.deepEqual(calls.map((call) => call.url), [
+    "https://core.example.com/api/v1/run",
+    "https://core.example.com/api/v1/run",
+    "https://core.example.com/api/v1/runs",
+  ]);
+  assert.deepEqual(
+    calls.map((call) => new Headers(call.init.headers).get("idempotency-key")),
+    ["stable-application-operation", "stable-application-operation", "stable-async-operation"],
+  );
+});
+
+test("Run creation generates a secure per-invocation idempotency key when omitted", async () => {
+  const keys = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (_url, init) => {
+      keys.push(new Headers(init.headers).get("idempotency-key"));
+      return jsonResponse({
+        run_id: `run-generated-${keys.length}`,
+        status: "success",
+        replayed: false,
+        cost_cents: 0,
+        duration_ms: 1,
+      }, { status: 201 });
+    },
+  });
+  const request = {
+    agentId: "00000000-0000-0000-0000-000000000001",
+    input: { query: "hello" },
+  };
+
+  await client.runAgent(request);
+  await client.startAgentRun(request);
+
+  assert.match(keys[0], /^[0-9a-f]{64}$/);
+  assert.match(keys[1], /^[0-9a-f]{64}$/);
+  assert.notEqual(keys[0], keys[1]);
+});
+
+test("Run creation rejects invalid idempotency keys without exposing the key", async () => {
+  let fetchCalls = 0;
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async () => {
+      fetchCalls += 1;
+      return jsonResponse({});
+    },
+  });
+  const invalidKeys = [
+    "",
+    "contains\nnewline",
+    "contains\u007fdelete",
+    "contains-é",
+    "x".repeat(256),
+  ];
+
+  for (const idempotencyKey of invalidKeys) {
+    await assert.rejects(
+      () => client.runAgent({
+        agentId: "00000000-0000-0000-0000-000000000001",
+        input: { query: "hello" },
+        idempotencyKey,
+      }),
+      (error) => {
+        assert.match(error.message, /1-255 printable ASCII/);
+        if (idempotencyKey) {
+          assert.ok(!error.message.includes(idempotencyKey));
+        }
+        return true;
+      },
+    );
+  }
+  assert.equal(fetchCalls, 0);
 });
 
 test("createWebhookRunCallback passes external callback URL and generated secret", async () => {

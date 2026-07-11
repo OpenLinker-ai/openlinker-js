@@ -124,6 +124,14 @@ export interface AgentCardResponse {
 export interface RunAgentRequest {
   agentId: string;
   input: JsonValue;
+  /**
+   * Stable identity for one logical Run creation operation. Reuse the same
+   * key when retrying that operation from a separate SDK method call.
+   *
+   * When omitted, the SDK generates a cryptographically strong key for this
+   * method invocation only.
+   */
+  idempotencyKey?: string;
   metadata?: JsonValue;
   a2aContext?: RunA2AContext;
   callback?: RunCallbackConfig;
@@ -194,6 +202,7 @@ export interface TaskCallbackSubscription {
 export interface RunResponse {
   run_id: string;
   status: RunStatus | string;
+  replayed: boolean;
   output?: JsonValue;
   error_code?: string;
   error_message?: string;

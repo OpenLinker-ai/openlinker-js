@@ -275,7 +275,13 @@ export class OpenLinkerClient {
     request: RunAgentRequest,
     options: RequestOptions = {},
   ): Promise<RunResponse> {
-    return this.request("POST", "/run", toRunRequestBody(request), options);
+    const idempotencyKey = resolveRunIdempotencyKey(request.idempotencyKey);
+    return this.request(
+      "POST",
+      "/run",
+      toRunRequestBody(request),
+      withRunIdempotencyKey(options, idempotencyKey),
+    );
   }
 
   async runAgentWithCallbacks(
@@ -295,7 +301,13 @@ export class OpenLinkerClient {
     request: RunAgentRequest,
     options: RequestOptions = {},
   ): Promise<RunResponse> {
-    return this.request("POST", "/runs", toRunRequestBody(request), options);
+    const idempotencyKey = resolveRunIdempotencyKey(request.idempotencyKey);
+    return this.request(
+      "POST",
+      "/runs",
+      toRunRequestBody(request),
+      withRunIdempotencyKey(options, idempotencyKey),
+    );
   }
 
   async startAgentRunWithCallbacks(
@@ -1057,6 +1069,37 @@ function appendQuery(
     return;
   }
   query.set(name, String(value));
+}
+
+function resolveRunIdempotencyKey(value: string | undefined): string {
+  const key = value === undefined ? generateRunIdempotencyKey() : value;
+  if (typeof key !== "string" || key.length < 1 || key.length > 255 || !/^[\x20-\x7e]+$/.test(key)) {
+    throw new TypeError("idempotencyKey must be 1-255 printable ASCII characters");
+  }
+  return key;
+}
+
+function generateRunIdempotencyKey(): string {
+  const crypto = globalThis.crypto;
+  if (!crypto?.getRandomValues) {
+    throw new Error("OpenLinkerClient requires a secure random source to generate idempotencyKey");
+  }
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let key = "";
+  for (const byte of bytes) {
+    key += byte.toString(16).padStart(2, "0");
+  }
+  return key;
+}
+
+function withRunIdempotencyKey(options: RequestOptions, key: string): RequestOptions {
+  const headers = new Headers(options.headers);
+  headers.set("Idempotency-Key", key);
+  return {
+    ...options,
+    headers,
+  };
 }
 
 function a2aPath(endpointOrSlug: string): string {

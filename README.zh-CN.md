@@ -59,9 +59,11 @@ const agents = await openlinker.listAgents({
   callableOnly: true,
 });
 
+const idempotencyKey = crypto.randomUUID();
 const run = await openlinker.startAgentRun({
   agentId: agents.items[0].id,
   input: { query: "Summarize this dataset" },
+  idempotencyKey,
 });
 
 await openlinker.streamRunEvents(run.run_id, {
@@ -72,6 +74,32 @@ await openlinker.streamRunEvents(run.run_id, {
 ```
 
 浏览器代码不要直接暴露高权限 token。需要时使用低权限 token 或服务端代理。
+
+## 可靠创建 Run
+
+`runAgent` 和 `startAgentRun` 每次创建 Run 都会发送 `Idempotency-Key`。一次业务操作只用
+一个 key；应用层重试时复用它，Core 就会返回同一个 Run：
+
+```ts
+const idempotencyKey = crypto.randomUUID();
+const request = {
+  agentId: agents.items[0].id,
+  input: { query: "Summarize this dataset" },
+  idempotencyKey,
+};
+
+const run = await openlinker.startAgentRun(request);
+// 同一个 key 与同一份语义请求再次调用，仍然返回原来的 Run。
+const sameRun = await openlinker.startAgentRun(request);
+console.log(sameRun.run_id, sameRun.replayed);
+```
+
+不传 `idempotencyKey` 时，SDK 会为本次方法调用生成一个密码学安全的 key。它只代表这
+一次调用；下一次方法调用会生成新 key，也就代表一项新操作。显式 key 必须是 1–255 个
+可打印 ASCII 字符，校验错误不会带出 key 原文。
+
+Core 对首次创建返回 `201`，对已结束的重放返回 `200`，对仍在运行的重放返回 `202`。
+SDK 会透明处理这三种状态，可通过 `RunResponse.replayed` 判断是否为重放。
 
 ## Runtime 入口
 
@@ -124,7 +152,7 @@ extended card 和 Push Notification Config 方法。
 临时契约来源：
 
 - [`contracts/core-client.v1.json`](./contracts/core-client.v1.json)
-- [`contracts/core-runtime.v1.json`](./contracts/core-runtime.v1.json)
+- [`contracts/core-runtime.v2.json`](./contracts/core-runtime.v2.json)
 
 这些文件列出本包在 OpenAPI / JSON Schema 生成稳定前允许封装的 Core endpoint。
 
