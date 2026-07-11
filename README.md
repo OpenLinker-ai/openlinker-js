@@ -104,6 +104,39 @@ Core uses `201` for a newly created Run, `200` for a completed replay, and `202`
 when a replayed Run is still in progress. The SDK accepts all three and exposes
 the result through `RunResponse.replayed`.
 
+## Durable Event Pages
+
+`listRunEvents` returns an `items` page plus durable cursor metadata. The
+response does not expose the former `events` alias:
+
+```ts
+const page = await openlinker.listRunEvents(run.run_id, {
+  afterSequence: 0,
+  limit: 100,
+});
+
+for (const event of page.items) {
+  console.log(event.sequence, event.event_type, event.payload);
+}
+
+if (page.meta.retention_gap) {
+  console.warn(
+    `Events through sequence ${page.meta.retained_through_sequence} are no longer available`,
+  );
+}
+
+if (page.meta.terminal && page.meta.stream_complete) {
+  console.log("The terminal event history has been read through its latest sequence");
+}
+```
+
+`requested_after_sequence` is the caller's cursor. Core advances
+`effective_after_sequence` to `retained_through_sequence` when retention has
+removed older events, and sets `retention_gap` so callers do not mistake the
+page for a complete history. `earliest_available_sequence` and
+`latest_available_sequence` are `null` when no retained event is available.
+SSE continues to use `streamRunEvents` unchanged.
+
 ## Runtime Entry
 
 Agent runtime processes use `OPENLINKER_AGENT_TOKEN` through the runtime entry:

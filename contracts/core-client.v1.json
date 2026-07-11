@@ -97,6 +97,17 @@
       "path": "/api/v1/runs/{id}/events",
       "auth": "access_token",
       "required_scope": "runs:read",
+      "response_fields": [
+        "items",
+        "meta.requested_after_sequence",
+        "meta.effective_after_sequence",
+        "meta.retained_through_sequence",
+        "meta.earliest_available_sequence",
+        "meta.latest_available_sequence",
+        "meta.retention_gap",
+        "meta.terminal",
+        "meta.stream_complete"
+      ],
       "source": "openlinker-core/pkg/runtime/handler.go"
     },
     {

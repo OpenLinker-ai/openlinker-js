@@ -234,8 +234,20 @@ export interface ListRunEventsParams {
   limit?: number;
 }
 
+export interface RunEventPageMeta {
+  requested_after_sequence: number;
+  effective_after_sequence: number;
+  retained_through_sequence: number;
+  earliest_available_sequence: number | null;
+  latest_available_sequence: number | null;
+  retention_gap: boolean;
+  terminal: boolean;
+  stream_complete: boolean;
+}
+
 export interface ListRunEventsResponse {
-  events: RunEventResponse[];
+  items: RunEventResponse[];
+  meta: RunEventPageMeta;
 }
 
 export interface RunArtifactResponse {

@@ -598,6 +598,41 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
   assert.equal(calls[2].headers.get("content-type"), "application/json");
 });
 
+test("listRunEvents returns items and durable page metadata", async () => {
+  const responseBody = {
+    items: [{
+      event_id: "event-6",
+      run_id: "run-page",
+      sequence: 6,
+      event_type: "run.message.delta",
+      payload: { text: "continued" },
+      created_at: "2026-07-11T00:00:00Z",
+    }],
+    meta: {
+      requested_after_sequence: 2,
+      effective_after_sequence: 5,
+      retained_through_sequence: 5,
+      earliest_available_sequence: 6,
+      latest_available_sequence: 8,
+      retention_gap: true,
+      terminal: false,
+      stream_complete: false,
+    },
+  };
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com/api/v1",
+    userToken: "ol_user_test",
+    fetch: async () => jsonResponse(responseBody),
+  });
+
+  const page = await client.listRunEvents("run-page", { afterSequence: 2 });
+
+  assert.deepEqual(page, responseBody);
+  assert.equal(page.items[0].sequence, 6);
+  assert.equal(page.meta.retention_gap, true);
+  assert.equal("events" in page, false);
+});
+
 test("standard Core errors become OpenLinkerError", async () => {
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
