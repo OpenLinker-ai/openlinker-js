@@ -456,6 +456,89 @@ test("runAgentWithCallbacks uses platform run stream without external callback U
   assert.equal(terminal[0].event, "run.completed");
 });
 
+test("runAgentWithCallbacks preserves replay across callback wait", async () => {
+  const scenarios = [
+    {
+      runId: "run-start-replay",
+      startedReplayed: true,
+      terminalReplayed: false,
+      expectedReplayed: true,
+    },
+    {
+      runId: "run-terminal-replay",
+      startedReplayed: false,
+      terminalReplayed: true,
+      expectedReplayed: true,
+    },
+    {
+      runId: "run-not-replayed",
+      startedReplayed: false,
+      terminalReplayed: false,
+      expectedReplayed: false,
+    },
+  ];
+  let startIndex = 0;
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async (url) => {
+      const path = new URL(url).pathname;
+      if (path === "/api/v1/runs") {
+        const scenario = scenarios[startIndex++];
+        return jsonResponse({
+          run_id: scenario.runId,
+          status: "running",
+          replayed: scenario.startedReplayed,
+          cost_cents: 0,
+          duration_ms: 0,
+        }, { status: scenario.startedReplayed ? 202 : 201 });
+      }
+      const scenario = scenarios.find(({ runId }) => (
+        path === `/api/v1/runs/${runId}` || path === `/api/v1/runs/${runId}/stream`
+      ));
+      if (!scenario) {
+        throw new Error(`unexpected URL ${url}`);
+      }
+      if (path.endsWith("/stream")) {
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode([
+              "id: 1",
+              "event: run.completed",
+              `data: {"event_id":"event-${scenario.runId}","run_id":"${scenario.runId}","sequence":1,"event_type":"run.completed","payload":{"status":"success"},"created_at":"2026-06-21T00:00:00Z"}`,
+              "",
+              "",
+            ].join("\n")));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return jsonResponse({
+        run_id: scenario.runId,
+        status: "success",
+        replayed: scenario.terminalReplayed,
+        output: { ok: true },
+        cost_cents: 0,
+        duration_ms: 12,
+      });
+    },
+  });
+
+  for (const scenario of scenarios) {
+    const response = await client.runAgentWithCallbacks({
+      agentId: "00000000-0000-0000-0000-000000000001",
+      input: { query: scenario.runId },
+      idempotencyKey: `idempotency-${scenario.runId}`,
+      callback: { mode: "platform" },
+    });
+
+    assert.equal(response.replayed, scenario.expectedReplayed, scenario.runId);
+  }
+});
+
 test("endpoint helpers encode paths, queries, and async headers", async () => {
   const calls = [];
   const client = new OpenLinkerClient({

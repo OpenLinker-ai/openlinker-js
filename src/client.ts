@@ -294,7 +294,9 @@ export class OpenLinkerClient {
     }
     const started = await this.startAgentRun(request, options);
     await this.streamPlatformRunCallbacks(started.run_id, callback, options, true);
-    return this.getRun(started.run_id, options);
+    const result = await this.getRun(started.run_id, options);
+    result.replayed = result.replayed || started.replayed;
+    return result;
   }
 
   async startAgentRun(
