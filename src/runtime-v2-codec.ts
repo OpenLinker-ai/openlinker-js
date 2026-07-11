@@ -15,6 +15,8 @@ import {
   type RuntimeV2AssignmentRejectPayload,
   type RuntimeV2AssignmentRejectedPayload,
   type RuntimeV2AttemptIdentity,
+  type RuntimeV2CallAgentRequest,
+  type RuntimeV2RunSummary,
   type RuntimeV2ClaimRequest,
   type RuntimeV2CommandsResponse,
   type RuntimeV2CancelState,
@@ -37,6 +39,7 @@ import {
   type RuntimeV2ResultClassification,
   type RuntimeV2RunAssignedPayload,
   type RuntimeV2RunCancelPayload,
+  type RuntimeV2RunCancelAckPayload,
   type RuntimeV2RunCancellationState,
   type RuntimeV2RunEventAckPayload,
   type RuntimeV2RunEventPayload,
@@ -118,7 +121,11 @@ export async function readRuntimeV2JSON(response: Response): Promise<unknown> {
 }
 
 export function assertRuntimeV2WaitSeconds(value: number): void {
-  assertInteger(value, 0, RuntimeV2MaxPullWaitSeconds, "claim waitSeconds");
+  assertInteger(value, 0, RuntimeV2MaxPullWaitSeconds, "waitSeconds");
+}
+
+export function assertRuntimeV2UUID(value: unknown, label: string): string {
+  return assertUUID(value, label);
 }
 
 export function encodeRuntimeV2Hello(value: RuntimeV2HelloPayload): RuntimeV2WireObject {
@@ -459,6 +466,39 @@ export function decodeRuntimeV2CommandsResponse(value: unknown): RuntimeV2Comman
   };
 }
 
+export function encodeRuntimeV2CancelAck(value: RuntimeV2RunCancelAckPayload): RuntimeV2WireObject {
+  const source = exactObject(value, ["cancellationId", "attemptIdentity", "cancelState"], ["errorCode"], "cancel ACK");
+  assertUUID(value.cancellationId, "cancel ACK.cancellationId");
+  const cancelState = assertCancelState(value.cancelState, "cancel ACK.cancelState");
+  const hasError = hasOwn(source, "errorCode") && value.errorCode !== undefined;
+  switch (cancelState) {
+    case RuntimeV2CancelStates.delivered:
+    case RuntimeV2CancelStates.stopping:
+    case RuntimeV2CancelStates.stopped:
+      if (hasError) {
+        throw runtimeV2Error("cancel ACK.errorCode is not allowed for a successful stop state");
+      }
+      break;
+    case RuntimeV2CancelStates.unsupported:
+    case RuntimeV2CancelStates.failed:
+      if (!hasError) {
+        throw runtimeV2Error("cancel ACK.errorCode is required for a negative stop state");
+      }
+      break;
+    default:
+      throw runtimeV2Error("cancel ACK.cancelState is not an acknowledgement state");
+  }
+  const wire: RuntimeV2WireObject = {
+    cancellation_id: value.cancellationId,
+    attempt_identity: encodeAttemptIdentity(value.attemptIdentity, "cancel ACK.attemptIdentity"),
+    cancel_state: cancelState,
+  };
+  if (hasError) {
+    wire.error_code = assertText(value.errorCode, 120, "cancel ACK.errorCode");
+  }
+  return wire;
+}
+
 export function decodeRuntimeV2CancellationState(value: unknown): RuntimeV2RunCancellationState {
   const object = exactObject(value, ["cancellation_id", "cancel_state", "updated_at"], ["error_code"], "cancellation state");
   const state: RuntimeV2RunCancellationState = {
@@ -469,7 +509,69 @@ export function decodeRuntimeV2CancellationState(value: unknown): RuntimeV2RunCa
   if (hasOwn(object, "error_code")) {
     state.errorCode = assertText(object.error_code, 120, "cancellation state.error_code");
   }
+  const hasError = state.errorCode !== undefined;
+  switch (state.cancelState) {
+    case RuntimeV2CancelStates.requested:
+    case RuntimeV2CancelStates.delivered:
+    case RuntimeV2CancelStates.stopping:
+    case RuntimeV2CancelStates.stopped:
+      if (hasError) {
+        throw runtimeV2Error("cancellation state.error_code is not allowed for a successful stop state");
+      }
+      break;
+    case RuntimeV2CancelStates.unsupported:
+    case RuntimeV2CancelStates.failed:
+    case RuntimeV2CancelStates.unconfirmed:
+      if (!hasError) {
+        throw runtimeV2Error("cancellation state.error_code is required for a negative stop state");
+      }
+      break;
+  }
   return state;
+}
+
+export function encodeRuntimeV2CallAgent(value: RuntimeV2CallAgentRequest): RuntimeV2WireObject {
+  const source = exactObject(value, ["targetAgentId", "input"], ["metadata", "reason"], "delegated call");
+  const wire: RuntimeV2WireObject = {
+    target_agent_id: assertUUID(value.targetAgentId, "delegated call.targetAgentId"),
+    input: assertJSONObject(value.input, "delegated call.input"),
+  };
+  if (hasOwn(source, "metadata")) {
+    wire.metadata = assertJSONObject(value.metadata, "delegated call.metadata");
+  }
+  if (hasOwn(source, "reason")) {
+    wire.reason = assertOptionalText(value.reason, 500, "delegated call.reason");
+  }
+  return wire;
+}
+
+export function decodeRuntimeV2RunSummary(value: unknown): RuntimeV2RunSummary {
+  const object = exactObject(value, ["run_id", "status", "dispatch_state"], [], "delegated call response");
+  const summary: RuntimeV2RunSummary = {
+    runId: assertUUID(object.run_id, "delegated call response.run_id"),
+    status: assertRunStatus(object.status, "delegated call response.status"),
+    dispatchState: assertDispatchState(object.dispatch_state, "delegated call response.dispatch_state"),
+  };
+  switch (summary.status) {
+    case "running":
+      if (!["pending", "offered", "executing", "retry_wait"].includes(summary.dispatchState)) {
+        throw runtimeV2Error("delegated call response has an incoherent running state");
+      }
+      break;
+    case "success":
+    case "timeout":
+    case "canceled":
+      if (summary.dispatchState !== "terminal") {
+        throw runtimeV2Error("delegated call response has an incoherent terminal state");
+      }
+      break;
+    case "failed":
+      if (summary.dispatchState !== "terminal" && summary.dispatchState !== "dead_letter") {
+        throw runtimeV2Error("delegated call response has an incoherent failed state");
+      }
+      break;
+  }
+  return summary;
 }
 
 export function decodeRuntimeV2ErrorEnvelope(value: unknown): RuntimeV2ErrorEnvelope {
@@ -584,8 +686,8 @@ function decodeDrain(value: unknown, label: string): RuntimeV2DrainPayload {
   return {
     deadlineAt: assertTimestamp(object.deadline_at, `${label}.deadline_at`),
     reasonCode: assertText(object.reason_code, 120, `${label}.reason_code`),
-    capacity: assertCapacity(object.capacity, `${label}.capacity`),
-    inflight: assertCapacity(object.inflight, `${label}.inflight`),
+    capacity: assertInteger(object.capacity, 0, undefined, `${label}.capacity`),
+    inflight: assertInteger(object.inflight, 0, undefined, `${label}.inflight`),
   };
 }
 
@@ -743,6 +845,13 @@ function runtimeV2DaysInMonth(year: number, month: number): number {
 function assertText(value: unknown, maximum: number | undefined, label: string): string {
   if (typeof value !== "string" || !value.trim() || (maximum !== undefined && [...value].length > maximum)) {
     throw runtimeV2Error(`${label} must be non-empty text${maximum === undefined ? "" : ` up to ${maximum} characters`}`);
+  }
+  return value;
+}
+
+function assertOptionalText(value: unknown, maximum: number, label: string): string {
+  if (typeof value !== "string" || [...value].length > maximum) {
+    throw runtimeV2Error(`${label} must be text up to ${maximum} characters`);
   }
   return value;
 }

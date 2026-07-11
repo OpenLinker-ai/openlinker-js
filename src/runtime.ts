@@ -11,18 +11,24 @@ import {
   type TokenProvider,
 } from "./client.js";
 import {
+  assertRuntimeV2UUID,
   assertRuntimeV2WaitSeconds,
   decodeRuntimeV2Assignment,
   decodeRuntimeV2AssignmentConfirmed,
   decodeRuntimeV2AssignmentRejected,
+  decodeRuntimeV2CancellationState,
+  decodeRuntimeV2CommandsResponse,
   decodeRuntimeV2ErrorEnvelope,
   decodeRuntimeV2EventAck,
   decodeRuntimeV2LeaseRenewed,
   decodeRuntimeV2Ready,
   decodeRuntimeV2ResultAck,
   decodeRuntimeV2ResumeResponse,
+  decodeRuntimeV2RunSummary,
   encodeRuntimeV2AssignmentAck,
   encodeRuntimeV2AssignmentReject,
+  encodeRuntimeV2CallAgent,
+  encodeRuntimeV2CancelAck,
   encodeRuntimeV2Claim,
   encodeRuntimeV2Event,
   encodeRuntimeV2Hello,
@@ -33,12 +39,20 @@ import {
   readRuntimeV2JSON,
   runtimeV2AttemptIdentityEqual,
 } from "./runtime-v2-codec.js";
+import {
+  RuntimeV2CallAgentPath,
+  assertRuntimeV2CallAgentAuthorization,
+  buildRuntimeV2InvocationProof,
+} from "./runtime-v2-invocation.js";
 import type {
   RuntimeV2AssignmentAckPayload,
   RuntimeV2AssignmentConfirmedPayload,
   RuntimeV2AssignmentRejectPayload,
   RuntimeV2AssignmentRejectedPayload,
+  RuntimeV2CallAgentAuthorization,
+  RuntimeV2CallAgentRequest,
   RuntimeV2ClaimRequest,
+  RuntimeV2CommandsResponse,
   RuntimeV2HelloPayload,
   RuntimeV2LeaseRenewedPayload,
   RuntimeV2LeaseRenewPayload,
@@ -46,12 +60,16 @@ import type {
   RuntimeV2ResumePayload,
   RuntimeV2ResumeResponse,
   RuntimeV2RunAssignedPayload,
+  RuntimeV2RunCancelAckPayload,
+  RuntimeV2RunCancellationState,
   RuntimeV2RunEventAckPayload,
   RuntimeV2RunEventPayload,
   RuntimeV2RunResultAckPayload,
   RuntimeV2RunResultPayload,
+  RuntimeV2RunSummary,
   RuntimeV2SessionCloseRequest,
 } from "./runtime-v2-types.js";
+import { RuntimeV2MaxMessageBytes } from "./runtime-v2-types.js";
 import type {
   AgentHeartbeatResponse,
   CallAgentRequest,
@@ -62,6 +80,7 @@ import type {
 } from "./types.js";
 
 export * from "./runtime-v2-types.js";
+export * from "./runtime-v2-invocation.js";
 
 export interface OpenLinkerRuntimeOptions {
   baseUrl: string;
@@ -267,6 +286,106 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     return response;
   }
 
+  async pollRuntimeV2Commands(
+    runtimeSessionId: string,
+    waitSeconds: number,
+    options: RequestOptions = {},
+  ): Promise<RuntimeV2CommandsResponse> {
+    assertRuntimeV2UUID(runtimeSessionId, "commands.runtimeSessionId");
+    assertRuntimeV2WaitSeconds(waitSeconds);
+    const query = new URLSearchParams({
+      runtime_session_id: runtimeSessionId,
+      wait: String(waitSeconds),
+    });
+    const response = await this.runtimeV2Fetch(
+      "GET",
+      "/agent-runtime/v2/commands",
+      undefined,
+      options,
+      query,
+    );
+    if (response.status !== 200) {
+      throw new Error("OpenLinker runtime v2: commands endpoint must return 200");
+    }
+    const decoded = decodeRuntimeV2CommandsResponse(await readRuntimeV2JSON(response));
+    for (const command of decoded.commands) {
+      if ((command.type === "run.cancel" || command.type === "run.lease.revoked") &&
+        command.payload.attemptIdentity.runtimeSessionId !== runtimeSessionId) {
+        throw new Error("OpenLinker runtime v2: command Session identity mismatch");
+      }
+    }
+    return decoded;
+  }
+
+  async ackRuntimeV2Cancel(
+    request: RuntimeV2RunCancelAckPayload,
+    options: RequestOptions = {},
+  ): Promise<RuntimeV2RunCancellationState> {
+    const response = await this.runtimeV2Fetch(
+      "POST",
+      runtimeV2RunPath(request.attemptIdentity.runId, "cancel-ack"),
+      encodeRuntimeV2CancelAck(request),
+      options,
+    );
+    if (response.status !== 200) {
+      throw new Error("OpenLinker runtime v2: cancel ACK endpoint must return 200");
+    }
+    const state = decodeRuntimeV2CancellationState(await readRuntimeV2JSON(response));
+    if (state.cancellationId !== request.cancellationId) {
+      throw new Error("OpenLinker runtime v2: cancellation state identity mismatch");
+    }
+    assertRuntimeV2CancelStateCorrelation(request.cancelState, state.cancelState);
+    return state;
+  }
+
+  async callRuntimeV2Agent(
+    authorization: RuntimeV2CallAgentAuthorization,
+    request: RuntimeV2CallAgentRequest,
+    options: RequestOptions = {},
+  ): Promise<RuntimeV2RunSummary> {
+    assertRuntimeV2CallAgentAuthorization(authorization);
+    const wire = encodeRuntimeV2CallAgent(request);
+    let json: string;
+    try {
+      json = JSON.stringify(wire);
+    } catch (cause) {
+      throw new Error("OpenLinker runtime v2: delegated call is not JSON serializable", { cause });
+    }
+    const body = new TextEncoder().encode(json);
+    if (body.byteLength > RuntimeV2MaxMessageBytes) {
+      throw new Error("OpenLinker runtime v2: delegated call exceeds 4 MiB");
+    }
+    const proof = await buildRuntimeV2InvocationProof(authorization.token, {
+      method: "POST",
+      path: RuntimeV2CallAgentPath,
+      idempotencyKey: authorization.idempotencyKey,
+      context: authorization.invocationContext,
+      body,
+    });
+    const headers = new Headers({
+      "idempotency-key": authorization.idempotencyKey,
+      "openlinker-invocation-context": authorization.invocationContext,
+      "openlinker-invocation-proof": proof,
+    });
+    const response = await this.fetchAgentRuntimeBytesRaw(
+      "POST",
+      RuntimeV2CallAgentPath,
+      body,
+      authorization.token,
+      headers,
+      options,
+    );
+    await assertRuntimeV2ResponseOK(response);
+    if (response.status !== 200 && response.status !== 202) {
+      throw new Error("OpenLinker runtime v2: delegated call must return 200 or 202");
+    }
+    const summary = decodeRuntimeV2RunSummary(await readRuntimeV2JSON(response));
+    if ((summary.status === "running") !== (response.status === 202)) {
+      throw new Error("OpenLinker runtime v2: delegated call status does not match its Run summary");
+    }
+    return summary;
+  }
+
   override async claimRuntimeRun(
     params: ClaimRuntimeRunParams = {},
     options: RequestOptions = {},
@@ -354,20 +473,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     query?: URLSearchParams,
   ): Promise<Response> {
     const response = await this.fetchAgentRuntimeRaw(method, path, body, options, query);
-    if (response.ok) {
-      return response;
-    }
-    const raw = await readRuntimeV2JSON(response);
-    const envelope = decodeRuntimeV2ErrorEnvelope(raw);
-    throw new OpenLinkerError(envelope.error.message, {
-      status: response.status,
-      code: envelope.error.code,
-      details: envelope.error,
-      requestId: response.headers.get("x-request-id") ??
-        response.headers.get("x-correlation-id") ?? undefined,
-      retryAfterMs: runtimeV2RetryAfterMs(response.headers),
-      responseBody: raw,
-    });
+    return assertRuntimeV2ResponseOK(response);
   }
 }
 
@@ -383,6 +489,34 @@ function assertRuntimeV2ResponseIdentity(
   if (!runtimeV2AttemptIdentityEqual(requested, returned)) {
     throw new Error(`OpenLinker runtime v2: ${operation} identity mismatch`);
   }
+}
+
+function assertRuntimeV2CancelStateCorrelation(
+  requested: RuntimeV2RunCancelAckPayload["cancelState"],
+  returned: RuntimeV2RunCancellationState["cancelState"],
+): void {
+  const allowed = returned === "unconfirmed" || returned === requested ||
+    (requested === "delivered" && returned === "stopping");
+  if (!allowed) {
+    throw new Error("OpenLinker runtime v2: cancellation state does not correlate with the ACK");
+  }
+}
+
+async function assertRuntimeV2ResponseOK(response: Response): Promise<Response> {
+  if (response.ok) {
+    return response;
+  }
+  const raw = await readRuntimeV2JSON(response);
+  const envelope = decodeRuntimeV2ErrorEnvelope(raw);
+  throw new OpenLinkerError(envelope.error.message, {
+    status: response.status,
+    code: envelope.error.code,
+    details: envelope.error,
+    requestId: response.headers.get("x-request-id") ??
+      response.headers.get("x-correlation-id") ?? undefined,
+    retryAfterMs: runtimeV2RetryAfterMs(response.headers),
+    responseBody: raw,
+  });
 }
 
 function runtimeV2RetryAfterMs(headers: Headers): number | undefined {

@@ -3,7 +3,7 @@ import type { JsonObject } from "./types.js";
 export const RuntimeProtocolVersion = 2 as const;
 export const RuntimeContractID = "openlinker.runtime.v2" as const;
 export const RuntimeContractDigest =
-  "d83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f" as const;
+  "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61" as const;
 export const RuntimeRequiredFeatures = Object.freeze([
   "lease_fence",
   "assignment_confirm",
@@ -361,6 +361,33 @@ export type RuntimeV2PendingCommand =
 export interface RuntimeV2CommandsResponse {
   commands: RuntimeV2PendingCommand[];
   databaseTime: string;
+}
+
+export interface RuntimeV2CallAgentAuthorization {
+  invocationContext: string;
+  token: string;
+  idempotencyKey: string;
+}
+
+export interface RuntimeV2CallAgentRequest {
+  targetAgentId: string;
+  input: JsonObject;
+  metadata?: JsonObject;
+  reason?: string;
+}
+
+export interface RuntimeV2RunSummary {
+  runId: string;
+  status: RuntimeV2RunStatus;
+  dispatchState: RuntimeV2DispatchState;
+}
+
+export interface RuntimeV2InvocationProofRequest {
+  method: string;
+  path: string;
+  idempotencyKey: string;
+  context: string;
+  body: Uint8Array;
 }
 
 export type RuntimeV2ErrorCode =

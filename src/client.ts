@@ -547,6 +547,38 @@ export class OpenLinkerClient {
     );
   }
 
+  /**
+   * Sends an Agent Runtime request from already encoded bytes. Delegated
+   * runtime-v2 calls use this path so proof generation and transport cannot
+   * stringify the body independently.
+   */
+  protected async fetchAgentRuntimeBytesRaw(
+    method: string,
+    path: string,
+    body: Uint8Array,
+    authorizationToken: string,
+    requiredHeaders: HeadersInit,
+    options: RequestOptions = {},
+    query?: URLSearchParams,
+  ): Promise<Response> {
+    if (!this.#runtimeMode) {
+      throw new Error("OpenLinkerClient cannot call agent runtime endpoints; use OpenLinkerRuntime from @openlinker/sdk/runtime");
+    }
+    const headers = await this.buildHeaders(options, true);
+    mergeHeaders(headers, requiredHeaders);
+    // These values are part of the delegated authority and must win over
+    // ordinary SDK defaults and caller-supplied RequestOptions.
+    headers.set("authorization", `Bearer ${authorizationToken}`);
+    headers.set("accept", "application/json");
+    headers.set("content-type", "application/json");
+    const transportBody = Uint8Array.from(body).buffer;
+    const init: RequestInit = { method, headers, body: transportBody };
+    if (options.signal) {
+      init.signal = options.signal;
+    }
+    return await this.#fetch(this.url(path, query), init);
+  }
+
   async a2aJsonRpc<T = JsonValue>(
     endpointOrSlug: string,
     method: string,
