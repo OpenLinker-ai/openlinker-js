@@ -1,13 +1,8 @@
 import {
   OpenLinkerClient,
   OpenLinkerError,
-  type ClaimRuntimeRunResult,
   type FetchLike,
   type RequestOptions,
-  type RuntimeHandlers,
-  type RuntimePullLoopOptions,
-  type RuntimeWebSocketConnection,
-  type RuntimeWebSocketOptions,
   type TokenProvider,
 } from "./client.js";
 import {
@@ -70,14 +65,6 @@ import type {
   RuntimeV2SessionCloseRequest,
 } from "./runtime-v2-types.js";
 import { RuntimeV2MaxMessageBytes } from "./runtime-v2-types.js";
-import type {
-  AgentHeartbeatResponse,
-  CallAgentRequest,
-  ClaimRuntimeRunParams,
-  RuntimePullResultRequest,
-  RuntimePullRunResponse,
-  RunResponse,
-} from "./types.js";
 
 export * from "./runtime-v2-types.js";
 export * from "./runtime-v2-invocation.js";
@@ -103,12 +90,6 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
       agentToken: options.agentToken,
       runtimeMode: true,
     } as unknown as ConstructorParameters<typeof OpenLinkerClient>[0]);
-  }
-
-  override async heartbeatAgent(
-    options: RequestOptions = {},
-  ): Promise<AgentHeartbeatResponse> {
-    return super.heartbeatAgent(options);
   }
 
   async createRuntimeV2Session(
@@ -386,57 +367,6 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     return summary;
   }
 
-  override async claimRuntimeRun(
-    params: ClaimRuntimeRunParams = {},
-    options: RequestOptions = {},
-  ): Promise<RuntimePullRunResponse | undefined> {
-    return super.claimRuntimeRun(params, options);
-  }
-
-  override async claimRuntimeRunDetailed(
-    params: ClaimRuntimeRunParams = {},
-    options: RequestOptions = {},
-  ): Promise<ClaimRuntimeRunResult> {
-    return super.claimRuntimeRunDetailed(params, options);
-  }
-
-  override async completeRuntimeRun(
-    runId: string,
-    result: RuntimePullResultRequest,
-    options: RequestOptions = {},
-  ): Promise<RunResponse> {
-    return super.completeRuntimeRun(runId, result, options);
-  }
-
-  override async callAgent(
-    request: CallAgentRequest,
-    options: RequestOptions = {},
-  ): Promise<RunResponse> {
-    return super.callAgent(request, options);
-  }
-
-  override async callAgentAt(
-    endpoint: string,
-    request: CallAgentRequest,
-    options: RequestOptions = {},
-  ): Promise<RunResponse> {
-    return super.callAgentAt(endpoint, request, options);
-  }
-
-  override async runRuntimePullLoop(
-    handlers: RuntimeHandlers,
-    options: RuntimePullLoopOptions = {},
-  ): Promise<void> {
-    return super.runRuntimePullLoop(handlers, options);
-  }
-
-  override async connectRuntimeWebSocket(
-    handlers: RuntimeHandlers,
-    options: RuntimeWebSocketOptions = {},
-  ): Promise<RuntimeWebSocketConnection> {
-    return super.connectRuntimeWebSocket(handlers, options);
-  }
-
   private async runtimeV2RequiredJSON(
     method: string,
     path: string,
@@ -534,26 +464,7 @@ function runtimeV2RetryAfterMs(headers: Headers): number | undefined {
 
 export { OpenLinkerError };
 export type {
-  ClaimRuntimeRunResult,
   FetchLike,
   RequestOptions,
-  RuntimeHandlers,
-  RuntimePullLoopOptions,
-  RuntimeWebSocketConnection,
-  RuntimeWebSocketFactory,
-  RuntimeWebSocketFactoryOptions,
-  RuntimeWebSocketLike,
-  RuntimeWebSocketOptions,
   TokenProvider,
 } from "./client.js";
-export type {
-  AgentHeartbeatResponse,
-  CallAgentRequest,
-  ClaimRuntimeRunParams,
-  RuntimeAssignment,
-  RuntimePullResultRequest,
-  RuntimePullRunResponse,
-  RuntimeWSClientMessage,
-  RuntimeWSServerMessage,
-  RunResponse,
-} from "./types.js";

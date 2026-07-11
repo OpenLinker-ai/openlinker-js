@@ -101,12 +101,16 @@ console.log(sameRun.run_id, sameRun.replayed);
 Core 对首次创建返回 `201`，对已结束的重放返回 `200`，对仍在运行的重放返回 `202`。
 SDK 会透明处理这三种状态，可通过 `RunResponse.replayed` 判断是否为重放。
 
-## Runtime 入口
+## Runtime v2 入口
 
-Agent runtime 进程通过 runtime 入口使用 `OPENLINKER_AGENT_TOKEN`：
+Runtime worker 通过严格的 v2 入口使用 `OPENLINKER_AGENT_TOKEN`：
 
 ```ts
-import { OpenLinkerRuntime } from "@openlinker/sdk/runtime";
+import {
+  OpenLinkerRuntime,
+  RuntimeContractDigest,
+  RuntimeRequiredFeatures,
+} from "@openlinker/sdk/runtime";
 
 const agentToken = process.env.OPENLINKER_AGENT_TOKEN;
 if (!agentToken) {
@@ -118,19 +122,37 @@ const runtime = new OpenLinkerRuntime({
   agentToken,
 });
 
-await runtime.runRuntimePullLoop({
-  async onAssigned(assignment) {
-    const output = await handleAssignment(assignment);
-    await runtime.completeRuntimeRun(assignment.run_id, {
-      status: "success",
-      output,
-    });
-  },
+const runtimeSessionId = crypto.randomUUID();
+const hello = {
+  nodeId: process.env.OPENLINKER_NODE_ID!,
+  agentId: process.env.OPENLINKER_AGENT_ID!,
+  workerId: "worker-1",
+  runtimeSessionId,
+  sessionEpoch: 1,
+  nodeVersion: "0.2.0",
+  capacity: 1,
+  features: RuntimeRequiredFeatures,
+  contractDigest: RuntimeContractDigest,
+};
+
+await runtime.createRuntimeV2Session(hello);
+const assignment = await runtime.claimRuntimeV2Run(25, {
+  runtimeSessionId,
+  capacity: 1,
+  inflight: 0,
 });
+
+if (assignment) {
+  await runtime.ackRuntimeV2Assignment({
+    attemptIdentity: assignment.attemptIdentity,
+  });
+  // 后续交给具备持久化能力的 worker：续租、落盘事件、响应取消，
+  // 并使用同一 attempt identity 提交最终结果。
+}
 ```
 
-`OpenLinkerClient` 会拒绝 `agentToken`；`/agent-runtime/*` endpoint 请使用
-`OpenLinkerRuntime`。
+`OpenLinkerClient` 会拒绝 `agentToken`。`OpenLinkerRuntime` 只提供严格的
+Runtime v2 协议原语；持久化队列、续租调度、任务执行和故障恢复由 worker 负责。
 
 ## Callback
 

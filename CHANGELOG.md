@@ -14,6 +14,12 @@ runtime helper, callback, and A2A contracts are declared stable.
   when omitted, and expose Core's `replayed` result across `201`, `200`, and
   `202` responses.
 
+### Removed
+
+- Breaking: removed the pre-v2 runtime heartbeat, pull claim, result upload,
+  WebSocket connector, delegated-call helpers, and their DTO/connector exports.
+  `@openlinker/sdk/runtime` now exposes the strict Runtime v2 surface only.
+
 ### Documentation
 
 - Split Chinese documentation into dedicated `*.zh-CN.md` files and kept the

@@ -16,10 +16,6 @@ import type {
   A2ATaskQueryParams,
   AgentCardResponse,
   AgentDetailResponse,
-  AgentEvent,
-  AgentHeartbeatResponse,
-  CallAgentRequest,
-  ClaimRuntimeRunParams,
   JsonObject,
   JsonValue,
   ListAgentsParams,
@@ -27,10 +23,6 @@ import type {
   ListRunEventsParams,
   ListRunEventsResponse,
   MarketListResponse,
-  RuntimeAssignment,
-  RuntimePullResultRequest,
-  RuntimePullRunResponse,
-  RuntimeWSServerMessage,
   PlatformRunCallbackConfig,
   RunAgentRequest,
   RunArtifactResponse,
@@ -87,67 +79,6 @@ export interface StreamRunEventHandlers {
   onEvent?: (event: StreamRunEvent) => void | Promise<void>;
   onTerminal?: (event: StreamRunEvent) => void | Promise<void>;
   onClose?: () => void | Promise<void>;
-}
-
-export interface ClaimRuntimeRunResult {
-  run?: RuntimePullRunResponse | undefined;
-  retryAfterMs?: number | undefined;
-  maxClaimWaitSeconds?: number | undefined;
-}
-
-export interface RuntimeHandlers {
-  onReady?: (message: RuntimeWSServerMessage) => void | Promise<void>;
-  onAssigned?: (assignment: RuntimeAssignment) => void | Promise<void>;
-  onMessage?: (message: RuntimeWSServerMessage) => void | Promise<void>;
-  onError?: (error: unknown) => void | Promise<void>;
-}
-
-export interface RuntimePullLoopOptions extends RequestOptions {
-  waitSeconds?: number | undefined;
-  heartbeatMs?: number | undefined;
-  emptyRetryMs?: number | undefined;
-  maxRuns?: number | undefined;
-  stopOnEmpty?: boolean | undefined;
-}
-
-export interface RuntimeWebSocketFactoryOptions {
-  headers: Record<string, string>;
-  protocols?: string | string[] | undefined;
-}
-
-export interface RuntimeWebSocketLike {
-  readyState?: number | undefined;
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  addEventListener?: (type: string, listener: (event: unknown) => void) => void;
-  removeEventListener?: (type: string, listener: (event: unknown) => void) => void;
-  onopen?: ((event: unknown) => void) | null;
-  onmessage?: ((event: { data: unknown }) => void) | null;
-  onerror?: ((event: unknown) => void) | null;
-  onclose?: ((event: unknown) => void) | null;
-}
-
-export type RuntimeWebSocketFactory = (
-  url: string,
-  options: RuntimeWebSocketFactoryOptions,
-) => RuntimeWebSocketLike;
-
-export interface RuntimeWebSocketOptions extends RequestOptions {
-  endpoint?: string | undefined;
-  heartbeatMs?: number | undefined;
-  reconnect?: boolean | undefined;
-  reconnectMinMs?: number | undefined;
-  reconnectMaxMs?: number | undefined;
-  protocols?: string | string[] | undefined;
-  webSocketFactory?: RuntimeWebSocketFactory | undefined;
-}
-
-export interface RuntimeWebSocketConnection {
-  readonly supportsLiveEvents: true;
-  readonly ready: Promise<void>;
-  close(code?: number, reason?: string): void;
-  sendRunEvent(runId: string, event: AgentEvent): void;
-  completeRun(runId: string, result: RuntimePullResultRequest): void;
 }
 
 export class OpenLinkerError extends Error {
@@ -448,82 +379,6 @@ export class OpenLinkerClient {
       externalSignal?.removeEventListener("abort", abortFromExternal);
     }
     return terminal;
-  }
-
-  protected async heartbeatAgent(
-    options: RequestOptions = {},
-  ): Promise<AgentHeartbeatResponse> {
-    return this.request(
-      "POST",
-      "/agent-runtime/heartbeat",
-      undefined,
-      await this.withAgentToken(options),
-    );
-  }
-
-  protected async claimRuntimeRun(
-    params: ClaimRuntimeRunParams = {},
-    options: RequestOptions = {},
-  ): Promise<RuntimePullRunResponse | undefined> {
-    return (await this.claimRuntimeRunDetailed(params, options)).run;
-  }
-
-  protected async claimRuntimeRunDetailed(
-    params: ClaimRuntimeRunParams = {},
-    options: RequestOptions = {},
-  ): Promise<ClaimRuntimeRunResult> {
-    const query = new URLSearchParams();
-    appendQuery(query, "wait", params.wait);
-    const response = await this.fetchRaw(
-      "GET",
-      "/agent-runtime/runs/claim",
-      undefined,
-      await this.withAgentToken(options),
-      query,
-    );
-    if (!response.ok) {
-      throw await errorFromResponse(response);
-    }
-    if (response.status === 204) {
-      return {
-        retryAfterMs: retryAfterMs(response.headers),
-        maxClaimWaitSeconds: numberHeader(response.headers, "x-openlinker-max-claim-wait-seconds"),
-      };
-    }
-    return { run: await readResponse<RuntimePullRunResponse>(response) };
-  }
-
-  protected async completeRuntimeRun(
-    runId: string,
-    result: RuntimePullResultRequest,
-    options: RequestOptions = {},
-  ): Promise<RunResponse> {
-    return this.request(
-      "POST",
-      `/agent-runtime/runs/${encodeURIComponent(runId)}/result`,
-      result,
-      await this.withAgentToken(options),
-    );
-  }
-
-  protected async callAgent(
-    request: CallAgentRequest,
-    options: RequestOptions = {},
-  ): Promise<RunResponse> {
-    return this.callAgentAt("", request, options);
-  }
-
-  protected async callAgentAt(
-    endpoint: string,
-    request: CallAgentRequest,
-    options: RequestOptions = {},
-  ): Promise<RunResponse> {
-    return this.request(
-      "POST",
-      endpoint || "/agent-runtime/call-agent",
-      toCallAgentRequestBody(request),
-      await this.withAgentToken(options),
-    );
   }
 
   /**
@@ -940,60 +795,6 @@ export class OpenLinkerClient {
     await readA2AEventStream(response.body, handlers);
   }
 
-  protected async runRuntimePullLoop(
-    handlers: RuntimeHandlers,
-    options: RuntimePullLoopOptions = {},
-  ): Promise<void> {
-    const waitSeconds = options.waitSeconds ?? 25;
-    const heartbeatMs = options.heartbeatMs ?? 60_000;
-    const emptyRetryMs = options.emptyRetryMs ?? 5_000;
-    let processed = 0;
-    let lastHeartbeat = 0;
-
-    while (!options.signal?.aborted && (!options.maxRuns || processed < options.maxRuns)) {
-      const now = Date.now();
-      if (now - lastHeartbeat >= heartbeatMs) {
-        try {
-          await this.heartbeatAgent(options);
-        } catch (error) {
-          await handlers.onError?.(error);
-        }
-        lastHeartbeat = Date.now();
-      }
-
-      try {
-        const claim = await this.claimRuntimeRunDetailed({ wait: waitSeconds }, options);
-        if (claim.run) {
-          await handlers.onAssigned?.(runtimeAssignmentFromPullRun(claim.run));
-          processed += 1;
-          continue;
-        }
-        if (options.stopOnEmpty) {
-          return;
-        }
-        await sleep(claim.retryAfterMs ?? emptyRetryMs, options.signal);
-      } catch (error) {
-        if (isAbortError(error) || options.signal?.aborted) {
-          return;
-        }
-        await handlers.onError?.(error);
-        const retryAfter = error instanceof OpenLinkerError ? error.retryAfterMs : undefined;
-        await sleep(retryAfter ?? emptyRetryMs, options.signal);
-      }
-    }
-  }
-
-  protected async connectRuntimeWebSocket(
-    handlers: RuntimeHandlers,
-    options: RuntimeWebSocketOptions = {},
-  ): Promise<RuntimeWebSocketConnection> {
-    const headers = await this.runtimeWebSocketHeaders(options);
-    const url = this.webSocketUrl(options.endpoint ?? "/agent-runtime/ws");
-    const connection = new RuntimeWebSocketConnectionImpl(url, headers, handlers, options);
-    connection.start();
-    return connection;
-  }
-
   private async request<T>(
     method: string,
     path: string,
@@ -1047,18 +848,6 @@ export class OpenLinkerClient {
     return url.toString();
   }
 
-  private webSocketUrl(path: string): string {
-    const url = new URL(path.startsWith("ws://") || path.startsWith("wss://")
-      ? path
-      : this.url(path));
-    if (url.protocol === "https:") {
-      url.protocol = "wss:";
-    } else if (url.protocol === "http:") {
-      url.protocol = "ws:";
-    }
-    return url.toString();
-  }
-
   private async buildHeaders(
     options: RequestOptions,
     hasBody: boolean,
@@ -1097,14 +886,6 @@ export class OpenLinkerClient {
     };
   }
 
-  private async runtimeWebSocketHeaders(options: RequestOptions): Promise<Record<string, string>> {
-    const headers = await this.buildHeaders(await this.withAgentToken(options), false);
-    const out: Record<string, string> = {};
-    headers.forEach((value, key) => {
-      out[key] = value;
-    });
-    return out;
-  }
 }
 
 function normalizeBaseUrl(raw: string): string {
@@ -1765,33 +1546,6 @@ function matchesPlatformCallbackEvent(
   return !callback.eventTypes?.length || callback.eventTypes.includes(event.event);
 }
 
-function toCallAgentRequestBody(request: CallAgentRequest): {
-  current_run_id?: string;
-  parent_run_id?: string;
-  target_agent_id: string;
-  reason?: string;
-  input: JsonValue;
-  metadata?: JsonValue;
-  context_id?: string;
-  trace_id?: string;
-  reference_task_ids?: string[];
-  task_callback?: JsonValue;
-} {
-  const taskCallback = request.taskCallback ?? request.pushNotification ?? request.pushNotificationConfig;
-  return {
-    ...(request.currentRunId ? { current_run_id: request.currentRunId } : {}),
-    ...(request.parentRunId ? { parent_run_id: request.parentRunId } : {}),
-    target_agent_id: request.targetAgentId,
-    ...(request.reason ? { reason: request.reason } : {}),
-    input: request.input,
-    ...(request.metadata ? { metadata: request.metadata } : {}),
-    ...(request.contextId ? { context_id: request.contextId } : {}),
-    ...(request.traceId ? { trace_id: request.traceId } : {}),
-    ...(request.referenceTaskIds?.length ? { reference_task_ids: request.referenceTaskIds } : {}),
-    ...(taskCallback ? { task_callback: toTaskCallbackBody(taskCallback) } : {}),
-  };
-}
-
 function toTaskCallbackBody(config: TaskCallbackConfig): JsonObject {
   const body: JsonObject = {};
   if (config.url) body.url = config.url;
@@ -1918,49 +1672,6 @@ function numberHeader(headers: Headers, name: string): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function runtimeAssignmentFromPullRun(run: RuntimePullRunResponse): RuntimeAssignment {
-  return {
-    type: "run.assigned",
-    run_id: run.run_id,
-    agent_id: run.agent_id,
-    input: run.input,
-    ...(run.metadata !== undefined ? { metadata: run.metadata } : {}),
-    source: run.source,
-    result_endpoint: run.result_endpoint,
-    result_method: run.result_method,
-    result_required: run.result_required,
-    ...(run.a2a ? { a2a: run.a2a } : {}),
-  };
-}
-
-function runtimeAssignmentFromWSMessage(message: RuntimeWSServerMessage): RuntimeAssignment {
-  return {
-    type: message.type,
-    run_id: message.run_id ?? "",
-    ...(message.agent_id ? { agent_id: message.agent_id } : {}),
-    ...(message.input !== undefined ? { input: message.input } : {}),
-    ...(message.metadata !== undefined ? { metadata: message.metadata } : {}),
-    ...(message.source ? { source: message.source } : {}),
-    ...(message.result_endpoint ? { result_endpoint: message.result_endpoint } : {}),
-    ...(message.result_method ? { result_method: message.result_method } : {}),
-    ...(message.result_required !== undefined ? { result_required: message.result_required } : {}),
-    ...(message.a2a ? { a2a: message.a2a } : {}),
-  };
-}
-
-async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0 || signal?.aborted) {
-    return;
-  }
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(timer);
-      resolve();
-    }, { once: true });
-  });
-}
-
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
@@ -2014,224 +1725,6 @@ async function errorFromResponse(response: Response): Promise<OpenLinkerError> {
     retryAfterMs: retryAfterMs(response.headers),
     responseBody: parsed,
   });
-}
-
-class RuntimeWebSocketConnectionImpl implements RuntimeWebSocketConnection {
-  readonly supportsLiveEvents = true;
-  readonly ready: Promise<void>;
-
-  readonly #url: string;
-  readonly #headers: Record<string, string>;
-  readonly #handlers: RuntimeHandlers;
-  readonly #options: RuntimeWebSocketOptions;
-  readonly #webSocketFactory: RuntimeWebSocketFactory;
-  #socket: RuntimeWebSocketLike | undefined;
-  #closed = false;
-  #heartbeatTimer: ReturnType<typeof setInterval> | undefined;
-  #reconnectDelayMs: number;
-  #resolveReady!: () => void;
-  #readyResolved = false;
-
-  constructor(
-    url: string,
-    headers: Record<string, string>,
-    handlers: RuntimeHandlers,
-    options: RuntimeWebSocketOptions,
-  ) {
-    this.#url = url;
-    this.#headers = headers;
-    this.#handlers = handlers;
-    this.#options = options;
-    this.#webSocketFactory = options.webSocketFactory ?? defaultWebSocketFactory;
-    this.#reconnectDelayMs = options.reconnectMinMs ?? 500;
-    this.ready = new Promise<void>((resolve) => {
-      this.#resolveReady = resolve;
-    });
-  }
-
-  start(): void {
-    this.#connect();
-  }
-
-  close(code?: number, reason?: string): void {
-    this.#closed = true;
-    this.#stopHeartbeat();
-    this.#socket?.close(code, reason);
-  }
-
-  sendRunEvent(runId: string, event: AgentEvent): void {
-    this.#send({
-      type: "run.event",
-      id: `event-${runId}-${Date.now()}`,
-      run_id: runId,
-      event_type: event.event_type,
-      ...(event.payload !== undefined ? { payload: event.payload } : {}),
-    });
-  }
-
-  completeRun(runId: string, result: RuntimePullResultRequest): void {
-    this.#send({
-      type: "run.result",
-      id: `result-${runId}-${Date.now()}`,
-      run_id: runId,
-      status: result.status,
-      ...(result.output !== undefined ? { output: result.output } : {}),
-      ...(result.events ? { events: result.events } : {}),
-      ...(result.error ? { error: result.error } : {}),
-      ...(result.duration_ms !== undefined ? { duration_ms: result.duration_ms } : {}),
-    });
-  }
-
-  #connect(): void {
-    if (this.#closed) {
-      return;
-    }
-    const socket = this.#webSocketFactory(this.#url, {
-      headers: this.#headers,
-      protocols: this.#options.protocols,
-    });
-    this.#socket = socket;
-    this.#listen(socket, "open", () => {
-      this.#reconnectDelayMs = this.#options.reconnectMinMs ?? 500;
-      if (!this.#readyResolved) {
-        this.#readyResolved = true;
-        this.#resolveReady();
-      }
-      this.#startHeartbeat(socket);
-    });
-    this.#listen(socket, "message", (event) => {
-      void this.#handleMessage((event as { data?: unknown }).data);
-    });
-    this.#listen(socket, "error", (event) => {
-      void this.#handlers.onError?.(event);
-    });
-    this.#listen(socket, "close", () => {
-      this.#stopHeartbeat();
-      if (!this.#closed && this.#options.reconnect !== false) {
-        this.#scheduleReconnect();
-      }
-    });
-  }
-
-  #listen(socket: RuntimeWebSocketLike, type: string, listener: (event: unknown) => void): void {
-    if (socket.addEventListener) {
-      socket.addEventListener(type, listener);
-      return;
-    }
-    switch (type) {
-      case "open":
-        socket.onopen = listener;
-        break;
-      case "message":
-        socket.onmessage = listener as (event: { data: unknown }) => void;
-        break;
-      case "error":
-        socket.onerror = listener;
-        break;
-      case "close":
-        socket.onclose = listener;
-        break;
-      default:
-    }
-  }
-
-  #scheduleReconnect(): void {
-    const delay = this.#reconnectDelayMs;
-    const maxDelay = this.#options.reconnectMaxMs ?? 10_000;
-    this.#reconnectDelayMs = Math.min(delay * 2, maxDelay);
-    setTimeout(() => this.#connect(), delay);
-  }
-
-  #startHeartbeat(socket: RuntimeWebSocketLike): void {
-    this.#stopHeartbeat();
-    const heartbeatMs = this.#options.heartbeatMs ?? 60_000;
-    if (heartbeatMs <= 0) {
-      return;
-    }
-    this.#heartbeatTimer = setInterval(() => {
-      if (this.#closed || this.#socket !== socket) {
-        return;
-      }
-      try {
-        this.#send({
-          type: "heartbeat",
-          id: `heartbeat-${Date.now()}`,
-        });
-      } catch (error) {
-        void this.#handlers.onError?.(error);
-      }
-    }, heartbeatMs);
-  }
-
-  #stopHeartbeat(): void {
-    if (this.#heartbeatTimer === undefined) {
-      return;
-    }
-    clearInterval(this.#heartbeatTimer);
-    this.#heartbeatTimer = undefined;
-  }
-
-  async #handleMessage(raw: unknown): Promise<void> {
-    const text = typeof raw === "string"
-      ? raw
-      : raw instanceof ArrayBuffer
-        ? new TextDecoder().decode(raw)
-        : String(raw ?? "");
-    let message: RuntimeWSServerMessage;
-    try {
-      message = JSON.parse(text) as RuntimeWSServerMessage;
-    } catch (error) {
-      await this.#handlers.onError?.(error);
-      return;
-    }
-    await this.#handlers.onMessage?.(message);
-    switch (message.type) {
-      case "runtime.ready":
-        await this.#handlers.onReady?.(message);
-        break;
-      case "run.assigned":
-        try {
-          this.#send({
-            type: "run.assignment.accepted",
-            id: `assignment-ack-${message.run_id ?? ""}-${Date.now()}`,
-            run_id: message.run_id,
-          });
-        } catch (error) {
-          await this.#handlers.onError?.(error);
-        }
-        await this.#handlers.onAssigned?.(runtimeAssignmentFromWSMessage(message));
-        break;
-      case "error":
-        await this.#handlers.onError?.(runtimeWebSocketError(message));
-        break;
-      default:
-    }
-  }
-
-  #send(message: unknown): void {
-    if (!this.#socket || (typeof this.#socket.readyState === "number" && this.#socket.readyState !== 1)) {
-      throw new Error("OpenLinker runtime websocket is not open");
-    }
-    this.#socket.send(JSON.stringify(message));
-  }
-}
-
-function defaultWebSocketFactory(
-  url: string,
-  options: RuntimeWebSocketFactoryOptions,
-): RuntimeWebSocketLike {
-  const WebSocketCtor = globalThis.WebSocket;
-  if (!WebSocketCtor) {
-    throw new Error("OpenLinker runtime websocket requires a WebSocket implementation");
-  }
-  return new WebSocketCtor(url, options.protocols) as RuntimeWebSocketLike;
-}
-
-function runtimeWebSocketError(message: RuntimeWSServerMessage): Error {
-  if (message.error?.code) {
-    return new Error(`OpenLinker runtime websocket error: ${message.error.code}: ${message.error.message}`);
-  }
-  return new Error(`OpenLinker runtime websocket error: ${message.error?.message ?? "unknown"}`);
 }
 
 async function readEventStream(

@@ -137,12 +137,16 @@ page for a complete history. `earliest_available_sequence` and
 `latest_available_sequence` are `null` when no retained event is available.
 SSE continues to use `streamRunEvents` unchanged.
 
-## Runtime Entry
+## Runtime v2 Entry
 
-Agent runtime processes use `OPENLINKER_AGENT_TOKEN` through the runtime entry:
+Runtime workers use `OPENLINKER_AGENT_TOKEN` through the strict v2 entry:
 
 ```ts
-import { OpenLinkerRuntime } from "@openlinker/sdk/runtime";
+import {
+  OpenLinkerRuntime,
+  RuntimeContractDigest,
+  RuntimeRequiredFeatures,
+} from "@openlinker/sdk/runtime";
 
 const agentToken = process.env.OPENLINKER_AGENT_TOKEN;
 if (!agentToken) {
@@ -154,19 +158,38 @@ const runtime = new OpenLinkerRuntime({
   agentToken,
 });
 
-await runtime.runRuntimePullLoop({
-  async onAssigned(assignment) {
-    const output = await handleAssignment(assignment);
-    await runtime.completeRuntimeRun(assignment.run_id, {
-      status: "success",
-      output,
-    });
-  },
+const runtimeSessionId = crypto.randomUUID();
+const hello = {
+  nodeId: process.env.OPENLINKER_NODE_ID!,
+  agentId: process.env.OPENLINKER_AGENT_ID!,
+  workerId: "worker-1",
+  runtimeSessionId,
+  sessionEpoch: 1,
+  nodeVersion: "0.2.0",
+  capacity: 1,
+  features: RuntimeRequiredFeatures,
+  contractDigest: RuntimeContractDigest,
+};
+
+await runtime.createRuntimeV2Session(hello);
+const assignment = await runtime.claimRuntimeV2Run(25, {
+  runtimeSessionId,
+  capacity: 1,
+  inflight: 0,
 });
+
+if (assignment) {
+  await runtime.ackRuntimeV2Assignment({
+    attemptIdentity: assignment.attemptIdentity,
+  });
+  // Execute through a durable worker that renews the lease, persists events,
+  // handles cancellation, and finalizes the result with the same identity.
+}
 ```
 
-`OpenLinkerClient` rejects `agentToken`; use `OpenLinkerRuntime` for
-`/agent-runtime/*` endpoints.
+`OpenLinkerClient` rejects `agentToken`. `OpenLinkerRuntime` exposes strict
+Runtime v2 primitives only; durable spooling, lease scheduling, execution, and
+recovery remain worker responsibilities.
 
 ## Callbacks
 
@@ -254,16 +277,22 @@ Application-side calls:
 - `listRunMessages`
 - `streamRunEvents`
 
-Agent runtime protocol, from `@openlinker/sdk/runtime`:
+Strict Runtime v2 protocol, from `@openlinker/sdk/runtime`:
 
-- `heartbeatAgent`
-- `claimRuntimeRun`
-- `claimRuntimeRunDetailed`
-- `completeRuntimeRun`
-- `callAgent`
-- `callAgentAt`
-- `runRuntimePullLoop`
-- `connectRuntimeWebSocket`
+- `createRuntimeV2Session`
+- `heartbeatRuntimeV2Session`
+- `closeRuntimeV2Session`
+- `claimRuntimeV2Run`
+- `ackRuntimeV2Assignment`
+- `rejectRuntimeV2Assignment`
+- `renewRuntimeV2Lease`
+- `appendRuntimeV2Event`
+- `finalizeRuntimeV2Result`
+- `resumeRuntimeV2Runs`
+- `pollRuntimeV2Commands`
+- `ackRuntimeV2Cancel`
+- `callRuntimeV2Agent`
+- `buildRuntimeV2InvocationProof`
 
 ## Development
 
