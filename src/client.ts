@@ -526,6 +526,27 @@ export class OpenLinkerClient {
     );
   }
 
+  /**
+   * Sends one authenticated Agent Runtime request without decoding its body.
+   * Reliable runtime v2 owns a stricter 4 MiB decoder and exact response
+   * schemas, so subclasses must be able to inspect the raw Response.
+   */
+  protected async fetchAgentRuntimeRaw(
+    method: string,
+    path: string,
+    body: unknown,
+    options: RequestOptions = {},
+    query?: URLSearchParams,
+  ): Promise<Response> {
+    return this.fetchRaw(
+      method,
+      path,
+      body,
+      await this.withAgentToken(options),
+      query,
+    );
+  }
+
   async a2aJsonRpc<T = JsonValue>(
     endpointOrSlug: string,
     method: string,
