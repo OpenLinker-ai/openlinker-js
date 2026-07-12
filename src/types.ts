@@ -6,8 +6,7 @@ export interface JsonObject {
 
 export type A2ADialect = "current" | "legacy" | string;
 
-export type ConnectionMode =
-  "direct_http" | "mcp_server" | "runtime_pull" | "runtime_ws";
+export type ConnectionMode = "direct_http" | "mcp_server" | "agent_node";
 
 export type RunStatus =
   "running" | "success" | "failed" | "timeout" | "canceled";
