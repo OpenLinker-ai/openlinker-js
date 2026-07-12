@@ -9,6 +9,7 @@ import {
   RuntimeContractID,
   RuntimeProtocolVersion,
   RuntimeRequiredFeatures,
+  RuntimeV2WebSocketSession,
 } from "../dist/runtime.js";
 
 test("Core client v1 contract maps to implemented SDK methods", async () => {
@@ -92,6 +93,7 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
   );
   assert.equal(contract.wire_format, "application/json");
   assert.equal(contract.websocket.path, "/api/v1/agent-runtime/v2/ws");
+  assert.equal(typeof RuntimeV2WebSocketSession, "function");
   assert.equal(contract.websocket.envelope_schema.$ref, "#/$defs/RuntimeMessage");
   assert.ok(contract.websocket.messages.length > 0);
   assert.ok(contract.endpoints.length > 0);

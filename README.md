@@ -192,6 +192,15 @@ if (assignment) {
 Runtime v2 primitives only; durable spooling, lease scheduling, execution, and
 recovery remain worker responsibilities.
 
+For the v2 WebSocket transport, pass an already-open, authenticated socket to
+`RuntimeV2WebSocketSession`. The socket upgrade must present the Node client
+certificate and `Authorization: Bearer <Agent Token>`; the SDK never places a
+credential in the URL. The session implements hello/ready, pushed assignment
+and cancellation, correlated assignment/lease/Event/Result ACKs, and resume.
+Workers still persist an assignment before ACK and persist every Event/Result
+before sending it. Use `openlinker-agent-node` when you need automatic
+WebSocket-to-v2-long-poll switching and durable recovery.
+
 ## Callbacks
 
 Platform-hosted callbacks do not require a public callback URL:

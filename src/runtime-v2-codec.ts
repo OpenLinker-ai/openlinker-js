@@ -29,6 +29,7 @@ import {
   type RuntimeV2HelloPayload,
   type RuntimeV2LeaseRenewedPayload,
   type RuntimeV2LeaseRenewPayload,
+  type RuntimeV2MessageType,
   type RuntimeV2PendingCommand,
   type RuntimeV2ReadyPayload,
   type RuntimeV2ResumeAcceptedPayload,
@@ -52,6 +53,16 @@ import {
 import type { JsonObject } from "./types.js";
 
 type RuntimeV2WireObject = Record<string, unknown>;
+
+export interface RuntimeV2DecodedEnvelope {
+  protocolVersion: number;
+  runtimeContractId: string;
+  messageId: string;
+  replyToMessageId?: string;
+  type: RuntimeV2MessageType;
+  sentAt: string;
+  payload: unknown;
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -126,6 +137,61 @@ export function assertRuntimeV2WaitSeconds(value: number): void {
 
 export function assertRuntimeV2UUID(value: unknown, label: string): string {
   return assertUUID(value, label);
+}
+
+export function encodeRuntimeV2Envelope(
+  type: RuntimeV2MessageType,
+  messageId: string,
+  sentAt: string,
+  payload: unknown,
+  replyToMessageId?: string,
+): RuntimeV2WireObject {
+  if (!Object.values(RuntimeV2MessageTypes).includes(type)) {
+    throw runtimeV2Error("envelope.type is invalid");
+  }
+  assertUUID(messageId, "envelope.messageId");
+  assertTimestamp(sentAt, "envelope.sentAt");
+  const wire: RuntimeV2WireObject = {
+    protocol_version: 2,
+    runtime_contract_id: "openlinker.runtime.v2",
+    message_id: messageId,
+    type,
+    sent_at: sentAt,
+    payload,
+  };
+  if (replyToMessageId !== undefined) {
+    wire.reply_to_message_id = assertUUID(replyToMessageId, "envelope.replyToMessageId");
+  }
+  return wire;
+}
+
+export function decodeRuntimeV2Envelope(value: unknown): RuntimeV2DecodedEnvelope {
+  const object = exactObject(value, [
+    "protocol_version", "runtime_contract_id", "message_id", "type", "sent_at", "payload",
+  ], ["reply_to_message_id"], "Runtime envelope");
+  if (object.protocol_version !== 2 || object.runtime_contract_id !== "openlinker.runtime.v2") {
+    throw runtimeV2Error("Runtime envelope contract does not match v2");
+  }
+  if (typeof object.type !== "string" || !Object.values(RuntimeV2MessageTypes).includes(
+    object.type as RuntimeV2MessageType,
+  )) {
+    throw runtimeV2Error("Runtime envelope.type is invalid");
+  }
+  const decoded: RuntimeV2DecodedEnvelope = {
+    protocolVersion: 2,
+    runtimeContractId: "openlinker.runtime.v2",
+    messageId: assertUUID(object.message_id, "Runtime envelope.message_id"),
+    type: object.type as RuntimeV2MessageType,
+    sentAt: assertTimestamp(object.sent_at, "Runtime envelope.sent_at"),
+    payload: object.payload,
+  };
+  if (hasOwn(object, "reply_to_message_id")) {
+    decoded.replyToMessageId = assertUUID(
+      object.reply_to_message_id,
+      "Runtime envelope.reply_to_message_id",
+    );
+  }
+  return decoded;
 }
 
 export function encodeRuntimeV2Hello(value: RuntimeV2HelloPayload): RuntimeV2WireObject {
@@ -464,6 +530,14 @@ export function decodeRuntimeV2CommandsResponse(value: unknown): RuntimeV2Comman
     commands: object.commands.map((command, index) => decodePendingCommand(command, `commands response.commands[${index}]`)),
     databaseTime: assertTimestamp(object.database_time, "commands response.database_time"),
   };
+}
+
+export function decodeRuntimeV2PendingCommand(value: unknown): RuntimeV2PendingCommand {
+  return decodePendingCommand(value, "Runtime command");
+}
+
+export function decodeRuntimeV2ResumeAccepted(value: unknown): RuntimeV2ResumeAcceptedPayload {
+  return decodeResumeDecision(value, 0);
 }
 
 export function encodeRuntimeV2CancelAck(value: RuntimeV2RunCancelAckPayload): RuntimeV2WireObject {

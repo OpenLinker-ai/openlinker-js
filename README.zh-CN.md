@@ -155,6 +155,13 @@ if (assignment) {
 `OpenLinkerClient` 会拒绝 `agentToken`。`OpenLinkerRuntime` 只提供严格的
 Runtime v2 协议原语；持久化队列、续租调度、任务执行和故障恢复由 worker 负责。
 
+使用 v2 WebSocket 时，把已经完成认证并处于打开状态的 socket 交给
+`RuntimeV2WebSocketSession`。升级请求必须携带 Node 客户端证书和
+`Authorization: Bearer <Agent Token>`；SDK 不会把凭证放进 URL。该 Session 实现
+hello/ready、assignment 与取消推送、assignment/lease/Event/Result 业务 ACK 关联和
+resume。worker 仍必须在 ACK assignment 前落盘，并在发送 Event/Result 前落盘。需要
+WebSocket 与 v2 长轮询自动切换及完整崩溃恢复时，使用 `openlinker-agent-node`。
+
 ## Callback
 
 平台托管 callback 不需要公网 callback URL。外部 webhook callback 适合服务端集成。

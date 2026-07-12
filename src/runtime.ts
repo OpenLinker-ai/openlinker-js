@@ -68,6 +68,7 @@ import { RuntimeV2MaxMessageBytes } from "./runtime-v2-types.js";
 
 export * from "./runtime-v2-types.js";
 export * from "./runtime-v2-invocation.js";
+export * from "./runtime-v2-websocket.js";
 
 export interface OpenLinkerRuntimeOptions {
   baseUrl: string;

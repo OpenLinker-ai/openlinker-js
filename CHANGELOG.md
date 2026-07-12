@@ -7,6 +7,14 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ## Unreleased
 
+### Added
+
+- Added `RuntimeV2WebSocketSession` for the canonical v2 WebSocket envelope,
+  correlated business ACKs, pushed assignments and cancellation commands,
+  multi-Attempt resume, strict size/shape validation, and close-code handling.
+  It accepts an already authenticated mTLS socket so credentials never appear
+  in a WebSocket URL.
+
 ### Changed
 
 - Added reliable Run creation to `runAgent` and `startAgentRun`: both methods
@@ -17,8 +25,9 @@ runtime helper, callback, and A2A contracts are declared stable.
 ### Removed
 
 - Breaking: removed the pre-v2 runtime heartbeat, pull claim, result upload,
-  WebSocket connector, delegated-call helpers, and their DTO/connector exports.
-  `@openlinker/sdk/runtime` now exposes the strict Runtime v2 surface only.
+  legacy WebSocket connector, delegated-call helpers, and their DTO/connector
+  exports. `@openlinker/sdk/runtime` now exposes strict Runtime v2 HTTP and
+  WebSocket protocol primitives only.
 
 ### Documentation
 
