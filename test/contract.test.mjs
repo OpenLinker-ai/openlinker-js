@@ -129,11 +129,7 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
   }
   assert.ok(endpointKeys.has("POST /api/v1/agent-runtime/v2/call-agent"));
 
-  assert.equal(contract.legacy_routes.length, 5);
-  for (const route of contract.legacy_routes) {
-    assert.equal(route.response_status, 426);
-    assert.equal(route.error_code, "RUNTIME_CLIENT_UPGRADE_REQUIRED");
-  }
+  assert.equal(Object.hasOwn(contract, "legacy_routes"), false);
   for (const definition of [
     "AttemptIdentity",
     "RunResultPayload",
