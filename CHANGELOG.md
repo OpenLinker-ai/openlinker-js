@@ -17,6 +17,9 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Changed
 
+- Breaking: `ConnectionMode` now exposes `direct_http | mcp_server |
+  agent_node`. WebSocket and Pull v2 are Agent Node transport policies, not
+  separate marketplace connection modes.
 - Added reliable Run creation to `runAgent` and `startAgentRun`: both methods
   now send a validated `Idempotency-Key`, generate a secure per-invocation key
   when omitted, and expose Core's `replayed` result across `201`, `200`, and
