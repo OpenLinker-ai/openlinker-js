@@ -3,8 +3,8 @@
 `@openlinker/sdk` is the TypeScript SDK for OpenLinker Core. Use its default
 entry from web apps, Node.js services, edge runtimes, and developer tools to
 discover Agents, start runs, stream events, verify callbacks, and call
-browser-friendly A2A JSON-RPC and HTTP+JSON/SSE bindings. Agent runtime
-connectors use the separate `@openlinker/sdk/runtime` entry.
+browser-friendly A2A JSON-RPC and HTTP+JSON/SSE bindings. Strict Agent Runtime
+v2 protocol primitives use the separate `@openlinker/sdk/runtime` entry.
 
 Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 
@@ -36,13 +36,13 @@ flowchart LR
   ClientSDK -->|"REST client with OPENLINKER_USER_TOKEN"| Core["openlinker-core<br/>registry / runs / events"]
   ClientSDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
   Runtime["Agent runtime process"] --> RuntimeSDK["@openlinker/sdk/runtime"]
-  RuntimeSDK -->|"heartbeat / claim / result with OPENLINKER_AGENT_TOKEN"| Core
+  RuntimeSDK -->|"mTLS + Agent Token / session / lease / event / result"| Core
 
   HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"same Core API contract"| Core
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
-  Core -->|"runtime_ws / runtime_pull"| AgentNode["openlinker-agent-node"]
+  Core -->|"Runtime v2 assignment and cancellation"| AgentNode["openlinker-agent-node"]
 ```
 
 ## Quick Start
@@ -154,7 +154,8 @@ if (!agentToken) {
 }
 
 const runtime = new OpenLinkerRuntime({
-  baseUrl: "https://core.example.com",
+  // Dedicated Runtime origin. The supplied transport must present the Node certificate.
+  baseUrl: "https://runtime.example.com:8443",
   agentToken,
 });
 
@@ -251,8 +252,7 @@ gRPC callers, use `github.com/OpenLinker-ai/openlinker-go` or a separate
 Node-only generated client.
 
 Operationally, gRPC is an additional A2A transport binding. It does not replace
-JSON-RPC, HTTP+JSON/SSE, or Agent Node's internal `runtime_ws` /
-`runtime_pull` channels.
+JSON-RPC, HTTP+JSON/SSE, or the separate Agent Node Runtime v2 control plane.
 
 ## Core Surface
 

@@ -2,8 +2,8 @@
 
 `@openlinker/sdk` 是 OpenLinker Core 的 TypeScript SDK。默认入口用于在 Web 应用、
 Node.js 服务、Edge runtime 和开发者工具中查找 Agent、启动运行、监听事件、校验回调，
-并调用浏览器友好的 A2A JSON-RPC 与 HTTP+JSON/SSE 接口。Agent runtime connector
-使用单独的 `@openlinker/sdk/runtime` 入口。
+并调用浏览器友好的 A2A JSON-RPC 与 HTTP+JSON/SSE 接口。严格的 Agent Runtime v2
+协议原语使用单独的 `@openlinker/sdk/runtime` 入口。
 
 English documentation: [README.md](./README.md)
 
@@ -27,13 +27,13 @@ flowchart LR
   ClientSDK -->|"REST client with OPENLINKER_USER_TOKEN"| Core["openlinker-core<br/>registry / runs / events"]
   ClientSDK -->|"A2A JSON-RPC / HTTP+JSON / SSE"| Core
   Runtime["Agent runtime process"] --> RuntimeSDK["@openlinker/sdk/runtime"]
-  RuntimeSDK -->|"heartbeat / claim / result with OPENLINKER_AGENT_TOKEN"| Core
+  RuntimeSDK -->|"mTLS + Agent Token / session / lease / event / result"| Core
 
   HostedBridge["Hosted Bridge<br/>可选部署适配层"] -.->|"同一 Core API contract"| Core
 
   Core -->|"direct_http"| HTTPAgent["公网 HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["远程 MCP / JSON-RPC server"]
-  Core -->|"runtime_ws / runtime_pull"| AgentNode["openlinker-agent-node"]
+  Core -->|"Runtime v2 assignment 与取消"| AgentNode["openlinker-agent-node"]
 ```
 
 ## 安装
@@ -118,7 +118,8 @@ if (!agentToken) {
 }
 
 const runtime = new OpenLinkerRuntime({
-  baseUrl: "https://core.example.com",
+  // Runtime 专用入口；传入的 transport 必须携带 Node 客户端证书。
+  baseUrl: "https://runtime.example.com:8443",
   agentToken,
 });
 
