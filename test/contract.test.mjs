@@ -5,6 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 
 import { OpenLinkerClient } from "../dist/index.js";
 import {
+  RuntimeAttachmentHeader,
   RuntimeContractDigest,
   RuntimeContractID,
   RuntimeProtocolVersion,
@@ -149,6 +150,7 @@ test("Runtime contract matches the exported handshake manifest", async () => {
       client_method: "heartbeatRuntimeSession",
       http_method: "POST",
       path: "/api/v1/agent-runtime/sessions/{id}/heartbeat",
+      required_headers: [RuntimeAttachmentHeader],
       request_body_schema: { $ref: "#/$defs/RuntimeHelloPayload" },
       success_response_schema: { $ref: "#/$defs/RuntimeReadyPayload" },
       error_response_schema: { $ref: "#/$defs/RuntimeError" },
@@ -160,11 +162,38 @@ test("Runtime contract matches the exported handshake manifest", async () => {
       client_method: "closeRuntimeSession",
       http_method: "POST",
       path: "/api/v1/agent-runtime/sessions/{id}/close",
+      required_headers: [RuntimeAttachmentHeader],
       request_body_schema: { $ref: "#/$defs/RuntimeSessionCloseRequest" },
       empty_response_status: 204,
       error_response_schema: { $ref: "#/$defs/RuntimeError" },
     },
   );
+
+  const attachmentPaths = new Set([
+    "GET /api/v1/agent-runtime/commands",
+    "POST /api/v1/agent-runtime/runs/claim",
+    "POST /api/v1/agent-runtime/runs/resume",
+    "POST /api/v1/agent-runtime/runs/{id}/assignment-ack",
+    "POST /api/v1/agent-runtime/runs/{id}/assignment-reject",
+    "POST /api/v1/agent-runtime/runs/{id}/cancel-ack",
+    "POST /api/v1/agent-runtime/runs/{id}/events",
+    "POST /api/v1/agent-runtime/runs/{id}/lease-renew",
+    "POST /api/v1/agent-runtime/runs/{id}/result",
+    "POST /api/v1/agent-runtime/sessions/{id}/close",
+    "POST /api/v1/agent-runtime/sessions/{id}/heartbeat",
+  ]);
+  for (const [key, endpoint] of endpoints) {
+    if (attachmentPaths.has(key)) {
+      assert.deepEqual(endpoint.required_headers, [RuntimeAttachmentHeader], key);
+    } else {
+      assert.equal(Object.hasOwn(endpoint, "required_headers"), key.endsWith("/call-agent"));
+    }
+  }
+  assert.ok(contract.$defs.RuntimeReadyPayload.required.includes("attachment_id"));
+  assert.deepEqual(contract.$defs.RuntimeReadyPayload.properties.attachment_id, {
+    type: "string",
+    format: "uuid",
+  });
 
   assert.equal(Object.hasOwn(contract, "legacy_routes"), false);
   for (const definition of [

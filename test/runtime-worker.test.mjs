@@ -21,6 +21,7 @@ const ids = {
   attempt: "55555555-5555-4555-8555-555555555555",
   lease: "66666666-6666-4666-8666-666666666666",
   result: "77777777-7777-4777-8777-777777777777",
+  attachment: "88888888-8888-4888-8888-888888888888",
 };
 
 test("RuntimeWorker persists before ACK, confirms before handler, and retries stable spool IDs", async () => {
@@ -247,6 +248,112 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
   await worker.stop();
   secondClosed.resolve();
   await running;
+});
+
+test("RuntimeWorker drops a late Pull assignment after WebSocket reattach", async () => {
+  const socketDone = deferred();
+  const claimStarted = deferred();
+  const releaseClaim = deferred();
+  let hello;
+  let dials = 0;
+  let handlerCalls = 0;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun() {
+      claimStarted.resolve();
+      await releaseClaim.promise;
+      return assignmentFor(hello);
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    websocketProbeIntervalMs: 100,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerCalls += 1;
+      return { output: {} };
+    },
+  }, {
+    connectTransport: async () => ({
+      http: client,
+      async dialWebSocket() {
+        dials += 1;
+        if (dials === 1) throw new Error("initial WebSocket unavailable");
+        return fakeDuplex(socketDone.promise);
+      },
+      async close() {},
+    }),
+  });
+
+  const running = worker.start();
+  await claimStarted.promise;
+  await waitFor(() => worker.transportState === "ws_active");
+  releaseClaim.resolve();
+  await delay(50);
+  assert.equal(handlerCalls, 0);
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker keeps HTTP Pull lifecycle calls out of an active WebSocket attachment", async () => {
+  const socketDone = deferred();
+  let sessionCreates = 0;
+  let heartbeats = 0;
+  let sessionCloses = 0;
+  const client = fakeClient({
+    async createRuntimeSession() {
+      sessionCreates += 1;
+      return ready();
+    },
+    async heartbeatRuntimeSession() {
+      heartbeats += 1;
+      return ready();
+    },
+    async closeRuntimeSession() {
+      sessionCloses += 1;
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 250,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async () => ({
+      http: client,
+      async dialWebSocket() { return fakeDuplex(socketDone.promise); },
+      async close() {},
+    }),
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "ws_active");
+  await delay(300);
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+  assert.deepEqual({ sessionCreates, heartbeats, sessionCloses }, {
+    sessionCreates: 0,
+    heartbeats: 0,
+    sessionCloses: 0,
+  });
 });
 
 test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async () => {
@@ -664,6 +771,7 @@ function fakeClient(overrides = {}) {
 function ready() {
   return {
     coreInstanceId: ids.core,
+    attachmentId: ids.attachment,
     features: [...RuntimeRequiredFeatures],
     offerTtlSeconds: 30,
     leaseTtlSeconds: 60,

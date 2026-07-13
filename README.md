@@ -191,6 +191,13 @@ re-entered after process restart; the worker fails closed instead of risking
 duplicate execution. `run.callAgent(...)` requires an explicit idempotency key
 and uses only the assignment-scoped invocation capability.
 
+In Pull mode, every validated Ready response supplies the active attachment.
+`OpenLinkerRuntime` stores it atomically, adds `OpenLinker-Runtime-Attachment`
+to all subsequent Session and Run HTTP operations, and rejects a response if a
+new attachment became active while that request was in flight. Session create,
+WebSocket traffic, and capability-scoped `callRuntimeAgent` never carry this
+header; callers do not manage it themselves.
+
 The canonical WebSocket endpoint is `/api/v1/agent-runtime/ws`; HTTP methods
 use the `/api/v1/agent-runtime/` prefix. Public API names and URLs are neutral;
 wire compatibility is negotiated inside the handshake contract.

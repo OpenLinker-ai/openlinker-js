@@ -149,6 +149,11 @@ Attempt identity。进程重启后如果发现某个 Attempt 已经越过 `start
 再次调用 handler，而是直接拒绝不安全恢复。`run.callAgent(...)` 必须传显式幂等 key，且
 只使用本 assignment 下发的调用能力，不会把长期 Agent Token 交给 handler。
 
+Pull 模式下，每次通过校验的 Ready 都会给出当前 attachment。`OpenLinkerRuntime` 会原子
+保存它，为后续 Session 和 Run HTTP 请求自动加入 `OpenLinker-Runtime-Attachment`，并拒绝
+新 attachment 生效后才返回的旧请求结果。Session create、WebSocket 流量和基于单次调用
+能力的 `callRuntimeAgent` 不携带这个 header，调用方也不需要手工维护。
+
 WebSocket 的标准端点是 `/api/v1/agent-runtime/ws`，HTTP 方法统一使用
 `/api/v1/agent-runtime/` 前缀。公开 API 名和 URL 使用中性命名；wire 兼容性只在握手
 contract 内协商。

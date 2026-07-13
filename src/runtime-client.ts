@@ -64,7 +64,7 @@ import type {
   RuntimeRunSummary,
   RuntimeSessionCloseRequest,
 } from "./runtime-types.js";
-import { RuntimeMaxMessageBytes } from "./runtime-types.js";
+import { RuntimeAttachmentHeader, RuntimeMaxMessageBytes } from "./runtime-types.js";
 
 export * from "./runtime-types.js";
 export * from "./runtime-invocation.js";
@@ -79,13 +79,16 @@ export interface OpenLinkerRuntimeOptions {
 }
 
 export class OpenLinkerRuntime extends OpenLinkerClient {
+  private attachmentIdValue: string | undefined;
+  private attachmentTransition: Promise<void> = Promise.resolve();
+
   constructor(options: OpenLinkerRuntimeOptions) {
     if (!options.agentToken) {
       throw new Error("OpenLinkerRuntime requires agentToken");
     }
     super({
       baseUrl: options.baseUrl,
-      headers: options.headers,
+      headers: sanitizeRuntimeHeaderProvider(options.headers),
       fetch: options.fetch,
       sdkAgent: options.sdkAgent ?? "@openlinker/sdk/runtime/0.1.4",
       agentToken: options.agentToken,
@@ -93,20 +96,30 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     } as unknown as ConstructorParameters<typeof OpenLinkerClient>[0]);
   }
 
+  /** The active Pull attachment. It is replaced only after a validated Ready response. */
+  get runtimeAttachmentId(): string | undefined {
+    return this.attachmentIdValue;
+  }
+
   async createRuntimeSession(
     hello: RuntimeHelloPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeReadyPayload> {
-    const value = await this.runtimeJSON(
-      "POST",
-      "/agent-runtime/sessions",
-      encodeRuntimeHello(hello),
-      options,
-    );
-    if (value === undefined) {
-      throw new Error("OpenLinker Runtime: session create returned 204");
-    }
-    return decodeRuntimeReady(value);
+    const body = encodeRuntimeHello(hello);
+    return this.withAttachmentTransition(async () => {
+      const value = await this.runtimeJSON(
+        "POST",
+        "/agent-runtime/sessions",
+        body,
+        withoutRuntimeAttachment(options),
+      );
+      if (value === undefined) {
+        throw new Error("OpenLinker Runtime: session create returned 204");
+      }
+      const ready = decodeRuntimeReady(value);
+      this.attachmentIdValue = ready.attachmentId;
+      return ready;
+    });
   }
 
   async heartbeatRuntimeSession(
@@ -114,16 +127,26 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     options: RequestOptions = {},
   ): Promise<RuntimeReadyPayload> {
     const body = encodeRuntimeHello(hello);
-    const value = await this.runtimeJSON(
-      "POST",
-      `/agent-runtime/sessions/${encodeURIComponent(hello.runtimeSessionId)}/heartbeat`,
-      body,
-      options,
-    );
-    if (value === undefined) {
-      throw new Error("OpenLinker Runtime: session heartbeat returned 204");
-    }
-    return decodeRuntimeReady(value);
+    return this.withAttachmentTransition(async () => {
+      const attachmentId = this.requiredRuntimeAttachment("session heartbeat");
+      const value = await this.runtimeAttachedJSON(
+        "POST",
+        `/agent-runtime/sessions/${encodeURIComponent(hello.runtimeSessionId)}/heartbeat`,
+        body,
+        options,
+        undefined,
+        "session heartbeat",
+      );
+      if (value === undefined) {
+        throw new Error("OpenLinker Runtime: session heartbeat returned 204");
+      }
+      const ready = decodeRuntimeReady(value);
+      if (ready.attachmentId !== attachmentId) {
+        throw new Error("OpenLinker Runtime: session heartbeat changed the attachment identity");
+      }
+      this.attachmentIdValue = ready.attachmentId;
+      return ready;
+    });
   }
 
   async closeRuntimeSession(
@@ -131,15 +154,20 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     options: RequestOptions = {},
   ): Promise<void> {
     const body = encodeRuntimeSessionClose(request);
-    const response = await this.runtimeFetch(
-      "POST",
-      `/agent-runtime/sessions/${encodeURIComponent(request.runtimeSessionId)}/close`,
-      body,
-      options,
-    );
-    if (response.status !== 204) {
-      throw new Error("OpenLinker Runtime: session close must return 204");
-    }
+    await this.withAttachmentTransition(async () => {
+      const response = await this.runtimeAttachedFetch(
+        "POST",
+        `/agent-runtime/sessions/${encodeURIComponent(request.runtimeSessionId)}/close`,
+        body,
+        options,
+        undefined,
+        "session close",
+      );
+      if (response.status !== 204) {
+        throw new Error("OpenLinker Runtime: session close must return 204");
+      }
+      this.attachmentIdValue = undefined;
+    });
   }
 
   async claimRuntimeRun(
@@ -149,12 +177,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
   ): Promise<RuntimeRunAssignedPayload | undefined> {
     assertRuntimeWaitSeconds(waitSeconds);
     const query = new URLSearchParams({ wait: String(waitSeconds) });
-    const value = await this.runtimeJSON(
+    const value = await this.runtimeAttachedJSON(
       "POST",
       "/agent-runtime/runs/claim",
       encodeRuntimeClaim(request),
       options,
       query,
+      "run claim",
     );
     if (value === undefined) {
       return undefined;
@@ -170,11 +199,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeAssignmentAckPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeAssignmentConfirmedPayload> {
-    const value = await this.runtimeRequiredJSON(
+    const value = await this.runtimeAttachedRequiredJSON(
       "POST",
       runtimeRunPath(request.attemptIdentity.runId, "assignment-ack"),
       encodeRuntimeAssignmentAck(request),
       options,
+      undefined,
+      "assignment ACK",
     );
     const confirmed = decodeRuntimeAssignmentConfirmed(value);
     assertRuntimeResponseIdentity(request.attemptIdentity, confirmed.attemptIdentity, "assignment confirmation");
@@ -185,11 +216,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeAssignmentRejectPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeAssignmentRejectedPayload> {
-    const value = await this.runtimeRequiredJSON(
+    const value = await this.runtimeAttachedRequiredJSON(
       "POST",
       runtimeRunPath(request.attemptIdentity.runId, "assignment-reject"),
       encodeRuntimeAssignmentReject(request),
       options,
+      undefined,
+      "assignment rejection",
     );
     const rejected = decodeRuntimeAssignmentRejected(value);
     assertRuntimeResponseIdentity(request.attemptIdentity, rejected.attemptIdentity, "assignment rejection");
@@ -200,11 +233,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeLeaseRenewPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeLeaseRenewedPayload> {
-    const value = await this.runtimeRequiredJSON(
+    const value = await this.runtimeAttachedRequiredJSON(
       "POST",
       runtimeRunPath(request.attemptIdentity.runId, "lease-renew"),
       encodeRuntimeLeaseRenew(request),
       options,
+      undefined,
+      "lease renewal",
     );
     const renewed = decodeRuntimeLeaseRenewed(value);
     assertRuntimeResponseIdentity(request.attemptIdentity, renewed.attemptIdentity, "lease renewal");
@@ -215,11 +250,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeRunEventPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeRunEventAckPayload> {
-    const value = await this.runtimeRequiredJSON(
+    const value = await this.runtimeAttachedRequiredJSON(
       "POST",
       runtimeRunPath(request.attemptIdentity.runId, "events"),
       encodeRuntimeEvent(request),
       options,
+      undefined,
+      "Event upload",
     );
     const ack = decodeRuntimeEventAck(value);
     if (ack.clientEventId !== request.clientEventId || ack.clientEventSeq !== request.clientEventSeq) {
@@ -232,11 +269,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeRunResultPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeRunResultAckPayload> {
-    const value = await this.runtimeRequiredJSON(
+    const value = await this.runtimeAttachedRequiredJSON(
       "POST",
       runtimeRunPath(request.attemptIdentity.runId, "result"),
       encodeRuntimeResult(request),
       options,
+      undefined,
+      "Result upload",
     );
     const ack = decodeRuntimeResultAck(value);
     if (ack.resultId !== request.resultId) {
@@ -249,11 +288,13 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeResumePayload,
     options: RequestOptions = {},
   ): Promise<RuntimeResumeResponse> {
-    const value = await this.runtimeRequiredJSON(
+    const value = await this.runtimeAttachedRequiredJSON(
       "POST",
       "/agent-runtime/runs/resume",
       encodeRuntimeResume(request),
       options,
+      undefined,
+      "resume",
     );
     const response = decodeRuntimeResumeResponse(value);
     if (response.decisions.length !== request.attempts.length) {
@@ -279,17 +320,18 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
       runtime_session_id: runtimeSessionId,
       wait: String(waitSeconds),
     });
-    const response = await this.runtimeFetch(
+    const { status, value } = await this.runtimeAttachedStatusJSON(
       "GET",
       "/agent-runtime/commands",
       undefined,
       options,
       query,
+      "command poll",
     );
-    if (response.status !== 200) {
+    if (status !== 200 || value === undefined) {
       throw new Error("OpenLinker Runtime: commands endpoint must return 200");
     }
-    const decoded = decodeRuntimeCommandsResponse(await readRuntimeJSON(response));
+    const decoded = decodeRuntimeCommandsResponse(value);
     for (const command of decoded.commands) {
       if ((command.type === "run.cancel" || command.type === "run.lease.revoked") &&
         command.payload.attemptIdentity.runtimeSessionId !== runtimeSessionId) {
@@ -303,16 +345,18 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     request: RuntimeRunCancelAckPayload,
     options: RequestOptions = {},
   ): Promise<RuntimeRunCancellationState> {
-    const response = await this.runtimeFetch(
+    const { status, value } = await this.runtimeAttachedStatusJSON(
       "POST",
       runtimeRunPath(request.attemptIdentity.runId, "cancel-ack"),
       encodeRuntimeCancelAck(request),
       options,
+      undefined,
+      "cancel ACK",
     );
-    if (response.status !== 200) {
+    if (status !== 200 || value === undefined) {
       throw new Error("OpenLinker Runtime: cancel ACK endpoint must return 200");
     }
-    const state = decodeRuntimeCancellationState(await readRuntimeJSON(response));
+    const state = decodeRuntimeCancellationState(value);
     if (state.cancellationId !== request.cancellationId) {
       throw new Error("OpenLinker Runtime: cancellation state identity mismatch");
     }
@@ -355,7 +399,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
       body,
       authorization.token,
       headers,
-      options,
+      withoutRuntimeAttachment(options),
     );
     await assertRuntimeResponseOK(response);
     if (response.status !== 200 && response.status !== 202) {
@@ -368,18 +412,129 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     return summary;
   }
 
-  private async runtimeRequiredJSON(
+  private async runtimeAttachedRequiredJSON(
     method: string,
     path: string,
     body: unknown,
     options: RequestOptions,
-    query?: URLSearchParams,
+    query: URLSearchParams | undefined,
+    operation: string,
   ): Promise<unknown> {
-    const value = await this.runtimeJSON(method, path, body, options, query);
+    const value = await this.runtimeAttachedJSON(method, path, body, options, query, operation);
     if (value === undefined) {
       throw new Error("OpenLinker Runtime: endpoint returned 204 without a response body");
     }
     return value;
+  }
+
+  private async runtimeAttachedJSON(
+    method: string,
+    path: string,
+    body: unknown,
+    options: RequestOptions,
+    query: URLSearchParams | undefined,
+    operation: string,
+  ): Promise<unknown | undefined> {
+    const attachmentId = this.requiredRuntimeAttachment(operation);
+    let value: unknown | undefined;
+    try {
+      value = await this.runtimeJSON(
+        method,
+        path,
+        body,
+        withRuntimeAttachment(options, attachmentId),
+        query,
+      );
+    } catch (error) {
+      this.assertRuntimeAttachment(attachmentId, operation);
+      throw error;
+    }
+    this.assertRuntimeAttachment(attachmentId, operation);
+    return value;
+  }
+
+  private async runtimeAttachedFetch(
+    method: string,
+    path: string,
+    body: unknown,
+    options: RequestOptions,
+    query: URLSearchParams | undefined,
+    operation: string,
+  ): Promise<Response> {
+    const attachmentId = this.requiredRuntimeAttachment(operation);
+    let response: Response;
+    try {
+      response = await this.runtimeFetch(
+        method,
+        path,
+        body,
+        withRuntimeAttachment(options, attachmentId),
+        query,
+      );
+    } catch (error) {
+      this.assertRuntimeAttachment(attachmentId, operation);
+      throw error;
+    }
+    this.assertRuntimeAttachment(attachmentId, operation);
+    return response;
+  }
+
+  private async runtimeAttachedStatusJSON(
+    method: string,
+    path: string,
+    body: unknown,
+    options: RequestOptions,
+    query: URLSearchParams | undefined,
+    operation: string,
+  ): Promise<{ status: number; value: unknown | undefined }> {
+    const attachmentId = this.requiredRuntimeAttachment(operation);
+    let response: Response;
+    let value: unknown | undefined;
+    try {
+      response = await this.runtimeFetch(
+        method,
+        path,
+        body,
+        withRuntimeAttachment(options, attachmentId),
+        query,
+      );
+      value = response.status === 204 ? undefined : await readRuntimeJSON(response);
+    } catch (error) {
+      this.assertRuntimeAttachment(attachmentId, operation);
+      throw error;
+    }
+    this.assertRuntimeAttachment(attachmentId, operation);
+    return { status: response.status, value };
+  }
+
+  private requiredRuntimeAttachment(operation: string): string {
+    if (!this.attachmentIdValue) {
+      throw new Error(
+        `OpenLinker Runtime: ${operation} requires an active Pull attachment; create the Session first`,
+      );
+    }
+    return this.attachmentIdValue;
+  }
+
+  private assertRuntimeAttachment(expected: string, operation: string): void {
+    if (this.attachmentIdValue !== expected) {
+      throw new Error(`OpenLinker Runtime: ${operation} response belongs to a stale attachment`);
+    }
+  }
+
+  private async withAttachmentTransition<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const previous = this.attachmentTransition;
+    this.attachmentTransition = previous.then(() => current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private async runtimeJSON(
@@ -406,6 +561,34 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     const response = await this.fetchAgentRuntimeRaw(method, path, body, options, query);
     return assertRuntimeResponseOK(response);
   }
+}
+
+function withRuntimeAttachment(options: RequestOptions, attachmentId: string): RequestOptions {
+  const headers = new Headers(options.headers);
+  headers.set(RuntimeAttachmentHeader, attachmentId);
+  return { ...options, headers };
+}
+
+function withoutRuntimeAttachment(options: RequestOptions): RequestOptions {
+  const headers = new Headers(options.headers);
+  headers.delete(RuntimeAttachmentHeader);
+  return { ...options, headers };
+}
+
+function sanitizeRuntimeHeaderProvider(
+  provider: OpenLinkerRuntimeOptions["headers"],
+): OpenLinkerRuntimeOptions["headers"] {
+  if (typeof provider === "function") {
+    return async () => {
+      const headers = new Headers(await provider());
+      headers.delete(RuntimeAttachmentHeader);
+      return headers;
+    };
+  }
+  if (provider === undefined) return undefined;
+  const headers = new Headers(provider);
+  headers.delete(RuntimeAttachmentHeader);
+  return headers;
 }
 
 function runtimeRunPath(runId: string, action: string): string {

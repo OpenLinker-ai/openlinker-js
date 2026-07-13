@@ -33,13 +33,15 @@ runtime helper, callback, and A2A contracts are declared stable.
   `/api/v1/agent-runtime/*` namespace. Public Runtime API names and the contract
   filename are neutral as well; protocol negotiation remains an internal wire
   concern of the handshake contract. The contract binds Session heartbeat and close,
-  including the close request body and empty `204` response; its digest is
-  `fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53`.
+  including the close request body and empty `204` response. Every Pull Ready
+  response also establishes or confirms the attachment that fences subsequent HTTP work;
+  its contract digest is
+  `3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9`.
 - Breaking: the package root is browser-safe and no longer exports or imports
   Runtime types. Server-only Worker, Store, mTLS, HTTP, and WebSocket APIs are
   available from `@openlinker/sdk/runtime`.
-- Breaking: `ConnectionMode` now exposes `direct_http | mcp_server |
-  agent_node`. WebSocket and Pull are Runtime transport policies, not
+- Breaking: `ConnectionMode` now exposes `direct_http | mcp_server | runtime`.
+  WebSocket and Pull are Runtime transport policies, not
   separate marketplace connection modes.
 - Added reliable Run creation to `runAgent` and `startAgentRun`: both methods
   now send a validated `Idempotency-Key`, generate a secure per-invocation key

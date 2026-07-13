@@ -225,14 +225,16 @@ export function encodeRuntimeHello(value: RuntimeHelloPayload): RuntimeWireObjec
 
 export function decodeRuntimeReady(value: unknown): RuntimeReadyPayload {
   const object = exactObject(value, [
-    "core_instance_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time",
+    "core_instance_id", "attachment_id", "features", "offer_ttl_seconds", "lease_ttl_seconds",
+    "database_time",
   ], [], "ready response");
   const coreInstanceId = assertUUID(object.core_instance_id, "ready.core_instance_id");
+  const attachmentId = assertUUID(object.attachment_id, "ready.attachment_id");
   const features = assertFeatures(object.features, true, "ready.features");
   const offerTtlSeconds = assertInteger(object.offer_ttl_seconds, 1, undefined, "ready.offer_ttl_seconds");
   const leaseTtlSeconds = assertInteger(object.lease_ttl_seconds, 1, undefined, "ready.lease_ttl_seconds");
   const databaseTime = assertTimestamp(object.database_time, "ready.database_time");
-  return { coreInstanceId, features, offerTtlSeconds, leaseTtlSeconds, databaseTime };
+  return { coreInstanceId, attachmentId, features, offerTtlSeconds, leaseTtlSeconds, databaseTime };
 }
 
 export function encodeRuntimeSessionClose(value: RuntimeSessionCloseRequest): RuntimeWireObject {

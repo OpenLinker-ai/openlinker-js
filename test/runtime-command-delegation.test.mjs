@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 
 import {
   OpenLinkerRuntime,
+  RuntimeAttachmentHeader,
   RuntimeCallAgentPath,
+  RuntimeContractDigest,
   RuntimeMaxMessageBytes,
   RuntimeMessageTypes,
+  RuntimeRequiredFeatures,
   buildRuntimeInvocationProof,
 } from "../dist/runtime.js";
 
@@ -21,6 +24,8 @@ const ids = Object.freeze({
   cancellation: "88888888-8888-4888-8888-888888888888",
   otherCancellation: "99999999-9999-4999-8999-999999999999",
   target: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  core: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  attachment: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
 });
 
 const now = "2026-07-11T13:00:00.123Z";
@@ -82,6 +87,7 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
       authorization: "Bearer default-must-not-win",
       "idempotency-key": "default-must-not-win",
       "openlinker-invocation-context": "default-must-not-win",
+      [RuntimeAttachmentHeader]: "default-must-not-leak",
     },
     fetch: async (input, init) => {
       const url = new URL(String(input));
@@ -94,6 +100,7 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
       assert.equal(headers.get("authorization"), `Bearer ${invocation.token}`);
       assert.equal(headers.get("idempotency-key"), invocation.idempotencyKey);
       assert.equal(headers.get("openlinker-invocation-context"), invocation.invocationContext);
+      assert.equal(headers.get(RuntimeAttachmentHeader), null);
       assert.equal(headers.get("content-type"), "application/json");
       assert.equal(text, expectedBody);
       assert.equal(stringifyCalls, 1, "delegated body must be stringified exactly once");
@@ -123,6 +130,7 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
       authorization: "Bearer option-must-not-win",
       "idempotency-key": "option-must-not-win",
       "openlinker-invocation-proof": "option-must-not-win",
+      [RuntimeAttachmentHeader]: "option-must-not-leak",
     },
   });
   assert.deepEqual(summary, {
@@ -137,8 +145,13 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
   const runtime = runtimeWithFetch(async (input, init) => {
     const url = new URL(String(input));
     const headers = new Headers(init.headers);
+    if (url.pathname === "/api/v1/agent-runtime/sessions") {
+      assert.equal(headers.get(RuntimeAttachmentHeader), null);
+      return jsonResponse(wireReady());
+    }
     calls.push(url.pathname);
     assert.equal(headers.get("authorization"), "Bearer ol_agent_v2");
+    assert.equal(headers.get(RuntimeAttachmentHeader), ids.attachment);
     if (url.pathname === "/api/v1/agent-runtime/commands") {
       assert.equal(init.method, "GET");
       assert.equal(url.searchParams.get("runtime_session_id"), ids.session);
@@ -194,6 +207,7 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
     });
   });
 
+  await runtime.createRuntimeSession(runtimeHello());
   const commands = await runtime.pollRuntimeCommands(ids.session, 17);
   assert.equal(commands.databaseTime, now);
   assert.equal(commands.commands.length, 3);
@@ -259,11 +273,15 @@ test("commands and cancel ACK reject malformed unions, UUIDs, and state mismatch
       error_code: "STOP_FAILED",
     }),
   ];
-  const runtime = runtimeWithFetch(async () => {
+  const runtime = runtimeWithFetch(async (input) => {
+    if (new URL(String(input)).pathname === "/api/v1/agent-runtime/sessions") {
+      return jsonResponse(wireReady());
+    }
     calls++;
     return responses.shift();
   });
 
+  await runtime.createRuntimeSession(runtimeHello());
   await assert.rejects(() => runtime.pollRuntimeCommands("not-a-uuid", 0), /canonical lowercase UUID/);
   await assert.rejects(() => runtime.pollRuntimeCommands(ids.session, 31), /waitSeconds/);
   assert.equal(calls, 0);
@@ -357,6 +375,31 @@ function runtimeWithFetch(fetch, headers = undefined) {
     headers,
     fetch,
   });
+}
+
+function runtimeHello() {
+  return {
+    nodeId: ids.node,
+    agentId: ids.agent,
+    workerId: "worker-a",
+    runtimeSessionId: ids.session,
+    sessionEpoch: 1,
+    nodeVersion: "test-node/1",
+    capacity: 1,
+    features: [...RuntimeRequiredFeatures],
+    contractDigest: RuntimeContractDigest,
+  };
+}
+
+function wireReady() {
+  return {
+    core_instance_id: ids.core,
+    attachment_id: ids.attachment,
+    features: [...RuntimeRequiredFeatures],
+    offer_ttl_seconds: 30,
+    lease_ttl_seconds: 60,
+    database_time: now,
+  };
 }
 
 function runtimeIdentity() {

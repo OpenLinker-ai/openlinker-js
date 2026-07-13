@@ -479,7 +479,12 @@ export class RuntimeWorker {
       true,
     );
     this.ready = ready;
-    await this.resumeDurableState(httpBusiness(transport.http), reconnect, signal, true);
+    await this.resumeDurableState(
+      httpBusiness(transport.http, this.modeAbort.signal),
+      reconnect,
+      signal,
+      true,
+    );
     this.activeMode = "pull";
     this.transportStateValue = "pull_active";
     this.replaceModeAbort();
@@ -487,7 +492,14 @@ export class RuntimeWorker {
 
   private async activateWebSocket(reconnect: boolean, signal?: AbortSignal): Promise<void> {
     const transport = this.requiredTransport();
-    this.transportStateValue = this.activeMode === "pull" ? "probing_ws" : "connecting_ws";
+    const replacingPull = this.activeMode === "pull";
+    this.transportStateValue = replacingPull ? "probing_ws" : "connecting_ws";
+    if (replacingPull) {
+      // Stop every Pull request before a successful WebSocket Hello can fence
+      // that attachment at Core. A failed probe reattaches through Pull.
+      this.activeMode = undefined;
+      this.replaceModeAbort();
+    }
     const queuedAssignments: RuntimeRunAssignedPayload[] = [];
     const queuedCommands: RuntimePendingCommand[] = [];
     let activated = false;
@@ -592,6 +604,7 @@ export class RuntimeWorker {
           { runtimeSessionId: this.requiredIdentity().runtimeSessionId, capacity, inflight },
           { signal },
         );
+        if (signal.aborted || this.activeMode !== "pull") continue;
         failures = 0;
         if (assignment) this.enqueueAssignment(assignment);
       } catch (error) {
@@ -994,6 +1007,7 @@ export class RuntimeWorker {
           durationSeconds(this.config.commandWaitMs),
           { signal },
         );
+        if (signal.aborted || this.activeMode !== "pull") continue;
         failures = 0;
         for (const command of response.commands) await this.handleCommand(command);
       } catch (error) {
@@ -1057,13 +1071,21 @@ export class RuntimeWorker {
 
   private async heartbeatLoop(): Promise<void> {
     while (!this.runtimeAbort.signal.aborted) {
+      if (this.activeMode !== "pull") {
+        await sleep(50, this.runtimeAbort.signal);
+        continue;
+      }
       await sleep(this.config.heartbeatIntervalMs, this.runtimeAbort.signal);
+      if (this.activeMode !== "pull") continue;
+      const signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
       try {
-        this.ready = await this.requiredTransport().http.heartbeatRuntimeSession(
+        const ready = await this.requiredTransport().http.heartbeatRuntimeSession(
           this.hello(),
-          { signal: this.runtimeAbort.signal },
+          { signal },
         );
+        if (!signal.aborted && this.activeMode === "pull") this.ready = ready;
       } catch (error) {
+        if (signal.aborted) continue;
         if (isPermanentRuntimeError(error)) throw error;
         this.log("warn", `Runtime heartbeat will retry (${safeError(error)})`);
       }
@@ -1120,7 +1142,9 @@ export class RuntimeWorker {
 
   private async shutdown(): Promise<void> {
     this.draining = true;
-    if (this.transport && this.identityValue) {
+    this.modeAbort.abort();
+    const closePullAttachment = this.activeMode === "pull";
+    if (closePullAttachment && this.transport && this.identityValue) {
       try {
         await this.transport.http.heartbeatRuntimeSession(this.hello(), {
           signal: AbortSignal.timeout(2_000),
@@ -1135,7 +1159,7 @@ export class RuntimeWorker {
       active.controller.abort(new RuntimeAttemptError("WORKER_SHUTDOWN", "Runtime Worker is shutting down"));
     }
     await settleOrTimeout(activeDone, 2_000);
-    if (this.transport && this.identityValue) {
+    if (closePullAttachment && this.transport && this.identityValue) {
       try {
         await this.transport.http.closeRuntimeSession({
           nodeId: this.config.nodeId,
@@ -1183,7 +1207,9 @@ export class RuntimeWorker {
 
   private business(): BusinessClient {
     if (this.activeMode === "ws" && this.duplex) return duplexBusiness(this.duplex);
-    if (this.activeMode === "pull" && this.transport) return httpBusiness(this.transport.http);
+    if (this.activeMode === "pull" && this.transport) {
+      return httpBusiness(this.transport.http, this.modeAbort.signal);
+    }
     throw new Error("Runtime transport is switching");
   }
 
@@ -1328,29 +1354,37 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
   };
 }
 
-function httpBusiness(client: RuntimeWorkerClient): BusinessClient {
+function httpBusiness(client: RuntimeWorkerClient, modeSignal: AbortSignal): BusinessClient {
+  const options = (signal?: AbortSignal): RequestOptions => ({
+    signal: combinedSignal(modeSignal, signal),
+  });
+  const guarded = async <T>(operation: Promise<T>): Promise<T> => {
+    const value = await operation;
+    if (modeSignal.aborted) throw abortError(modeSignal);
+    return value;
+  };
   return {
-    ackAssignment: (identity, signal) => client.ackRuntimeAssignment(
-      { attemptIdentity: identity }, signal ? { signal } : undefined,
-    ),
+    ackAssignment: (identity, signal) => guarded(client.ackRuntimeAssignment(
+      { attemptIdentity: identity }, options(signal),
+    )),
     rejectAssignment: (identity, reasonCode, capacity, inflight, signal) =>
-      client.rejectRuntimeAssignment(
+      guarded(client.rejectRuntimeAssignment(
         { attemptIdentity: identity, reasonCode, capacity, inflight },
-        signal ? { signal } : undefined,
-      ),
+        options(signal),
+      )),
     renewLease: (identity, lastClientEventSeq, capacity, inflight, signal) =>
-      client.renewRuntimeLease(
+      guarded(client.renewRuntimeLease(
         { attemptIdentity: identity, lastClientEventSeq, capacity, inflight },
-        signal ? { signal } : undefined,
-      ),
-    appendEvent: (event, signal) => client.appendRuntimeEvent(event, signal ? { signal } : undefined),
-    finalizeResult: (result, signal) => client.finalizeRuntimeResult(result, signal ? { signal } : undefined),
-    resume: async (request, signal) => (await client.resumeRuntimeRuns(
+        options(signal),
+      )),
+    appendEvent: (event, signal) => guarded(client.appendRuntimeEvent(event, options(signal))),
+    finalizeResult: (result, signal) => guarded(client.finalizeRuntimeResult(result, options(signal))),
+    resume: async (request, signal) => (await guarded(client.resumeRuntimeRuns(
       request,
-      signal ? { signal } : undefined,
-    )).decisions,
+      options(signal),
+    ))).decisions,
     ackCancel: async (request, signal) => {
-      await client.ackRuntimeCancel(request, signal ? { signal } : undefined);
+      await guarded(client.ackRuntimeCancel(request, options(signal)));
     },
   };
 }

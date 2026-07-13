@@ -13,15 +13,18 @@ test("package root stays browser-safe while the server Runtime entry is complete
   assert.equal(typeof RuntimeSDK.FileRuntimeStore, "function");
   assert.equal(typeof RuntimeSDK.NodeRuntimeTransport, "function");
 
-  const [rootJavaScript, rootTypes] = await Promise.all([
+  const [rootJavaScript, rootTypes, publicTypes] = await Promise.all([
     readFile(new URL("../dist/index.js", import.meta.url), "utf8"),
     readFile(new URL("../dist/index.d.ts", import.meta.url), "utf8"),
+    readFile(new URL("../dist/types.d.ts", import.meta.url), "utf8"),
   ]);
   for (const boundary of [rootJavaScript, rootTypes]) {
     assert.doesNotMatch(boundary, /node:/);
     assert.doesNotMatch(boundary, /undici|from ["']ws["']/);
     assert.doesNotMatch(boundary, /RuntimeWorker|RuntimeStore|NodeRuntimeTransport/);
   }
+  assert.match(publicTypes, /ConnectionMode = "direct_http" \| "mcp_server" \| "runtime"/);
+  assert.doesNotMatch(publicTypes, /agent_node/);
 });
 
 test("Runtime public names, source filenames, contract filename, and routes are neutral", async () => {

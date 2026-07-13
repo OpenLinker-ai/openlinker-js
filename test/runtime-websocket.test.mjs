@@ -18,6 +18,7 @@ const ids = {
   event: "88888888-8888-4888-8888-888888888888",
   result: "99999999-9999-4999-8999-999999999999",
   cancellation: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  attachment: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 };
 
 const now = "2026-07-12T00:00:00Z";
@@ -92,6 +93,7 @@ class FakeSocket {
 function readyPayload() {
   return {
     core_instance_id: ids.core,
+    attachment_id: ids.attachment,
     features: [...RuntimeRequiredFeatures],
     offer_ttl_seconds: 15,
     lease_ttl_seconds: 30,
@@ -108,6 +110,7 @@ async function startSession(socket, options = {}) {
   const session = new RuntimeWebSocketSession(socket, options);
   const ready = await session.start(hello());
   assert.equal(ready.coreInstanceId, ids.core);
+  assert.equal(ready.attachmentId, ids.attachment);
   return session;
 }
 

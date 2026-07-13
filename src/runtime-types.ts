@@ -3,7 +3,8 @@ import type { JsonObject } from "./types.js";
 export const RuntimeProtocolVersion = 2 as const;
 export const RuntimeContractID = "openlinker.runtime.v2" as const;
 export const RuntimeContractDigest =
-  "fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53" as const;
+  "3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9" as const;
+export const RuntimeAttachmentHeader = "OpenLinker-Runtime-Attachment" as const;
 export const RuntimeRequiredFeatures = Object.freeze([
   "lease_fence",
   "assignment_confirm",
@@ -89,6 +90,7 @@ export interface RuntimeHelloPayload {
 
 export interface RuntimeReadyPayload {
   coreInstanceId: string;
+  attachmentId: string;
   features: string[];
   offerTtlSeconds: number;
   leaseTtlSeconds: number;
