@@ -40,6 +40,7 @@ import {
   type RuntimeRunAssignedPayload,
   type RuntimeRunCancellationState,
   type RuntimeRunEventAckPayload,
+  type RuntimeRunEventPayload,
   type RuntimeRunResultAckPayload,
   type RuntimeRunResultPayload,
   type RuntimeRunSummary,
@@ -182,7 +183,7 @@ export interface RuntimeWorkerClient {
     options?: RequestOptions,
   ): Promise<RuntimeLeaseRenewedPayload>;
   appendRuntimeEvent(
-    request: RuntimeStoredEvent,
+    request: RuntimeRunEventPayload,
     options?: RequestOptions,
   ): Promise<RuntimeRunEventAckPayload>;
   finalizeRuntimeResult(
@@ -227,7 +228,7 @@ export interface RuntimeWorkerDuplex {
     capacity: number,
     inflight: number,
   ): Promise<RuntimeLeaseRenewedPayload>;
-  appendEvent(event: RuntimeStoredEvent): Promise<RuntimeRunEventAckPayload>;
+  appendEvent(event: RuntimeRunEventPayload): Promise<RuntimeRunEventAckPayload>;
   finalizeResult(result: RuntimeRunResultPayload): Promise<RuntimeRunResultAckPayload>;
   resume(request: RuntimeResumePayload): Promise<RuntimeResumeAcceptedPayload[]>;
   ackCancel(request: {
@@ -264,7 +265,7 @@ interface ActiveAttempt {
   startedAt: number;
   leaseExpiresAt: number;
   canceled: boolean;
-  terminal: boolean;
+  handlerFinished: boolean;
 }
 
 interface BusinessClient {
@@ -283,7 +284,7 @@ interface BusinessClient {
     inflight: number,
     signal?: AbortSignal,
   ): Promise<RuntimeLeaseRenewedPayload>;
-  appendEvent(event: RuntimeStoredEvent, signal?: AbortSignal): Promise<RuntimeRunEventAckPayload>;
+  appendEvent(event: RuntimeRunEventPayload, signal?: AbortSignal): Promise<RuntimeRunEventAckPayload>;
   finalizeResult(result: RuntimeRunResultPayload, signal?: AbortSignal): Promise<RuntimeRunResultAckPayload>;
   resume(request: RuntimeResumePayload, signal?: AbortSignal): Promise<RuntimeResumeAcceptedPayload[]>;
   ackCancel(
@@ -588,6 +589,7 @@ export class RuntimeWorker {
   private async claimLoop(): Promise<void> {
     let failures = 0;
     while (!this.runtimeAbort.signal.aborted) {
+      if (this.stopping) return;
       if (this.activeMode !== "pull" || this.draining || !this.requiredStore().acceptsNewRuns()) {
         await sleep(50, this.runtimeAbort.signal);
         continue;
@@ -719,7 +721,7 @@ export class RuntimeWorker {
       startedAt: this.dependencies.now(),
       leaseExpiresAt: Date.parse(stored.leaseExpiresAt ?? stored.assignment.attemptDeadlineAt),
       canceled: false,
-      terminal: false,
+      handlerFinished: false,
     };
     this.active.set(attemptId, active);
     void this.executeAttempt(active).catch((error) => this.reportFatal(asError(error)));
@@ -753,9 +755,9 @@ export class RuntimeWorker {
     const durationMs = validDuration(result.durationMs)
       ? result.durationMs
       : Math.max(0, this.dependencies.now() - active.startedAt);
+    active.handlerFinished = true;
     const current = await this.requiredStore().getAssignment(attemptId);
     if (!current || current.state === "revoked") {
-      active.terminal = true;
       this.active.delete(attemptId);
       active.resolveDone();
       return;
@@ -783,9 +785,10 @@ export class RuntimeWorker {
         status: "success",
         output: result.output ?? {},
       };
+    // Handler completion is not Attempt completion. Keep this Attempt in the
+    // active set so its lease and capacity remain owned until Core durably
+    // acknowledges the terminal Result.
     await this.requiredStore().saveResult(payload);
-    active.terminal = true;
-    this.active.delete(attemptId);
     active.resolveDone();
     this.spoolSignal.notify();
   }
@@ -799,12 +802,16 @@ export class RuntimeWorker {
       metadata: cloneJSON(assignment.metadata ?? {}),
       signal: active.controller.signal,
       emit: async (eventType, payload = {}) => {
-        if (active.controller.signal.aborted || active.terminal) throw abortError(active.controller.signal);
+        if (active.controller.signal.aborted || active.handlerFinished) {
+          throw abortError(active.controller.signal);
+        }
         await this.requiredStore().appendEvent(assignment.attemptIdentity, eventType, payload);
         this.spoolSignal.notify();
       },
       callAgent: async (targetAgentId, input, options) => {
-        if (active.controller.signal.aborted || active.terminal) throw abortError(active.controller.signal);
+        if (active.controller.signal.aborted || active.handlerFinished) {
+          throw abortError(active.controller.signal);
+        }
         assertIdempotencyKey(options.idempotencyKey);
         return this.requiredTransport().http.callRuntimeAgent({
           invocationContext: assignment.nodeEnvelope,
@@ -843,7 +850,10 @@ export class RuntimeWorker {
       const attemptId = assignment.assignment.attemptIdentity.attemptId;
       if (assignment.state !== "started" && assignment.state !== "finished") continue;
       for (const event of await store.listPendingEvents(attemptId)) {
-        const ack = await this.business().appendEvent(event, this.runtimeAbort.signal);
+        const ack = await this.business().appendEvent(
+          runtimeEventPayload(event),
+          this.runtimeAbort.signal,
+        );
         if (ack.clientEventId !== event.clientEventId || ack.clientEventSeq !== event.clientEventSeq) {
           throw new Error("Runtime Event ACK identity mismatch");
         }
@@ -862,7 +872,10 @@ export class RuntimeWorker {
           throw new Error("Runtime Result reported missing Events without replay ranges");
         }
         for (const event of await store.listEventsInRanges(attemptId, ranges)) {
-          const eventAck = await this.business().appendEvent(event, this.runtimeAbort.signal);
+          const eventAck = await this.business().appendEvent(
+            runtimeEventPayload(event),
+            this.runtimeAbort.signal,
+          );
           if (eventAck.clientEventId !== event.clientEventId ||
             eventAck.clientEventSeq !== event.clientEventSeq) {
             throw new Error("Runtime replay Event ACK identity mismatch");
@@ -873,6 +886,7 @@ export class RuntimeWorker {
         continue;
       }
       if (ack.resultId !== result.payload.resultId) throw new Error("Runtime Result ACK identity mismatch");
+      this.active.delete(attemptId);
       await store.ackResult(attemptId, result.payload.resultId);
       await store.deleteAssignment(attemptId);
       progressed = true;
@@ -986,6 +1000,7 @@ export class RuntimeWorker {
     if (active) {
       active.controller.abort(new RuntimeAttemptError("LEASE_REVOKED", "Runtime lease was revoked"));
       await active.done;
+      if (this.active.get(attemptId) === active) this.active.delete(attemptId);
     }
     const current = await this.requiredStore().getAssignment(attemptId);
     if (!current) return;
@@ -996,6 +1011,7 @@ export class RuntimeWorker {
   private async commandLoop(): Promise<void> {
     let failures = 0;
     while (!this.runtimeAbort.signal.aborted) {
+      if (this.stopping) return;
       if (this.activeMode !== "pull") {
         await sleep(50, this.runtimeAbort.signal);
         continue;
@@ -1071,6 +1087,7 @@ export class RuntimeWorker {
 
   private async heartbeatLoop(): Promise<void> {
     while (!this.runtimeAbort.signal.aborted) {
+      if (this.stopping) return;
       if (this.activeMode !== "pull") {
         await sleep(50, this.runtimeAbort.signal);
         continue;
@@ -1104,11 +1121,9 @@ export class RuntimeWorker {
       ));
       await sleep(interval, this.runtimeAbort.signal);
       for (const active of [...this.active.values()]) {
-        if (active.terminal) continue;
-        const assignment = await this.requiredStore().getAssignment(
-          active.stored.assignment.attemptIdentity.attemptId,
-        );
-        if (!assignment) continue;
+        const attemptId = active.stored.assignment.attemptIdentity.attemptId;
+        const assignment = await this.requiredStore().getAssignment(attemptId);
+        if (!assignment || this.active.get(attemptId) !== active) continue;
         const snapshot = this.capacitySnapshot();
         try {
           const renewed = await this.business().renewLease(
@@ -1118,14 +1133,16 @@ export class RuntimeWorker {
             snapshot.inflight,
             this.runtimeAbort.signal,
           );
+          if (this.active.get(attemptId) !== active) continue;
           active.leaseExpiresAt = Date.parse(renewed.leaseExpiresAt);
           await this.requiredStore().transitionAssignment(
             assignment.assignment.attemptIdentity.attemptId,
-            "started",
+            assignment.state === "finished" ? "finished" : "started",
             { leaseExpiresAt: renewed.leaseExpiresAt },
           );
           if (renewed.pendingCommand) await this.handleCommand(renewed.pendingCommand);
         } catch (error) {
+          if (this.active.get(attemptId) !== active) continue;
           if (runtimeErrorCode(error) === "STALE_LEASE" || runtimeErrorCode(error) === "LEASE_EXPIRED") {
             await this.clearRevokedAttempt(assignment);
             continue;
@@ -1418,6 +1435,16 @@ function eventRanges(events: RuntimeStoredEvent[]): { start: number; end: number
   }
   ranges.push({ start, end });
   return ranges;
+}
+
+function runtimeEventPayload(event: RuntimeStoredEvent): RuntimeRunEventPayload {
+  return {
+    attemptIdentity: event.attemptIdentity,
+    clientEventId: event.clientEventId,
+    clientEventSeq: event.clientEventSeq,
+    eventType: event.eventType,
+    payload: event.payload,
+  };
 }
 
 function assertResumeDecisionCoherent(decision: RuntimeResumeAcceptedPayload): void {

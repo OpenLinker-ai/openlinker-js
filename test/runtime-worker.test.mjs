@@ -61,6 +61,11 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
       };
     },
     async appendRuntimeEvent(event) {
+      assert.equal(
+        "createdAt" in event,
+        false,
+        "local Store metadata crossed the Runtime transport boundary",
+      );
       eventIds.push(event.clientEventId);
       if (eventIds.length === 1) throw new Error("temporary Event upload failure");
       return {
@@ -134,6 +139,180 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
   await worker.stop();
   await running;
   assert.equal(worker.transportState, "stopped");
+});
+
+test("RuntimeWorker renews a finished Attempt until its durable spool is ACKed", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-finished-lease-"));
+  const store = new FileRuntimeStore(dataDir);
+  let hello;
+  let claimed = false;
+  let handlerCalls = 0;
+  let renewCalls = 0;
+  let eventCalls = 0;
+  let resultCalls = 0;
+
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return assignmentFor(hello);
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async renewRuntimeLease(request) {
+      renewCalls += 1;
+      assert.equal(request.inflight, 1, "finished Attempt stopped occupying Runtime capacity");
+      return {
+        attemptIdentity: request.attemptIdentity,
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      };
+    },
+    async appendRuntimeEvent(event) {
+      eventCalls += 1;
+      if (eventCalls === 1 || renewCalls < 1) throw new Error("temporary Event upload outage");
+      return {
+        clientEventId: event.clientEventId,
+        clientEventSeq: event.clientEventSeq,
+        sequence: event.clientEventSeq,
+        replayed: eventCalls > 1,
+      };
+    },
+    async finalizeRuntimeResult(result) {
+      resultCalls += 1;
+      if (resultCalls === 1 || renewCalls < 3) throw new Error("temporary Result upload outage");
+      return {
+        resultId: result.resultId,
+        classification: "success",
+        runStatus: "success",
+        dispatchState: "terminal",
+        replayed: resultCalls > 1,
+      };
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    retryMinimumMs: 1,
+    retryMaximumMs: 5,
+    heartbeatIntervalMs: 250,
+    handler: async (run) => {
+      handlerCalls += 1;
+      await run.emit("run.progress", { durable: true });
+      return { output: { complete: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+    randomUUID: () => ids.result,
+  });
+
+  const running = worker.start();
+  t.after(async () => {
+    try {
+      await worker.stop();
+      await running;
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+  await waitFor(() => worker.transportState === "pull_active");
+  await waitFor(async () => {
+    const assignment = await store.getAssignment(ids.attempt);
+    return assignment?.state === "finished" && Boolean(await store.getPendingResult(ids.attempt));
+  });
+  await waitFor(() => renewCalls >= 3 && resultCalls > 1);
+  assert.equal(handlerCalls, 1);
+  assert.ok(eventCalls > 1, "durable Event was not retried through the outage");
+  assert.ok(resultCalls > 1, "durable Result was not retried through the outage");
+  assert.ok(renewCalls >= 3, "finished Attempt lease stopped before the spool was ACKed");
+  await waitFor(async () => (await store.snapshot()).assignments.length === 0);
+});
+
+test("RuntimeWorker shutdown retains a finished spool without waiting for Core ACK", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-finished-shutdown-"));
+  const store = new FileRuntimeStore(dataDir);
+  let hello;
+  let claimed = false;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return assignmentFor(hello);
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async appendRuntimeEvent() {
+      throw new Error("Core Event upload remains unavailable");
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    retryMinimumMs: 1,
+    retryMaximumMs: 5,
+    shutdownTimeoutMs: 100,
+    handler: async (run) => {
+      await run.emit("run.progress", { durable: true });
+      return { output: { complete: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+    randomUUID: () => ids.result,
+  });
+
+  const running = worker.start();
+  t.after(async () => {
+    try {
+      await worker.stop();
+      await running;
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+  await waitFor(() => worker.transportState === "pull_active");
+  await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "finished");
+  let shutdownTimer;
+  await Promise.race([
+    worker.stop(),
+    new Promise((_, reject) => {
+      shutdownTimer = setTimeout(
+        () => reject(new Error("shutdown waited for Core spool ACK")),
+        1_000,
+      );
+    }),
+  ]).finally(() => clearTimeout(shutdownTimer));
+  await running;
+
+  const reopened = new FileRuntimeStore(dataDir);
+  await reopened.open();
+  try {
+    const snapshot = await reopened.snapshot();
+    assert.equal(snapshot.assignments.length, 1);
+    assert.equal(snapshot.assignments[0].state, "finished");
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(snapshot.results.length, 1);
+  } finally {
+    await reopened.close();
+  }
 });
 
 test("RuntimeWorker refuses to re-enter a handler after a persisted started boundary", async (t) => {
@@ -354,6 +533,51 @@ test("RuntimeWorker keeps HTTP Pull lifecycle calls out of an active WebSocket a
     heartbeats: 0,
     sessionCloses: 0,
   });
+});
+
+test("RuntimeWorker stops forced Pull while claim and command polls are in flight", async () => {
+  const claimStarted = deferred();
+  const commandStarted = deferred();
+  let sessionCloses = 0;
+  const client = fakeClient({
+    async claimRuntimeRun(_wait, _request, options) {
+      claimStarted.resolve();
+      await delay(60_000, options?.signal);
+      return undefined;
+    },
+    async pollRuntimeCommands(_session, _wait, options) {
+      commandStarted.resolve();
+      await delay(60_000, options?.signal);
+      return { commands: [], databaseTime: new Date().toISOString() };
+    },
+    async closeRuntimeSession() {
+      sessionCloses += 1;
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 250,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await Promise.all([claimStarted.promise, commandStarted.promise]);
+  await Promise.race([
+    worker.stop(),
+    delay(1_000).then(() => assert.fail("forced Pull shutdown was blocked by long polls")),
+  ]);
+  await running;
+  assert.equal(sessionCloses, 1);
+  assert.equal(worker.transportState, "stopped");
 });
 
 test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async () => {
