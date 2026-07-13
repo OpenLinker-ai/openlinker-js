@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, readdir, readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 
 import { OpenLinkerClient } from "../dist/index.js";
 import {
@@ -9,7 +9,7 @@ import {
   RuntimeContractID,
   RuntimeProtocolVersion,
   RuntimeRequiredFeatures,
-  RuntimeV2WebSocketSession,
+  RuntimeWebSocketSession,
 } from "../dist/runtime.js";
 
 test("Core client v1 contract maps to implemented SDK methods", async () => {
@@ -57,14 +57,12 @@ test("Core client v1 contract maps to implemented SDK methods", async () => {
   }
 });
 
-test("Runtime v2 contract matches the exported handshake manifest", async () => {
+test("Runtime contract matches the exported handshake manifest", async () => {
   const contractsDir = new URL("../contracts/", import.meta.url);
   const files = await readdir(contractsDir);
-  assert.ok(files.includes("core-runtime.v2.json"));
-  assert.ok(!files.includes("core-runtime.v1.json"));
-  await assert.rejects(access(new URL("core-runtime.v1.json", contractsDir)));
+  assert.ok(files.includes("core-runtime.json"));
 
-  const rawContract = await readFile(new URL("core-runtime.v2.json", contractsDir));
+  const rawContract = await readFile(new URL("core-runtime.json", contractsDir));
   const contract = JSON.parse(rawContract.toString("utf8"));
   const digest = createHash("sha256").update(rawContract).digest("hex");
 
@@ -93,8 +91,7 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
   );
   assert.equal(contract.wire_format, "application/json");
   assert.equal(contract.websocket.path, "/api/v1/agent-runtime/ws");
-  assert.equal(contract.websocket.path.includes("/v2/"), false);
-  assert.equal(typeof RuntimeV2WebSocketSession, "function");
+  assert.equal(typeof RuntimeWebSocketSession, "function");
   assert.equal(contract.websocket.envelope_schema.$ref, "#/$defs/RuntimeMessage");
   assert.ok(contract.websocket.messages.length > 0);
   assert.ok(contract.endpoints.length > 0);

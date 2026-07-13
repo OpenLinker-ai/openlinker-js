@@ -9,22 +9,37 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Added
 
-- Added `RuntimeV2WebSocketSession` for the canonical v2 WebSocket envelope,
-  correlated business ACKs, pushed assignments and cancellation commands,
-  multi-Attempt resume, strict size/shape validation, and close-code handling.
-  It accepts an already authenticated mTLS socket so credentials never appear
-  in a WebSocket URL.
+- Added the SDK-owned `RuntimeWorker` with credential-free Runtime discovery,
+  Node mTLS, WebSocket-first automatic Pull recovery, Session lifecycle,
+  assignment confirmation, renewal, resume, cancellation, drain, capacity,
+  stable Event/Result retry, assignment-scoped delegated calls, and safe
+  shutdown. Handlers run only after durable assignment confirmation.
+- Session creation and the initial WebSocket attach retry stale attachment
+  conflicts while Core reaps the previous Session. The same conflict remains
+  permanent for business operations after Ready.
+- Added the encrypted `FileRuntimeStore` with stable Worker identity, monotonic
+  Session epoch, authenticated encryption, atomic fsync-backed writes, a
+  process lock, private permissions, corruption detection, and fail-closed
+  space limits. `MemoryRuntimeStore` requires an explicit unsafe test flag.
+- Added `RuntimeWebSocketSession` for correlated business ACKs, pushed
+  assignments and cancellation commands, multi-Attempt resume, strict
+  size/shape validation, and close-code handling.
+- Added `NodeRuntimeTransport` for Node 20 mTLS HTTP and WebSocket connections.
+  Runtime credentials are never placed in a URL and redirects are rejected.
 
 ### Changed
 
-- Breaking: moved every Runtime HTTP and WebSocket endpoint from the versioned
-  URL prefix to `/api/v1/agent-runtime/*`. Protocol version 2, the
-  `openlinker.runtime.v2` contract ID, and the `RuntimeV2*` API remain pinned in
-  the handshake contract. The contract now binds session heartbeat and close,
+- Breaking: Runtime HTTP and WebSocket endpoints use the neutral
+  `/api/v1/agent-runtime/*` namespace. Public Runtime API names and the contract
+  filename are neutral as well; protocol negotiation remains an internal wire
+  concern of the handshake contract. The contract binds Session heartbeat and close,
   including the close request body and empty `204` response; its digest is
   `fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53`.
+- Breaking: the package root is browser-safe and no longer exports or imports
+  Runtime types. Server-only Worker, Store, mTLS, HTTP, and WebSocket APIs are
+  available from `@openlinker/sdk/runtime`.
 - Breaking: `ConnectionMode` now exposes `direct_http | mcp_server |
-  agent_node`. WebSocket and Pull v2 are Agent Node transport policies, not
+  agent_node`. WebSocket and Pull are Runtime transport policies, not
   separate marketplace connection modes.
 - Added reliable Run creation to `runAgent` and `startAgentRun`: both methods
   now send a validated `Idempotency-Key`, generate a secure per-invocation key
@@ -33,10 +48,12 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Removed
 
-- Breaking: removed the pre-v2 runtime heartbeat, pull claim, result upload,
-  legacy WebSocket connector, delegated-call helpers, and their DTO/connector
-  exports. `@openlinker/sdk/runtime` now exposes strict Runtime v2 HTTP and
-  WebSocket protocol primitives only.
+- Breaking: removed version labels from public Runtime class names, methods,
+  source filenames, tests, and the contract filename. No compatibility aliases
+  are retained during the pre-1.0 cutover.
+- Removed the Agent Node ownership assumption from the TypeScript SDK. Agent
+  Node is now an optional adapter shell over the SDK Worker rather than a
+  second Runtime state machine.
 
 ### Documentation
 

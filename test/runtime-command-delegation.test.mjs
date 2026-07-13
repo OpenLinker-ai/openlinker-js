@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   OpenLinkerRuntime,
-  RuntimeV2CallAgentPath,
-  RuntimeV2MaxMessageBytes,
-  RuntimeV2MessageTypes,
-  buildRuntimeV2InvocationProof,
+  RuntimeCallAgentPath,
+  RuntimeMaxMessageBytes,
+  RuntimeMessageTypes,
+  buildRuntimeInvocationProof,
 } from "../dist/runtime.js";
 
 const ids = Object.freeze({
@@ -31,17 +31,17 @@ const invocation = Object.freeze({
   idempotencyKey: "delegation-42",
 });
 
-test("runtime v2 invocation proof matches the fixed Core and Go vector", async () => {
+test("Runtime invocation proof matches the fixed Core and Go vector", async () => {
   const request = {
     method: "POST",
-    path: RuntimeV2CallAgentPath,
+    path: RuntimeCallAgentPath,
     idempotencyKey: "delegation-42<&",
     context: invocation.invocationContext,
     body: new TextEncoder().encode(
       `{"target_agent_id":"${ids.target}","input":{"q":"hello"},"reason":"need data"}`,
     ),
   };
-  const proof = await buildRuntimeV2InvocationProof(invocation.token, request);
+  const proof = await buildRuntimeInvocationProof(invocation.token, request);
   assert.equal(proof, "lBuoEqAJKl9ujEr72b0oR3cuuoqJPqCs1vkABcw6zA0");
 
   const mutations = [
@@ -51,15 +51,15 @@ test("runtime v2 invocation proof matches the fixed Core and Go vector", async (
     { ...request, path: `${request.path}/other` },
   ];
   for (const changed of mutations) {
-    assert.notEqual(await buildRuntimeV2InvocationProof(invocation.token, changed), proof);
+    assert.notEqual(await buildRuntimeInvocationProof(invocation.token, changed), proof);
   }
   assert.notEqual(
-    await buildRuntimeV2InvocationProof("ol_inv_v2.other.payload.signature", request),
+    await buildRuntimeInvocationProof("ol_inv_v2.other.payload.signature", request),
     proof,
   );
 });
 
-test("callRuntimeV2Agent signs and sends one exact UTF-8 body", async () => {
+test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
   let stringifyCalls = 0;
   const changing = {
     toJSON() {
@@ -89,7 +89,7 @@ test("callRuntimeV2Agent signs and sends one exact UTF-8 body", async () => {
       const body = new Uint8Array(init.body);
       const text = new TextDecoder().decode(body);
       assert.equal(init.method, "POST");
-      assert.equal(url.pathname, RuntimeV2CallAgentPath);
+      assert.equal(url.pathname, RuntimeCallAgentPath);
       assert.equal(url.search, "");
       assert.equal(headers.get("authorization"), `Bearer ${invocation.token}`);
       assert.equal(headers.get("idempotency-key"), invocation.idempotencyKey);
@@ -97,7 +97,7 @@ test("callRuntimeV2Agent signs and sends one exact UTF-8 body", async () => {
       assert.equal(headers.get("content-type"), "application/json");
       assert.equal(text, expectedBody);
       assert.equal(stringifyCalls, 1, "delegated body must be stringified exactly once");
-      const expectedProof = await buildRuntimeV2InvocationProof(invocation.token, {
+      const expectedProof = await buildRuntimeInvocationProof(invocation.token, {
         method: init.method,
         path: url.pathname,
         idempotencyKey: headers.get("idempotency-key"),
@@ -113,7 +113,7 @@ test("callRuntimeV2Agent signs and sends one exact UTF-8 body", async () => {
     },
   });
 
-  const summary = await runtime.callRuntimeV2Agent(invocation, {
+  const summary = await runtime.callRuntimeAgent(invocation, {
     targetAgentId: ids.target,
     input: { q: "hello", nonce: changing },
     metadata: { trace: "sdk" },
@@ -132,7 +132,7 @@ test("callRuntimeV2Agent signs and sends one exact UTF-8 body", async () => {
   });
 });
 
-test("runtime v2 commands and cancel ACK are session-bound and strictly typed", async () => {
+test("Runtime commands and cancel ACK are session-bound and strictly typed", async () => {
   const calls = [];
   const runtime = runtimeWithFetch(async (input, init) => {
     const url = new URL(String(input));
@@ -147,7 +147,7 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
       return jsonResponse({
         commands: [
           {
-            type: RuntimeV2MessageTypes.runCancel,
+            type: RuntimeMessageTypes.runCancel,
             payload: {
               cancellation_id: ids.cancellation,
               attempt_identity: wireIdentity(),
@@ -156,7 +156,7 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
             },
           },
           {
-            type: RuntimeV2MessageTypes.drain,
+            type: RuntimeMessageTypes.drain,
             payload: {
               deadline_at: later,
               reason_code: "DEPLOY",
@@ -165,7 +165,7 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
             },
           },
           {
-            type: RuntimeV2MessageTypes.leaseRevoked,
+            type: RuntimeMessageTypes.leaseRevoked,
             payload: {
               attempt_identity: wireIdentity(),
               reason_code: "LEASE_LOST",
@@ -194,14 +194,14 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
     });
   });
 
-  const commands = await runtime.pollRuntimeV2Commands(ids.session, 17);
+  const commands = await runtime.pollRuntimeCommands(ids.session, 17);
   assert.equal(commands.databaseTime, now);
   assert.equal(commands.commands.length, 3);
   assert.equal(commands.commands[0].payload.cancellationId, ids.cancellation);
   assert.equal(commands.commands[1].payload.capacity, 5000);
   assert.equal(commands.commands[2].payload.runStatus, "canceled");
 
-  const state = await runtime.ackRuntimeV2Cancel({
+  const state = await runtime.ackRuntimeCancel({
     cancellationId: ids.cancellation,
     attemptIdentity: runtimeIdentity(),
     cancelState: "unsupported",
@@ -264,13 +264,13 @@ test("commands and cancel ACK reject malformed unions, UUIDs, and state mismatch
     return responses.shift();
   });
 
-  await assert.rejects(() => runtime.pollRuntimeV2Commands("not-a-uuid", 0), /canonical lowercase UUID/);
-  await assert.rejects(() => runtime.pollRuntimeV2Commands(ids.session, 31), /waitSeconds/);
+  await assert.rejects(() => runtime.pollRuntimeCommands("not-a-uuid", 0), /canonical lowercase UUID/);
+  await assert.rejects(() => runtime.pollRuntimeCommands(ids.session, 31), /waitSeconds/);
   assert.equal(calls, 0);
-  await assert.rejects(() => runtime.pollRuntimeV2Commands(ids.session, 0), /Session identity mismatch/);
-  await assert.rejects(() => runtime.pollRuntimeV2Commands(ids.session, 0), /unknown field unexpected/);
+  await assert.rejects(() => runtime.pollRuntimeCommands(ids.session, 0), /Session identity mismatch/);
+  await assert.rejects(() => runtime.pollRuntimeCommands(ids.session, 0), /unknown field unexpected/);
   await assert.rejects(
-    () => runtime.ackRuntimeV2Cancel({
+    () => runtime.ackRuntimeCancel({
       cancellationId: ids.cancellation,
       attemptIdentity: runtimeIdentity(),
       cancelState: "stopped",
@@ -278,7 +278,7 @@ test("commands and cancel ACK reject malformed unions, UUIDs, and state mismatch
     /identity mismatch/,
   );
   await assert.rejects(
-    () => runtime.ackRuntimeV2Cancel({
+    () => runtime.ackRuntimeCancel({
       cancellationId: ids.cancellation,
       attemptIdentity: runtimeIdentity(),
       cancelState: "stopped",
@@ -286,7 +286,7 @@ test("commands and cancel ACK reject malformed unions, UUIDs, and state mismatch
     /does not correlate/,
   );
   await assert.rejects(
-    () => runtime.ackRuntimeV2Cancel({
+    () => runtime.ackRuntimeCancel({
       cancellationId: ids.cancellation,
       attemptIdentity: runtimeIdentity(),
       cancelState: "failed",
@@ -306,7 +306,7 @@ test("delegated calls reject invalid authority, statuses, summaries, and strict 
     jsonResponse({
       error: { code: "BAD_REQUEST", message: "bad", retryable: false, unexpected: true },
     }, { status: 400 }),
-    new Response(new Uint8Array(RuntimeV2MaxMessageBytes + 1), { status: 400 }),
+    new Response(new Uint8Array(RuntimeMaxMessageBytes + 1), { status: 400 }),
   ];
   const runtime = runtimeWithFetch(async () => {
     calls++;
@@ -317,20 +317,20 @@ test("delegated calls reject invalid authority, statuses, summaries, and strict 
   const request = { targetAgentId: ids.target, input: {} };
 
   await assert.rejects(
-    () => runtime.callRuntimeV2Agent({ ...invocation, token: "ordinary-agent-token" }, request),
+    () => runtime.callRuntimeAgent({ ...invocation, token: "ordinary-agent-token" }, request),
     /authorization is invalid/,
   );
   await assert.rejects(
-    () => runtime.callRuntimeV2Agent({ ...invocation, idempotencyKey: " delegation-42 " }, request),
+    () => runtime.callRuntimeAgent({ ...invocation, idempotencyKey: " delegation-42 " }, request),
     /surrounding whitespace/,
   );
   assert.equal(calls, 0);
-  await assert.rejects(() => runtime.callRuntimeV2Agent(invocation, request), /status does not match/);
-  await assert.rejects(() => runtime.callRuntimeV2Agent(invocation, request), /status does not match/);
-  await assert.rejects(() => runtime.callRuntimeV2Agent(invocation, request), /must return 200 or 202/);
-  await assert.rejects(() => runtime.callRuntimeV2Agent(invocation, request), /incoherent terminal state/);
-  await assert.rejects(() => runtime.callRuntimeV2Agent(invocation, request), /unknown field unexpected/);
-  await assert.rejects(() => runtime.callRuntimeV2Agent(invocation, request), /exceeds 4 MiB/);
+  await assert.rejects(() => runtime.callRuntimeAgent(invocation, request), /status does not match/);
+  await assert.rejects(() => runtime.callRuntimeAgent(invocation, request), /status does not match/);
+  await assert.rejects(() => runtime.callRuntimeAgent(invocation, request), /must return 200 or 202/);
+  await assert.rejects(() => runtime.callRuntimeAgent(invocation, request), /incoherent terminal state/);
+  await assert.rejects(() => runtime.callRuntimeAgent(invocation, request), /unknown field unexpected/);
+  await assert.rejects(() => runtime.callRuntimeAgent(invocation, request), /exceeds 4 MiB/);
   assert.equal(calls, 6);
 });
 
@@ -341,9 +341,9 @@ test("delegated call rejects an oversized request before transport", async () =>
     return jsonResponse({});
   });
   await assert.rejects(
-    () => runtime.callRuntimeV2Agent(invocation, {
+    () => runtime.callRuntimeAgent(invocation, {
       targetAgentId: ids.target,
-      input: { value: "x".repeat(RuntimeV2MaxMessageBytes) },
+      input: { value: "x".repeat(RuntimeMaxMessageBytes) },
     }),
     /exceeds 4 MiB/,
   );

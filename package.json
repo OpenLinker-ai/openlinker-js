@@ -47,14 +47,21 @@
     "package.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.0.0"
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "undici": "^6.27.0",
+    "ws": "^8.21.0"
   }
 }

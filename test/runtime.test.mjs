@@ -1,20 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  RuntimeContractDigest as RootRuntimeContractDigest,
-  RuntimeV2MessageTypes as RootRuntimeV2MessageTypes,
-} from "../dist/index.js";
+import * as RootSDK from "../dist/index.js";
 import {
   OpenLinkerError,
   OpenLinkerRuntime,
   RuntimeContractDigest,
   RuntimeRequiredFeatures,
-  RuntimeV2AssignmentRejectReasons,
-  RuntimeV2MaxMessageBytes,
-  RuntimeV2MessageTypes,
-  RuntimeV2ResumeActions,
-  RuntimeV2ResumeDecisions,
+  RuntimeAssignmentRejectReasons,
+  RuntimeMaxMessageBytes,
+  RuntimeMessageTypes,
+  RuntimeResumeActions,
+  RuntimeResumeDecisions,
 } from "../dist/runtime.js";
 
 const ids = Object.freeze({
@@ -33,14 +30,14 @@ const ids = Object.freeze({
 const now = "2026-07-11T13:00:00.123Z";
 const later = "2026-07-11T13:01:00.123Z";
 
-test("runtime v2 types and constants are exported from both SDK entries", () => {
-  assert.equal(RootRuntimeContractDigest, RuntimeContractDigest);
-  assert.equal(RootRuntimeV2MessageTypes.assignmentAck, "run.assignment.ack");
-  assert.equal(RuntimeV2MessageTypes.resume, "runtime.resume");
-  assert.equal(RuntimeV2ResumeDecisions.uploadSpoolOnly, "upload_spool_only");
+test("Runtime types and constants are server-only", () => {
+  assert.equal("RuntimeContractDigest" in RootSDK, false);
+  assert.equal("RuntimeMessageTypes" in RootSDK, false);
+  assert.equal(RuntimeMessageTypes.resume, "runtime.resume");
+  assert.equal(RuntimeResumeDecisions.uploadSpoolOnly, "upload_spool_only");
 });
 
-test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () => {
+test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
   const calls = [];
   let claimCalls = 0;
   const runtime = new OpenLinkerRuntime({
@@ -131,34 +128,34 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
   });
 
   const hello = runtimeHello();
-  const ready = await runtime.createRuntimeV2Session(hello);
+  const ready = await runtime.createRuntimeSession(hello);
   assert.equal(ready.coreInstanceId, ids.core);
   assert.equal(ready.databaseTime, now);
-  await runtime.heartbeatRuntimeV2Session(hello);
+  await runtime.heartbeatRuntimeSession(hello);
 
   const claim = { runtimeSessionId: ids.session, capacity: 2, inflight: 0 };
-  assert.equal(await runtime.claimRuntimeV2Run(12, claim), undefined);
-  const assigned = await runtime.claimRuntimeV2Run(12, claim);
+  assert.equal(await runtime.claimRuntimeRun(12, claim), undefined);
+  const assigned = await runtime.claimRuntimeRun(12, claim);
   assert.ok(assigned);
   assert.equal(assigned.attemptIdentity.runId, ids.run);
   assert.deepEqual(assigned.input, { prompt: "hello" });
 
   // Claim is only an offer. Execution permission is returned by this explicit
   // assignment ACK and cannot be synthesized by a legacy claim loop.
-  const confirmed = await runtime.ackRuntimeV2Assignment({
+  const confirmed = await runtime.ackRuntimeAssignment({
     attemptIdentity: assigned.attemptIdentity,
   });
   assert.equal(confirmed.attemptNo, 1);
 
-  const rejected = await runtime.rejectRuntimeV2Assignment({
+  const rejected = await runtime.rejectRuntimeAssignment({
     attemptIdentity: assigned.attemptIdentity,
-    reasonCode: RuntimeV2AssignmentRejectReasons.nodeAtCapacity,
+    reasonCode: RuntimeAssignmentRejectReasons.nodeAtCapacity,
     capacity: 2,
     inflight: 2,
   });
   assert.equal(rejected.outcome, "offer_rejected");
 
-  const renewed = await runtime.renewRuntimeV2Lease({
+  const renewed = await runtime.renewRuntimeLease({
     attemptIdentity: assigned.attemptIdentity,
     lastClientEventSeq: 0,
     capacity: 2,
@@ -167,7 +164,7 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
   assert.equal(renewed.pendingCommand?.type, "run.cancel");
   assert.equal(renewed.pendingCommand?.payload.cancellationId, ids.cancellation);
 
-  const eventAck = await runtime.appendRuntimeV2Event({
+  const eventAck = await runtime.appendRuntimeEvent({
     attemptIdentity: assigned.attemptIdentity,
     clientEventId: ids.event,
     clientEventSeq: 1,
@@ -176,7 +173,7 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
   });
   assert.equal(eventAck.sequence, 4);
 
-  const resultAck = await runtime.finalizeRuntimeV2Result({
+  const resultAck = await runtime.finalizeRuntimeResult({
     attemptIdentity: assigned.attemptIdentity,
     resultId: ids.result,
     status: "success",
@@ -186,7 +183,7 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
   });
   assert.equal(resultAck.resultId, ids.result);
 
-  const resumed = await runtime.resumeRuntimeV2Runs({
+  const resumed = await runtime.resumeRuntimeRuns({
     nodeId: ids.node,
     agentId: ids.agent,
     workerId: "worker-a",
@@ -197,14 +194,14 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
       pendingClientEventRanges: [],
     }],
   });
-  assert.equal(resumed.decisions[0].decision, RuntimeV2ResumeDecisions.continueExecution);
+  assert.equal(resumed.decisions[0].decision, RuntimeResumeDecisions.continueExecution);
   assert.deepEqual(resumed.decisions[0].allowedActions, [
-    RuntimeV2ResumeActions.continueExecution,
-    RuntimeV2ResumeActions.uploadEvents,
-    RuntimeV2ResumeActions.uploadResult,
+    RuntimeResumeActions.continueExecution,
+    RuntimeResumeActions.uploadEvents,
+    RuntimeResumeActions.uploadResult,
   ]);
 
-  await runtime.closeRuntimeV2Session({
+  await runtime.closeRuntimeSession({
     nodeId: ids.node,
     agentId: ids.agent,
     workerId: "worker-a",
@@ -242,10 +239,10 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
   });
 });
 
-test("runtime v2 session close requires an empty 204 response", async () => {
+test("Runtime session close requires an empty 204 response", async () => {
   const runtime = runtimeWithFetch(async () => jsonResponse({}, { status: 200 }));
   await assert.rejects(
-    () => runtime.closeRuntimeV2Session({
+    () => runtime.closeRuntimeSession({
       nodeId: ids.node,
       agentId: ids.agent,
       workerId: "worker-a",
@@ -258,7 +255,7 @@ test("runtime v2 session close requires an empty 204 response", async () => {
   );
 });
 
-test("runtime v2 validates stable identities, contract, capacity, and request shape locally", async () => {
+test("Runtime validates stable identities, contract, capacity, and request shape locally", async () => {
   let calls = 0;
   const runtime = runtimeWithFetch(async () => {
     calls++;
@@ -266,26 +263,26 @@ test("runtime v2 validates stable identities, contract, capacity, and request sh
   });
 
   await assert.rejects(
-    () => runtime.createRuntimeV2Session({ ...runtimeHello(), nodeId: ids.cancellation.toUpperCase() }),
+    () => runtime.createRuntimeSession({ ...runtimeHello(), nodeId: ids.cancellation.toUpperCase() }),
     /canonical lowercase UUID/,
   );
   await assert.rejects(
-    () => runtime.createRuntimeV2Session({ ...runtimeHello(), contractDigest: "0".repeat(64) }),
+    () => runtime.createRuntimeSession({ ...runtimeHello(), contractDigest: "0".repeat(64) }),
     /packaged contract/,
   );
   await assert.rejects(
-    () => runtime.createRuntimeV2Session({
+    () => runtime.createRuntimeSession({
       ...runtimeHello(),
       features: RuntimeRequiredFeatures.filter((feature) => feature !== "persistent_spool"),
     }),
     /missing required feature persistent_spool/,
   );
   await assert.rejects(
-    () => runtime.createRuntimeV2Session({ ...runtimeHello(), capacity: 1025 }),
+    () => runtime.createRuntimeSession({ ...runtimeHello(), capacity: 1025 }),
     /capacity/,
   );
   await assert.rejects(
-    () => runtime.appendRuntimeV2Event({
+    () => runtime.appendRuntimeEvent({
       attemptIdentity: runtimeIdentity(),
       clientEventId: "event-from-clock",
       clientEventSeq: 1,
@@ -295,7 +292,7 @@ test("runtime v2 validates stable identities, contract, capacity, and request sh
     /canonical lowercase UUID/,
   );
   await assert.rejects(
-    () => runtime.finalizeRuntimeV2Result({
+    () => runtime.finalizeRuntimeResult({
       attemptIdentity: runtimeIdentity(),
       resultId: "result-from-clock",
       status: "success",
@@ -306,7 +303,7 @@ test("runtime v2 validates stable identities, contract, capacity, and request sh
     /canonical lowercase UUID/,
   );
   await assert.rejects(
-    () => runtime.appendRuntimeV2Event({
+    () => runtime.appendRuntimeEvent({
       attemptIdentity: runtimeIdentity(),
       clientEventId: ids.event,
       clientEventSeq: 1,
@@ -317,13 +314,13 @@ test("runtime v2 validates stable identities, contract, capacity, and request sh
     /unknown field unexpected/,
   );
   await assert.rejects(
-    () => runtime.claimRuntimeV2Run(31, { runtimeSessionId: ids.session, capacity: 1, inflight: 0 }),
+    () => runtime.claimRuntimeRun(31, { runtimeSessionId: ids.session, capacity: 1, inflight: 0 }),
     /waitSeconds/,
   );
-  assert.equal(calls, 0, "invalid v2 requests must not reach Core");
+  assert.equal(calls, 0, "invalid Runtime requests must not reach Core");
 });
 
-test("runtime v2 rejects unknown, oversized, and identity-mismatched responses", async () => {
+test("Runtime rejects unknown, oversized, and identity-mismatched responses", async () => {
   const responses = [
     jsonResponse({
       core_instance_id: ids.core,
@@ -341,7 +338,7 @@ test("runtime v2 rejects unknown, oversized, and identity-mismatched responses",
       status: 200,
       headers: {
         "content-type": "application/json",
-        "content-length": String(RuntimeV2MaxMessageBytes + 1),
+        "content-length": String(RuntimeMaxMessageBytes + 1),
       },
     }),
     jsonResponse({
@@ -352,19 +349,19 @@ test("runtime v2 rejects unknown, oversized, and identity-mismatched responses",
   ];
   const runtime = runtimeWithFetch(async () => responses.shift());
 
-  await assert.rejects(() => runtime.createRuntimeV2Session(runtimeHello()), /unknown field unexpected/);
+  await assert.rejects(() => runtime.createRuntimeSession(runtimeHello()), /unknown field unexpected/);
   await assert.rejects(
-    () => runtime.claimRuntimeV2Run(0, { runtimeSessionId: ids.session, capacity: 1, inflight: 0 }),
+    () => runtime.claimRuntimeRun(0, { runtimeSessionId: ids.session, capacity: 1, inflight: 0 }),
     /attempt_identity contains unknown field unexpected/,
   );
-  await assert.rejects(() => runtime.createRuntimeV2Session(runtimeHello()), /exceeds 4 MiB/);
+  await assert.rejects(() => runtime.createRuntimeSession(runtimeHello()), /exceeds 4 MiB/);
   await assert.rejects(
-    () => runtime.ackRuntimeV2Assignment({ attemptIdentity: runtimeIdentity() }),
+    () => runtime.ackRuntimeAssignment({ attemptIdentity: runtimeIdentity() }),
     /identity mismatch/,
   );
 });
 
-test("runtime v2 parses strict error envelopes with the existing runtime auth", async () => {
+test("Runtime parses strict error envelopes with the existing runtime auth", async () => {
   const runtime = runtimeWithFetch(async (_input, init) => {
     assert.equal(new Headers(init.headers).get("authorization"), "Bearer ol_agent_v2");
     return jsonResponse({
@@ -375,16 +372,16 @@ test("runtime v2 parses strict error envelopes with the existing runtime auth", 
         current_run_status: "running",
         current_dispatch_state: "executing",
       },
-    }, { status: 409, headers: { "x-request-id": "req-v2" } });
+    }, { status: 409, headers: { "x-request-id": "req-runtime" } });
   });
 
   await assert.rejects(
-    () => runtime.ackRuntimeV2Assignment({ attemptIdentity: runtimeIdentity() }),
+    () => runtime.ackRuntimeAssignment({ attemptIdentity: runtimeIdentity() }),
     (error) => {
       assert.ok(error instanceof OpenLinkerError);
       assert.equal(error.status, 409);
       assert.equal(error.code, "STALE_LEASE");
-      assert.equal(error.requestId, "req-v2");
+      assert.equal(error.requestId, "req-runtime");
       assert.equal(error.details.currentRunStatus, "running");
       return true;
     },

@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   RuntimeContractDigest,
   RuntimeRequiredFeatures,
-  RuntimeV2WebSocketSession,
+  RuntimeWebSocketSession,
 } from "../dist/runtime.js";
 
 const ids = {
@@ -105,13 +105,13 @@ async function startSession(socket, options = {}) {
       socket.receive(envelope("runtime.ready", readyPayload(), { replyTo: message.message_id }));
     }
   };
-  const session = new RuntimeV2WebSocketSession(socket, options);
+  const session = new RuntimeWebSocketSession(socket, options);
   const ready = await session.start(hello());
   assert.equal(ready.coreInstanceId, ids.core);
   return session;
 }
 
-test("Runtime v2 WebSocket waits for correlated assignment confirmation before execution", async () => {
+test("Runtime WebSocket waits for correlated assignment confirmation before execution", async () => {
   const socket = new FakeSocket();
   let assigned;
   const session = await startSession(socket, {
@@ -150,7 +150,7 @@ test("Runtime v2 WebSocket waits for correlated assignment confirmation before e
   assert.equal(confirmed.attemptIdentity.fencingToken, 1);
 });
 
-test("Runtime v2 WebSocket correlates Event/Result ACKs and reorders multi-Resume decisions", async () => {
+test("Runtime WebSocket correlates Event/Result ACKs and reorders multi-Resume decisions", async () => {
   const socket = new FakeSocket();
   const session = await startSession(socket);
   const camelIdentity = {
@@ -244,7 +244,7 @@ test("Runtime v2 WebSocket correlates Event/Result ACKs and reorders multi-Resum
   assert.equal(decisions[1].attemptIdentity.runId, second.runId);
 });
 
-test("Runtime v2 WebSocket delivers cancellation with exact reply correlation", async () => {
+test("Runtime WebSocket delivers cancellation with exact reply correlation", async () => {
   const socket = new FakeSocket();
   let command;
   const session = await startSession(socket, {
@@ -272,7 +272,7 @@ test("Runtime v2 WebSocket delivers cancellation with exact reply correlation", 
   assert.equal(sent.reply_to_message_id, cancelMessageId);
 });
 
-test("Runtime v2 WebSocket rejects pending requests on close and closes malformed protocol frames", async () => {
+test("Runtime WebSocket rejects pending requests on close and closes malformed protocol frames", async () => {
   const socket = new FakeSocket();
   const session = await startSession(socket, { requestTimeoutMs: 5_000 });
   socket.onSend = () => {};

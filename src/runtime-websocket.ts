@@ -1,52 +1,52 @@
 import {
-  decodeRuntimeV2Assignment,
-  decodeRuntimeV2AssignmentConfirmed,
-  decodeRuntimeV2AssignmentRejected,
-  decodeRuntimeV2Envelope,
-  decodeRuntimeV2ErrorEnvelope,
-  decodeRuntimeV2EventAck,
-  decodeRuntimeV2LeaseRenewed,
-  decodeRuntimeV2PendingCommand,
-  decodeRuntimeV2Ready,
-  decodeRuntimeV2ResultAck,
-  decodeRuntimeV2ResumeAccepted,
-  encodeRuntimeV2AssignmentAck,
-  encodeRuntimeV2AssignmentReject,
-  encodeRuntimeV2CancelAck,
-  encodeRuntimeV2Envelope,
-  encodeRuntimeV2Event,
-  encodeRuntimeV2Hello,
-  encodeRuntimeV2LeaseRenew,
-  encodeRuntimeV2Result,
-  encodeRuntimeV2Resume,
-  runtimeV2AttemptIdentityEqual,
-  type RuntimeV2DecodedEnvelope,
-} from "./runtime-v2-codec.js";
+  decodeRuntimeAssignment,
+  decodeRuntimeAssignmentConfirmed,
+  decodeRuntimeAssignmentRejected,
+  decodeRuntimeEnvelope,
+  decodeRuntimeErrorEnvelope,
+  decodeRuntimeEventAck,
+  decodeRuntimeLeaseRenewed,
+  decodeRuntimePendingCommand,
+  decodeRuntimeReady,
+  decodeRuntimeResultAck,
+  decodeRuntimeResumeAccepted,
+  encodeRuntimeAssignmentAck,
+  encodeRuntimeAssignmentReject,
+  encodeRuntimeCancelAck,
+  encodeRuntimeEnvelope,
+  encodeRuntimeEvent,
+  encodeRuntimeHello,
+  encodeRuntimeLeaseRenew,
+  encodeRuntimeResult,
+  encodeRuntimeResume,
+  runtimeAttemptIdentityEqual,
+  type RuntimeDecodedEnvelope,
+} from "./runtime-codec.js";
 import {
-  RuntimeV2MaxMessageBytes,
-  RuntimeV2MessageTypes,
-  type RuntimeV2AssignmentAckPayload,
-  type RuntimeV2AssignmentConfirmedPayload,
-  type RuntimeV2AssignmentRejectPayload,
-  type RuntimeV2AssignmentRejectedPayload,
-  type RuntimeV2AttemptIdentity,
-  type RuntimeV2HelloPayload,
-  type RuntimeV2LeaseRenewedPayload,
-  type RuntimeV2LeaseRenewPayload,
-  type RuntimeV2MessageType,
-  type RuntimeV2PendingCommand,
-  type RuntimeV2ReadyPayload,
-  type RuntimeV2ResumeAcceptedPayload,
-  type RuntimeV2ResumePayload,
-  type RuntimeV2RunAssignedPayload,
-  type RuntimeV2RunCancelAckPayload,
-  type RuntimeV2RunEventAckPayload,
-  type RuntimeV2RunEventPayload,
-  type RuntimeV2RunResultAckPayload,
-  type RuntimeV2RunResultPayload,
-} from "./runtime-v2-types.js";
+  RuntimeMaxMessageBytes,
+  RuntimeMessageTypes,
+  type RuntimeAssignmentAckPayload,
+  type RuntimeAssignmentConfirmedPayload,
+  type RuntimeAssignmentRejectPayload,
+  type RuntimeAssignmentRejectedPayload,
+  type RuntimeAttemptIdentity,
+  type RuntimeHelloPayload,
+  type RuntimeLeaseRenewedPayload,
+  type RuntimeLeaseRenewPayload,
+  type RuntimeMessageType,
+  type RuntimePendingCommand,
+  type RuntimeReadyPayload,
+  type RuntimeResumeAcceptedPayload,
+  type RuntimeResumePayload,
+  type RuntimeRunAssignedPayload,
+  type RuntimeRunCancelAckPayload,
+  type RuntimeRunEventAckPayload,
+  type RuntimeRunEventPayload,
+  type RuntimeRunResultAckPayload,
+  type RuntimeRunResultPayload,
+} from "./runtime-types.js";
 
-export interface RuntimeV2WebSocketLike {
+export interface RuntimeWebSocketLike {
   readonly readyState: number;
   onmessage: ((event: MessageEvent) => unknown) | null;
   onclose: ((event: CloseEvent) => unknown) | null;
@@ -55,25 +55,25 @@ export interface RuntimeV2WebSocketLike {
   close(code?: number, reason?: string): void;
 }
 
-export interface RuntimeV2WebSocketSessionOptions {
+export interface RuntimeWebSocketSessionOptions {
   requestTimeoutMs?: number;
-  onAssigned?: (assignment: RuntimeV2RunAssignedPayload) => void | Promise<void>;
-  onCommand?: (command: RuntimeV2PendingCommand) => void | Promise<void>;
+  onAssigned?: (assignment: RuntimeRunAssignedPayload) => void | Promise<void>;
+  onCommand?: (command: RuntimePendingCommand) => void | Promise<void>;
   onError?: (error: Error) => void;
   onClose?: (event: { code: number; reason: string; clean: boolean }) => void;
 }
 
 type PendingRequest<T> = {
-  expected: ReadonlySet<RuntimeV2MessageType>;
+  expected: ReadonlySet<RuntimeMessageType>;
   remaining: number;
   values: T[];
-  decode: (envelope: RuntimeV2DecodedEnvelope) => T;
+  decode: (envelope: RuntimeDecodedEnvelope) => T;
   resolve: (values: T[]) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 };
 
-export class RuntimeV2WebSocketError extends Error {
+export class RuntimeWebSocketError extends Error {
   constructor(
     message: string,
     public readonly code: string,
@@ -81,12 +81,12 @@ export class RuntimeV2WebSocketError extends Error {
     public readonly closeCode?: number,
   ) {
     super(message);
-    this.name = "RuntimeV2WebSocketError";
+    this.name = "RuntimeWebSocketError";
   }
 }
 
 /**
- * Strict Runtime v2 WebSocket protocol session over an already authenticated
+ * Strict Runtime WebSocket protocol session over an already authenticated
  * socket. The caller owns TLS, the Node client certificate, and the Agent Token
  * used during the HTTP upgrade; credentials are never placed in the URL.
  *
@@ -94,7 +94,7 @@ export class RuntimeV2WebSocketError extends Error {
  * Results before calling these methods. This class deliberately provides no
  * in-memory execution queue or automatic task replay.
  */
-export class RuntimeV2WebSocketSession {
+export class RuntimeWebSocketSession {
   private readonly requestTimeoutMs: number;
   private readonly pending = new Map<string, PendingRequest<unknown>>();
   private readonly assignmentMessages = new Map<string, string>();
@@ -104,22 +104,22 @@ export class RuntimeV2WebSocketSession {
   private closed = false;
 
   constructor(
-    private readonly socket: RuntimeV2WebSocketLike,
-    private readonly options: RuntimeV2WebSocketSessionOptions = {},
+    private readonly socket: RuntimeWebSocketLike,
+    private readonly options: RuntimeWebSocketSessionOptions = {},
   ) {
     const timeout = options.requestTimeoutMs ?? 30_000;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300_000) {
-      throw new Error("OpenLinker runtime v2: WebSocket requestTimeoutMs is invalid");
+      throw new Error("OpenLinker Runtime: WebSocket requestTimeoutMs is invalid");
     }
     this.requestTimeoutMs = timeout;
   }
 
-  async start(hello: RuntimeV2HelloPayload): Promise<RuntimeV2ReadyPayload> {
+  async start(hello: RuntimeHelloPayload): Promise<RuntimeReadyPayload> {
     if (this.started || this.closed) {
-      throw new Error("OpenLinker runtime v2: WebSocket session already started or closed");
+      throw new Error("OpenLinker Runtime: WebSocket session already started or closed");
     }
     if (this.socket.readyState !== 1) {
-      throw new Error("OpenLinker runtime v2: authenticated WebSocket is not open");
+      throw new Error("OpenLinker Runtime: authenticated WebSocket is not open");
     }
     this.started = true;
     this.socket.onmessage = (event) => {
@@ -128,8 +128,8 @@ export class RuntimeV2WebSocketSession {
         .catch((error: unknown) => this.failProtocol(asError(error)));
     };
     this.socket.onerror = () => {
-      this.options.onError?.(new RuntimeV2WebSocketError(
-        "OpenLinker runtime v2: WebSocket transport error",
+      this.options.onError?.(new RuntimeWebSocketError(
+        "OpenLinker Runtime: WebSocket transport error",
         "TRANSPORT_ERROR",
         true,
       ));
@@ -137,23 +137,23 @@ export class RuntimeV2WebSocketSession {
     this.socket.onclose = (event) => this.handleClose(event);
 
     return this.requestOne(
-      RuntimeV2MessageTypes.hello,
-      encodeRuntimeV2Hello(hello),
-      new Set([RuntimeV2MessageTypes.ready]),
-      (envelope) => decodeRuntimeV2Ready(envelope.payload),
+      RuntimeMessageTypes.hello,
+      encodeRuntimeHello(hello),
+      new Set([RuntimeMessageTypes.ready]),
+      (envelope) => decodeRuntimeReady(envelope.payload),
     );
   }
 
-  ackAssignment(request: RuntimeV2AssignmentAckPayload): Promise<RuntimeV2AssignmentConfirmedPayload> {
+  ackAssignment(request: RuntimeAssignmentAckPayload): Promise<RuntimeAssignmentConfirmedPayload> {
     const replyTo = this.assignmentMessage(request.attemptIdentity);
     return this.requestOne(
-      RuntimeV2MessageTypes.assignmentAck,
-      encodeRuntimeV2AssignmentAck(request),
-      new Set([RuntimeV2MessageTypes.assignmentConfirmed]),
+      RuntimeMessageTypes.assignmentAck,
+      encodeRuntimeAssignmentAck(request),
+      new Set([RuntimeMessageTypes.assignmentConfirmed]),
       (envelope) => {
-        const confirmed = decodeRuntimeV2AssignmentConfirmed(envelope.payload);
-        if (!runtimeV2AttemptIdentityEqual(request.attemptIdentity, confirmed.attemptIdentity)) {
-          throw new Error("OpenLinker runtime v2: WebSocket assignment confirmation identity mismatch");
+        const confirmed = decodeRuntimeAssignmentConfirmed(envelope.payload);
+        if (!runtimeAttemptIdentityEqual(request.attemptIdentity, confirmed.attemptIdentity)) {
+          throw new Error("OpenLinker Runtime: WebSocket assignment confirmation identity mismatch");
         }
         return confirmed;
       },
@@ -161,16 +161,16 @@ export class RuntimeV2WebSocketSession {
     );
   }
 
-  rejectAssignment(request: RuntimeV2AssignmentRejectPayload): Promise<RuntimeV2AssignmentRejectedPayload> {
+  rejectAssignment(request: RuntimeAssignmentRejectPayload): Promise<RuntimeAssignmentRejectedPayload> {
     const replyTo = this.assignmentMessage(request.attemptIdentity);
     return this.requestOne(
-      RuntimeV2MessageTypes.assignmentReject,
-      encodeRuntimeV2AssignmentReject(request),
-      new Set([RuntimeV2MessageTypes.assignmentRejected]),
+      RuntimeMessageTypes.assignmentReject,
+      encodeRuntimeAssignmentReject(request),
+      new Set([RuntimeMessageTypes.assignmentRejected]),
       (envelope) => {
-        const rejected = decodeRuntimeV2AssignmentRejected(envelope.payload);
-        if (!runtimeV2AttemptIdentityEqual(request.attemptIdentity, rejected.attemptIdentity)) {
-          throw new Error("OpenLinker runtime v2: WebSocket assignment rejection identity mismatch");
+        const rejected = decodeRuntimeAssignmentRejected(envelope.payload);
+        if (!runtimeAttemptIdentityEqual(request.attemptIdentity, rejected.attemptIdentity)) {
+          throw new Error("OpenLinker Runtime: WebSocket assignment rejection identity mismatch");
         }
         return rejected;
       },
@@ -178,80 +178,80 @@ export class RuntimeV2WebSocketSession {
     );
   }
 
-  renewLease(request: RuntimeV2LeaseRenewPayload): Promise<RuntimeV2LeaseRenewedPayload> {
+  renewLease(request: RuntimeLeaseRenewPayload): Promise<RuntimeLeaseRenewedPayload> {
     return this.requestOne(
-      RuntimeV2MessageTypes.leaseRenew,
-      encodeRuntimeV2LeaseRenew(request),
-      new Set([RuntimeV2MessageTypes.leaseRenewed]),
+      RuntimeMessageTypes.leaseRenew,
+      encodeRuntimeLeaseRenew(request),
+      new Set([RuntimeMessageTypes.leaseRenewed]),
       (envelope) => {
-        const renewed = decodeRuntimeV2LeaseRenewed(envelope.payload);
-        if (!runtimeV2AttemptIdentityEqual(request.attemptIdentity, renewed.attemptIdentity)) {
-          throw new Error("OpenLinker runtime v2: WebSocket lease identity mismatch");
+        const renewed = decodeRuntimeLeaseRenewed(envelope.payload);
+        if (!runtimeAttemptIdentityEqual(request.attemptIdentity, renewed.attemptIdentity)) {
+          throw new Error("OpenLinker Runtime: WebSocket lease identity mismatch");
         }
         return renewed;
       },
     );
   }
 
-  appendEvent(request: RuntimeV2RunEventPayload): Promise<RuntimeV2RunEventAckPayload> {
+  appendEvent(request: RuntimeRunEventPayload): Promise<RuntimeRunEventAckPayload> {
     return this.requestOne(
-      RuntimeV2MessageTypes.runEvent,
-      encodeRuntimeV2Event(request),
-      new Set([RuntimeV2MessageTypes.runEventAck]),
+      RuntimeMessageTypes.runEvent,
+      encodeRuntimeEvent(request),
+      new Set([RuntimeMessageTypes.runEventAck]),
       (envelope) => {
-        const ack = decodeRuntimeV2EventAck(envelope.payload);
+        const ack = decodeRuntimeEventAck(envelope.payload);
         if (ack.clientEventId !== request.clientEventId || ack.clientEventSeq !== request.clientEventSeq) {
-          throw new Error("OpenLinker runtime v2: WebSocket Event ACK identity mismatch");
+          throw new Error("OpenLinker Runtime: WebSocket Event ACK identity mismatch");
         }
         return ack;
       },
     );
   }
 
-  finalizeResult(request: RuntimeV2RunResultPayload): Promise<RuntimeV2RunResultAckPayload> {
+  finalizeResult(request: RuntimeRunResultPayload): Promise<RuntimeRunResultAckPayload> {
     return this.requestOne(
-      RuntimeV2MessageTypes.runResult,
-      encodeRuntimeV2Result(request),
-      new Set([RuntimeV2MessageTypes.runResultAck]),
+      RuntimeMessageTypes.runResult,
+      encodeRuntimeResult(request),
+      new Set([RuntimeMessageTypes.runResultAck]),
       (envelope) => {
-        const ack = decodeRuntimeV2ResultAck(envelope.payload);
+        const ack = decodeRuntimeResultAck(envelope.payload);
         if (ack.resultId !== request.resultId) {
-          throw new Error("OpenLinker runtime v2: WebSocket Result ACK identity mismatch");
+          throw new Error("OpenLinker Runtime: WebSocket Result ACK identity mismatch");
         }
         return ack;
       },
     );
   }
 
-  async resume(request: RuntimeV2ResumePayload): Promise<RuntimeV2ResumeAcceptedPayload[]> {
+  async resume(request: RuntimeResumePayload): Promise<RuntimeResumeAcceptedPayload[]> {
     if (request.attempts.length < 1) {
-      throw new Error("OpenLinker runtime v2: WebSocket resume requires at least one Attempt");
+      throw new Error("OpenLinker Runtime: WebSocket resume requires at least one Attempt");
     }
     const decisions = await this.requestMany(
-      RuntimeV2MessageTypes.resume,
-      encodeRuntimeV2Resume(request),
-      new Set([RuntimeV2MessageTypes.resumeAccepted]),
+      RuntimeMessageTypes.resume,
+      encodeRuntimeResume(request),
+      new Set([RuntimeMessageTypes.resumeAccepted]),
       request.attempts.length,
-      (envelope) => decodeRuntimeV2ResumeAccepted(envelope.payload),
+      (envelope) => decodeRuntimeResumeAccepted(envelope.payload),
     );
     const byAttempt = new Map(decisions.map((decision) => [attemptKey(decision.attemptIdentity), decision]));
     return request.attempts.map((attempt) => {
       const decision = byAttempt.get(attemptKey(attempt.attemptIdentity));
       if (!decision) {
-        throw new Error("OpenLinker runtime v2: WebSocket resume response identity mismatch");
+        throw new Error("OpenLinker Runtime: WebSocket resume response identity mismatch");
       }
       return decision;
     });
   }
 
-  ackCancel(request: RuntimeV2RunCancelAckPayload): void {
+  ackCancel(request: RuntimeRunCancelAckPayload): void {
     const replyTo = this.cancellationMessages.get(cancelKey(request));
     if (!replyTo) {
-      throw new Error("OpenLinker runtime v2: cancellation command correlation is missing");
+      throw new Error("OpenLinker Runtime: cancellation command correlation is missing");
     }
     this.sendEnvelope(
-      RuntimeV2MessageTypes.runCancelAck,
-      encodeRuntimeV2CancelAck(request),
+      RuntimeMessageTypes.runCancelAck,
+      encodeRuntimeCancelAck(request),
       replyTo,
     );
   }
@@ -259,43 +259,43 @@ export class RuntimeV2WebSocketSession {
   close(code = 1000, reason = "runtime node stopped"): void {
     if (this.closed) return;
     if (!Number.isSafeInteger(code) || code < 1000 || code > 4999 || reason.length > 123) {
-      throw new Error("OpenLinker runtime v2: invalid WebSocket close");
+      throw new Error("OpenLinker Runtime: invalid WebSocket close");
     }
     this.socket.close(code, reason);
   }
 
   private requestOne<T>(
-    type: RuntimeV2MessageType,
+    type: RuntimeMessageType,
     payload: unknown,
-    expected: ReadonlySet<RuntimeV2MessageType>,
-    decode: (envelope: RuntimeV2DecodedEnvelope) => T,
+    expected: ReadonlySet<RuntimeMessageType>,
+    decode: (envelope: RuntimeDecodedEnvelope) => T,
     replyTo?: string,
   ): Promise<T> {
     return this.requestMany(type, payload, expected, 1, decode, replyTo).then((values) => {
       const value = values[0];
-      if (value === undefined) throw new Error("OpenLinker runtime v2: missing WebSocket reply");
+      if (value === undefined) throw new Error("OpenLinker Runtime: missing WebSocket reply");
       return value;
     });
   }
 
   private requestMany<T>(
-    type: RuntimeV2MessageType,
+    type: RuntimeMessageType,
     payload: unknown,
-    expected: ReadonlySet<RuntimeV2MessageType>,
+    expected: ReadonlySet<RuntimeMessageType>,
     count: number,
-    decode: (envelope: RuntimeV2DecodedEnvelope) => T,
+    decode: (envelope: RuntimeDecodedEnvelope) => T,
     replyTo?: string,
   ): Promise<T[]> {
     this.assertUsable();
     if (!Number.isSafeInteger(count) || count < 1 || count > 1024) {
-      return Promise.reject(new Error("OpenLinker runtime v2: invalid WebSocket reply count"));
+      return Promise.reject(new Error("OpenLinker Runtime: invalid WebSocket reply count"));
     }
     const messageId = runtimeUUID();
     return new Promise<T[]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(messageId);
-        reject(new RuntimeV2WebSocketError(
-          "OpenLinker runtime v2: WebSocket business ACK timed out",
+        reject(new RuntimeWebSocketError(
+          "OpenLinker Runtime: WebSocket business ACK timed out",
           "ACK_TIMEOUT",
           true,
         ));
@@ -321,78 +321,78 @@ export class RuntimeV2WebSocketSession {
   }
 
   private sendEnvelope(
-    type: RuntimeV2MessageType,
+    type: RuntimeMessageType,
     payload: unknown,
     replyTo?: string,
     messageId = runtimeUUID(),
   ): void {
     this.assertUsable();
-    const wire = encodeRuntimeV2Envelope(type, messageId, new Date().toISOString(), payload, replyTo);
+    const wire = encodeRuntimeEnvelope(type, messageId, new Date().toISOString(), payload, replyTo);
     const text = JSON.stringify(wire);
-    if (new TextEncoder().encode(text).byteLength > RuntimeV2MaxMessageBytes) {
-      throw new Error("OpenLinker runtime v2: WebSocket message exceeds 4 MiB");
+    if (new TextEncoder().encode(text).byteLength > RuntimeMaxMessageBytes) {
+      throw new Error("OpenLinker Runtime: WebSocket message exceeds 4 MiB");
     }
     this.socket.send(text);
   }
 
   private async handleMessage(data: unknown): Promise<void> {
     const text = await messageText(data);
-    if (new TextEncoder().encode(text).byteLength > RuntimeV2MaxMessageBytes) {
-      throw new Error("OpenLinker runtime v2: WebSocket message exceeds 4 MiB");
+    if (new TextEncoder().encode(text).byteLength > RuntimeMaxMessageBytes) {
+      throw new Error("OpenLinker Runtime: WebSocket message exceeds 4 MiB");
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;
     } catch (cause) {
-      throw new Error("OpenLinker runtime v2: WebSocket frame is not JSON", { cause });
+      throw new Error("OpenLinker Runtime: WebSocket frame is not JSON", { cause });
     }
-    const envelope = decodeRuntimeV2Envelope(parsed);
+    const envelope = decodeRuntimeEnvelope(parsed);
     if (envelope.replyToMessageId) {
       this.handleReply(envelope);
       return;
     }
     switch (envelope.type) {
-      case RuntimeV2MessageTypes.runAssigned: {
-        const assignment = decodeRuntimeV2Assignment(envelope.payload);
+      case RuntimeMessageTypes.runAssigned: {
+        const assignment = decodeRuntimeAssignment(envelope.payload);
         rememberBounded(this.assignmentMessages, attemptKey(assignment.attemptIdentity), envelope.messageId);
         await this.options.onAssigned?.(assignment);
         return;
       }
-      case RuntimeV2MessageTypes.runCancel:
-      case RuntimeV2MessageTypes.drain:
-      case RuntimeV2MessageTypes.leaseRevoked: {
-        const command = decodeRuntimeV2PendingCommand({ type: envelope.type, payload: envelope.payload });
-        if (command.type === RuntimeV2MessageTypes.runCancel) {
+      case RuntimeMessageTypes.runCancel:
+      case RuntimeMessageTypes.drain:
+      case RuntimeMessageTypes.leaseRevoked: {
+        const command = decodeRuntimePendingCommand({ type: envelope.type, payload: envelope.payload });
+        if (command.type === RuntimeMessageTypes.runCancel) {
           rememberBounded(this.cancellationMessages, cancelKey(command.payload), envelope.messageId);
         }
         await this.options.onCommand?.(command);
         return;
       }
-      case RuntimeV2MessageTypes.error: {
+      case RuntimeMessageTypes.error: {
         const error = websocketError(envelope);
         this.options.onError?.(error);
         return;
       }
       default:
-        throw new Error(`OpenLinker runtime v2: unexpected uncorrelated ${envelope.type} message`);
+        throw new Error(`OpenLinker Runtime: unexpected uncorrelated ${envelope.type} message`);
     }
   }
 
-  private handleReply(envelope: RuntimeV2DecodedEnvelope): void {
+  private handleReply(envelope: RuntimeDecodedEnvelope): void {
     const correlation = envelope.replyToMessageId;
-    if (!correlation) throw new Error("OpenLinker runtime v2: WebSocket reply has no correlation ID");
+    if (!correlation) throw new Error("OpenLinker Runtime: WebSocket reply has no correlation ID");
     const pending = this.pending.get(correlation);
     if (!pending) {
-      throw new Error("OpenLinker runtime v2: WebSocket reply references an unknown request");
+      throw new Error("OpenLinker Runtime: WebSocket reply references an unknown request");
     }
-    if (envelope.type === RuntimeV2MessageTypes.error) {
+    if (envelope.type === RuntimeMessageTypes.error) {
       clearTimeout(pending.timer);
       this.pending.delete(correlation);
       pending.reject(websocketError(envelope));
       return;
     }
     if (!pending.expected.has(envelope.type)) {
-      throw new Error(`OpenLinker runtime v2: unexpected ${envelope.type} business ACK`);
+      throw new Error(`OpenLinker Runtime: unexpected ${envelope.type} business ACK`);
     }
     const decoded = pending.decode(envelope);
     pending.values.push(decoded);
@@ -403,18 +403,18 @@ export class RuntimeV2WebSocketSession {
     pending.resolve(pending.values);
   }
 
-  private assignmentMessage(identity: RuntimeV2AttemptIdentity): string {
+  private assignmentMessage(identity: RuntimeAttemptIdentity): string {
     const messageId = this.assignmentMessages.get(attemptKey(identity));
     if (!messageId) {
-      throw new Error("OpenLinker runtime v2: assignment correlation is missing");
+      throw new Error("OpenLinker Runtime: assignment correlation is missing");
     }
     return messageId;
   }
 
   private assertUsable(): void {
     if (!this.started || this.closed || this.socket.readyState !== 1) {
-      throw new RuntimeV2WebSocketError(
-        "OpenLinker runtime v2: WebSocket session is not open",
+      throw new RuntimeWebSocketError(
+        "OpenLinker Runtime: WebSocket session is not open",
         "TRANSPORT_CLOSED",
         true,
       );
@@ -424,7 +424,7 @@ export class RuntimeV2WebSocketSession {
   private failProtocol(error: Error): void {
     this.options.onError?.(error);
     try {
-      this.socket.close(1002, "runtime v2 protocol error");
+      this.socket.close(1002, "Runtime protocol error");
     } catch {
       this.rejectPending(error);
     }
@@ -433,8 +433,8 @@ export class RuntimeV2WebSocketSession {
   private handleClose(event: CloseEvent): void {
     if (this.closed) return;
     this.closed = true;
-    const error = new RuntimeV2WebSocketError(
-      event.reason || "OpenLinker runtime v2: WebSocket closed",
+    const error = new RuntimeWebSocketError(
+      event.reason || "OpenLinker Runtime: WebSocket closed",
       closeCodeReason(event.code),
       event.code === 1006 || event.code === 1011,
       event.code,
@@ -452,12 +452,12 @@ export class RuntimeV2WebSocketSession {
   }
 }
 
-function websocketError(envelope: RuntimeV2DecodedEnvelope): RuntimeV2WebSocketError {
-  const body = decodeRuntimeV2ErrorEnvelope({ error: envelope.payload }).error;
-  return new RuntimeV2WebSocketError(body.message, body.code, body.retryable ?? false);
+function websocketError(envelope: RuntimeDecodedEnvelope): RuntimeWebSocketError {
+  const body = decodeRuntimeErrorEnvelope({ error: envelope.payload }).error;
+  return new RuntimeWebSocketError(body.message, body.code, body.retryable ?? false);
 }
 
-function attemptKey(identity: RuntimeV2AttemptIdentity): string {
+function attemptKey(identity: RuntimeAttemptIdentity): string {
   return [
     identity.runId,
     identity.attemptId,
@@ -470,7 +470,7 @@ function attemptKey(identity: RuntimeV2AttemptIdentity): string {
   ].join("\u0000");
 }
 
-function cancelKey(value: RuntimeV2RunCancelAckPayload | { cancellationId: string; attemptIdentity: RuntimeV2AttemptIdentity }): string {
+function cancelKey(value: RuntimeRunCancelAckPayload | { cancellationId: string; attemptIdentity: RuntimeAttemptIdentity }): string {
   return `${value.cancellationId}\u0000${attemptKey(value.attemptIdentity)}`;
 }
 
@@ -491,7 +491,7 @@ async function messageText(data: unknown): Promise<string> {
       new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
     );
   }
-  throw new Error("OpenLinker runtime v2: unsupported WebSocket frame type");
+  throw new Error("OpenLinker Runtime: unsupported WebSocket frame type");
 }
 
 function runtimeUUID(): string {

@@ -42,7 +42,8 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
-  Core -->|"Runtime assignment and cancellation"| AgentNode["openlinker-agent-node"]
+  Core -->|"Runtime assignment and cancellation"| RuntimeSDK
+  AgentNode["openlinker-agent-node<br/>optional adapter shell"] -.-> RuntimeSDK
 ```
 
 ## Quick Start
@@ -139,72 +140,72 @@ SSE continues to use `streamRunEvents` unchanged.
 
 ## OpenLinker Runtime
 
-Runtime workers use `OPENLINKER_AGENT_TOKEN` through the strict OpenLinker
-Runtime entry:
+`RuntimeWorker` is the production entry for a self-hosted Agent process. It
+discovers the dedicated Runtime origin, loads the Node mTLS identity, prefers
+WebSocket, recovers through HTTP pull, manages the Session and leases, and
+persists every assignment, Event, and Result before acknowledging it. The
+handler is called only after Core confirms the assignment.
 
 ```ts
 import {
-  OpenLinkerRuntime,
-  RuntimeContractDigest,
-  RuntimeRequiredFeatures,
+  RuntimeWorker,
 } from "@openlinker/sdk/runtime";
 
-const agentToken = process.env.OPENLINKER_AGENT_TOKEN;
-if (!agentToken) {
-  throw new Error("OPENLINKER_AGENT_TOKEN is required");
-}
-
-const runtime = new OpenLinkerRuntime({
-  // Dedicated Runtime origin. The supplied transport must present the Node certificate.
-  baseUrl: "https://runtime.example.com:8443",
-  agentToken,
-});
-
-const runtimeSessionId = crypto.randomUUID();
-const hello = {
+const worker = new RuntimeWorker({
+  platformURL: "https://openlinker.example.com",
   nodeId: process.env.OPENLINKER_NODE_ID!,
   agentId: process.env.OPENLINKER_AGENT_ID!,
-  workerId: "worker-1",
-  runtimeSessionId,
-  sessionEpoch: 1,
-  nodeVersion: "0.2.0",
+  agentToken: process.env.OPENLINKER_AGENT_TOKEN!,
   capacity: 1,
-  features: RuntimeRequiredFeatures,
-  contractDigest: RuntimeContractDigest,
-};
-
-await runtime.createRuntimeV2Session(hello);
-const assignment = await runtime.claimRuntimeV2Run(25, {
-  runtimeSessionId,
-  capacity: 1,
-  inflight: 0,
+  transport: "auto",
+  dataDir: "/var/lib/my-agent/runtime",
+  mtls: {
+    certFile: "/run/openlinker/node.crt",
+    keyFile: "/run/openlinker/node.key",
+    caFile: "/run/openlinker/core-ca.crt",
+  },
+  async handler(run) {
+    await run.emit("run.message.delta", { text: "working" });
+    return { output: { answer: 42 } };
+  },
 });
 
-if (assignment) {
-  await runtime.ackRuntimeV2Assignment({
-    attemptIdentity: assignment.attemptIdentity,
-  });
-  // Execute through a durable worker that renews the lease, persists events,
-  // handles cancellation, and finalizes the result with the same identity.
-}
+await worker.start();
 ```
 
-`OpenLinkerClient` rejects `agentToken`. `OpenLinkerRuntime` exposes strict
-Runtime protocol primitives only; durable spooling, lease scheduling, execution, and
-recovery remain worker responsibilities.
+By default the worker creates an encrypted `FileRuntimeStore` in `dataDir`.
+The store owns a stable Worker identity and monotonic Session epoch, uses an
+exclusive process lock, atomic fsync-backed writes, authenticated encryption,
+private file modes, and fail-closed corruption and capacity checks.
+`MemoryRuntimeStore` is only accepted when `allowUnsafeMemoryStore: true` is
+set explicitly; it is intended for tests, not production.
 
-For the WebSocket transport, pass an already-open, authenticated socket to
-`RuntimeV2WebSocketSession`. The socket upgrade must present the Node client
-certificate and `Authorization: Bearer <Agent Token>`; the SDK never places a
-credential in the URL. The session implements hello/ready, pushed assignment
-and cancellation, correlated assignment/lease/Event/Result ACKs, and resume.
-Workers still persist an assignment before ACK and persist every Event/Result
-before sending it. Use `openlinker-agent-node` when you need automatic
-WebSocket-to-long-poll switching and durable recovery.
+`transport: "auto"` starts with WebSocket, falls back to pull after a socket
+failure, and probes WebSocket again while pull remains available. `"ws"` and
+`"pull"` pin one transport. A stale Session attachment conflict is retried
+during Session creation or the initial WebSocket attach while Core reaps it;
+the same conflict after Ready is a permanent business error. Cancellation and
+lease revocation are matched against the complete Attempt identity. A
+persisted `started` Attempt is never
+re-entered after process restart; the worker fails closed instead of risking
+duplicate execution. `run.callAgent(...)` requires an explicit idempotency key
+and uses only the assignment-scoped invocation capability.
 
 The canonical WebSocket endpoint is `/api/v1/agent-runtime/ws`; HTTP methods
-use the `/api/v1/agent-runtime/` prefix. Protocol version 2 remains in the
-handshake contract and `RuntimeV2*` SDK API, not in the URL.
+use the `/api/v1/agent-runtime/` prefix. Public API names and URLs are neutral;
+wire compatibility is negotiated inside the handshake contract.
+
+For protocol-level integrations, `OpenLinkerRuntime` exposes the strict HTTP
+methods (`createRuntimeSession`, `claimRuntimeRun`, assignment ACK/reject,
+renew, Event/Result upload, resume, command polling, cancellation ACK, and
+`callRuntimeAgent`). `RuntimeWebSocketSession` exposes the correlated WebSocket
+business messages over an already authenticated socket. The server-only
+`@openlinker/sdk/runtime` entry also exports `NodeRuntimeTransport` for Node 20
+mTLS. The default `@openlinker/sdk` entry imports none of the filesystem, TLS,
+Undici, or WebSocket worker dependencies.
+
+`openlinker-agent-node` is an optional adapter shell for HTTP, command, Codex,
+or A2A handlers. It does not own a second Runtime state machine.
 
 ## Callbacks
 
@@ -266,13 +267,13 @@ gRPC callers, use `github.com/OpenLinker-ai/openlinker-go` or a separate
 Node-only generated client.
 
 Operationally, gRPC is an additional A2A transport binding. It does not replace
-JSON-RPC, HTTP+JSON/SSE, or the separate Agent Node OpenLinker Runtime control plane.
+JSON-RPC, HTTP+JSON/SSE, or the separate OpenLinker Runtime control plane.
 
 ## Core Surface
 
 The interim contract source is
 [`contracts/core-client.v1.json`](./contracts/core-client.v1.json) and
-[`contracts/core-runtime.v2.json`](./contracts/core-runtime.v2.json). They list
+[`contracts/core-runtime.json`](./contracts/core-runtime.json). They list
 the Core endpoints this package is allowed to wrap until OpenAPI or JSON Schema
 generation is in place.
 
@@ -291,22 +292,15 @@ Application-side calls:
 - `listRunMessages`
 - `streamRunEvents`
 
-Strict Runtime v2 protocol, from `@openlinker/sdk/runtime`:
+Reliable Worker and strict Runtime protocol, from `@openlinker/sdk/runtime`:
 
-- `createRuntimeV2Session`
-- `heartbeatRuntimeV2Session`
-- `closeRuntimeV2Session`
-- `claimRuntimeV2Run`
-- `ackRuntimeV2Assignment`
-- `rejectRuntimeV2Assignment`
-- `renewRuntimeV2Lease`
-- `appendRuntimeV2Event`
-- `finalizeRuntimeV2Result`
-- `resumeRuntimeV2Runs`
-- `pollRuntimeV2Commands`
-- `ackRuntimeV2Cancel`
-- `callRuntimeV2Agent`
-- `buildRuntimeV2InvocationProof`
+- `RuntimeWorker`, `FileRuntimeStore`, and explicit-test `MemoryRuntimeStore`
+- `OpenLinkerRuntime` and `RuntimeWebSocketSession`
+- `createRuntimeSession`, heartbeat, close, and `claimRuntimeRun`
+- `ackRuntimeAssignment`, `rejectRuntimeAssignment`, and `renewRuntimeLease`
+- `appendRuntimeEvent`, `finalizeRuntimeResult`, and `resumeRuntimeRuns`
+- `pollRuntimeCommands`, `ackRuntimeCancel`, and `callRuntimeAgent`
+- `buildRuntimeInvocationProof`
 
 ## Development
 

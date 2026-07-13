@@ -1,65 +1,65 @@
 import {
   RuntimeContractDigest,
   RuntimeRequiredFeatures,
-  RuntimeV2AssignmentRejectReasons,
-  RuntimeV2CancelStates,
-  RuntimeV2MaxMessageBytes,
-  RuntimeV2MaxNodeCapacity,
-  RuntimeV2MaxPullWaitSeconds,
-  RuntimeV2MaxResumeAttempts,
-  RuntimeV2MessageTypes,
-  RuntimeV2ResumeActions,
-  RuntimeV2ResumeDecisions,
-  type RuntimeV2AssignmentAckPayload,
-  type RuntimeV2AssignmentConfirmedPayload,
-  type RuntimeV2AssignmentRejectPayload,
-  type RuntimeV2AssignmentRejectedPayload,
-  type RuntimeV2AttemptIdentity,
-  type RuntimeV2CallAgentRequest,
-  type RuntimeV2RunSummary,
-  type RuntimeV2ClaimRequest,
-  type RuntimeV2CommandsResponse,
-  type RuntimeV2CancelState,
-  type RuntimeV2DispatchState,
-  type RuntimeV2DrainPayload,
-  type RuntimeV2ErrorBody,
-  type RuntimeV2ErrorCode,
-  type RuntimeV2ErrorEnvelope,
-  type RuntimeV2EventRange,
-  type RuntimeV2HelloPayload,
-  type RuntimeV2LeaseRenewedPayload,
-  type RuntimeV2LeaseRenewPayload,
-  type RuntimeV2MessageType,
-  type RuntimeV2PendingCommand,
-  type RuntimeV2ReadyPayload,
-  type RuntimeV2ResumeAcceptedPayload,
-  type RuntimeV2ResumeAction,
-  type RuntimeV2ResumeDecision,
-  type RuntimeV2ResumePayload,
-  type RuntimeV2ResumeResponse,
-  type RuntimeV2ResultClassification,
-  type RuntimeV2RunAssignedPayload,
-  type RuntimeV2RunCancelPayload,
-  type RuntimeV2RunCancelAckPayload,
-  type RuntimeV2RunCancellationState,
-  type RuntimeV2RunEventAckPayload,
-  type RuntimeV2RunEventPayload,
-  type RuntimeV2RunLeaseRevokedPayload,
-  type RuntimeV2RunResultAckPayload,
-  type RuntimeV2RunResultPayload,
-  type RuntimeV2RunStatus,
-  type RuntimeV2SessionCloseRequest,
-} from "./runtime-v2-types.js";
+  RuntimeAssignmentRejectReasons,
+  RuntimeCancelStates,
+  RuntimeMaxMessageBytes,
+  RuntimeMaxNodeCapacity,
+  RuntimeMaxPullWaitSeconds,
+  RuntimeMaxResumeAttempts,
+  RuntimeMessageTypes,
+  RuntimeResumeActions,
+  RuntimeResumeDecisions,
+  type RuntimeAssignmentAckPayload,
+  type RuntimeAssignmentConfirmedPayload,
+  type RuntimeAssignmentRejectPayload,
+  type RuntimeAssignmentRejectedPayload,
+  type RuntimeAttemptIdentity,
+  type RuntimeCallAgentRequest,
+  type RuntimeRunSummary,
+  type RuntimeClaimRequest,
+  type RuntimeCommandsResponse,
+  type RuntimeCancelState,
+  type RuntimeDispatchState,
+  type RuntimeDrainPayload,
+  type RuntimeErrorBody,
+  type RuntimeErrorCode,
+  type RuntimeErrorEnvelope,
+  type RuntimeEventRange,
+  type RuntimeHelloPayload,
+  type RuntimeLeaseRenewedPayload,
+  type RuntimeLeaseRenewPayload,
+  type RuntimeMessageType,
+  type RuntimePendingCommand,
+  type RuntimeReadyPayload,
+  type RuntimeResumeAcceptedPayload,
+  type RuntimeResumeAction,
+  type RuntimeResumeDecision,
+  type RuntimeResumePayload,
+  type RuntimeResumeResponse,
+  type RuntimeResultClassification,
+  type RuntimeRunAssignedPayload,
+  type RuntimeRunCancelPayload,
+  type RuntimeRunCancelAckPayload,
+  type RuntimeRunCancellationState,
+  type RuntimeRunEventAckPayload,
+  type RuntimeRunEventPayload,
+  type RuntimeRunLeaseRevokedPayload,
+  type RuntimeRunResultAckPayload,
+  type RuntimeRunResultPayload,
+  type RuntimeRunStatus,
+  type RuntimeSessionCloseRequest,
+} from "./runtime-types.js";
 import type { JsonObject } from "./types.js";
 
-type RuntimeV2WireObject = Record<string, unknown>;
+type RuntimeWireObject = Record<string, unknown>;
 
-export interface RuntimeV2DecodedEnvelope {
+export interface RuntimeDecodedEnvelope {
   protocolVersion: number;
   runtimeContractId: string;
   messageId: string;
   replyToMessageId?: string;
-  type: RuntimeV2MessageType;
+  type: RuntimeMessageType;
   sentAt: string;
   payload: unknown;
 }
@@ -69,16 +69,16 @@ const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const EVENT_TYPE_PATTERN = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
 
-const DISPATCH_STATES = new Set<RuntimeV2DispatchState>([
+const DISPATCH_STATES = new Set<RuntimeDispatchState>([
   "pending", "offered", "executing", "retry_wait", "terminal", "dead_letter",
 ]);
-const RUN_STATUSES = new Set<RuntimeV2RunStatus>([
+const RUN_STATUSES = new Set<RuntimeRunStatus>([
   "running", "success", "failed", "timeout", "canceled",
 ]);
-const RESULT_CLASSIFICATIONS = new Set<RuntimeV2ResultClassification>([
+const RESULT_CLASSIFICATIONS = new Set<RuntimeResultClassification>([
   "success", "retryable_failure", "non_retryable_failure", "timeout", "canceled", "dead_letter",
 ]);
-const ERROR_CODES = new Set<RuntimeV2ErrorCode>([
+const ERROR_CODES = new Set<RuntimeErrorCode>([
   "BAD_REQUEST", "UNAUTHORIZED", "FORBIDDEN", "PERMISSION_DENIED", "NOT_FOUND", "CONFLICT",
   "VALIDATION_FAILED", "RATE_LIMITED", "INTERNAL_ERROR", "SERVICE_UNAVAILABLE",
   "IDEMPOTENCY_KEY_REUSED", "RUN_ALREADY_TERMINAL", "STALE_LEASE", "LEASE_EXPIRED",
@@ -89,16 +89,16 @@ const ERROR_CODES = new Set<RuntimeV2ErrorCode>([
   "RUNTIME_SESSION_CONFLICT", "RUNTIME_SPOOL_CORRUPT",
 ]);
 
-export async function readRuntimeV2JSON(response: Response): Promise<unknown> {
+export async function readRuntimeJSON(response: Response): Promise<unknown> {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null) {
     const parsed = Number(declaredLength);
-    if (Number.isFinite(parsed) && parsed > RuntimeV2MaxMessageBytes) {
-      throw runtimeV2Error("response exceeds 4 MiB");
+    if (Number.isFinite(parsed) && parsed > RuntimeMaxMessageBytes) {
+      throw runtimeError("response exceeds 4 MiB");
     }
   }
   if (!response.body) {
-    throw runtimeV2Error("response body is empty");
+    throw runtimeError("response body is empty");
   }
 
   const reader = response.body.getReader();
@@ -111,9 +111,9 @@ export async function readRuntimeV2JSON(response: Response): Promise<unknown> {
       if (done) break;
       if (!value) continue;
       bytesRead += value.byteLength;
-      if (bytesRead > RuntimeV2MaxMessageBytes) {
+      if (bytesRead > RuntimeMaxMessageBytes) {
         await reader.cancel();
-        throw runtimeV2Error("response exceeds 4 MiB");
+        throw runtimeError("response exceeds 4 MiB");
       }
       text += decoder.decode(value, { stream: true });
     }
@@ -122,36 +122,36 @@ export async function readRuntimeV2JSON(response: Response): Promise<unknown> {
     reader.releaseLock();
   }
   if (!text.trim()) {
-    throw runtimeV2Error("response body is empty");
+    throw runtimeError("response body is empty");
   }
   try {
     return JSON.parse(text) as unknown;
   } catch (cause) {
-    throw runtimeV2Error("response is not one complete JSON value", cause);
+    throw runtimeError("response is not one complete JSON value", cause);
   }
 }
 
-export function assertRuntimeV2WaitSeconds(value: number): void {
-  assertInteger(value, 0, RuntimeV2MaxPullWaitSeconds, "waitSeconds");
+export function assertRuntimeWaitSeconds(value: number): void {
+  assertInteger(value, 0, RuntimeMaxPullWaitSeconds, "waitSeconds");
 }
 
-export function assertRuntimeV2UUID(value: unknown, label: string): string {
+export function assertRuntimeUUID(value: unknown, label: string): string {
   return assertUUID(value, label);
 }
 
-export function encodeRuntimeV2Envelope(
-  type: RuntimeV2MessageType,
+export function encodeRuntimeEnvelope(
+  type: RuntimeMessageType,
   messageId: string,
   sentAt: string,
   payload: unknown,
   replyToMessageId?: string,
-): RuntimeV2WireObject {
-  if (!Object.values(RuntimeV2MessageTypes).includes(type)) {
-    throw runtimeV2Error("envelope.type is invalid");
+): RuntimeWireObject {
+  if (!Object.values(RuntimeMessageTypes).includes(type)) {
+    throw runtimeError("envelope.type is invalid");
   }
   assertUUID(messageId, "envelope.messageId");
   assertTimestamp(sentAt, "envelope.sentAt");
-  const wire: RuntimeV2WireObject = {
+  const wire: RuntimeWireObject = {
     protocol_version: 2,
     runtime_contract_id: "openlinker.runtime.v2",
     message_id: messageId,
@@ -165,23 +165,23 @@ export function encodeRuntimeV2Envelope(
   return wire;
 }
 
-export function decodeRuntimeV2Envelope(value: unknown): RuntimeV2DecodedEnvelope {
+export function decodeRuntimeEnvelope(value: unknown): RuntimeDecodedEnvelope {
   const object = exactObject(value, [
     "protocol_version", "runtime_contract_id", "message_id", "type", "sent_at", "payload",
   ], ["reply_to_message_id"], "Runtime envelope");
   if (object.protocol_version !== 2 || object.runtime_contract_id !== "openlinker.runtime.v2") {
-    throw runtimeV2Error("Runtime envelope contract does not match v2");
+    throw runtimeError("Runtime envelope contract is not supported");
   }
-  if (typeof object.type !== "string" || !Object.values(RuntimeV2MessageTypes).includes(
-    object.type as RuntimeV2MessageType,
+  if (typeof object.type !== "string" || !Object.values(RuntimeMessageTypes).includes(
+    object.type as RuntimeMessageType,
   )) {
-    throw runtimeV2Error("Runtime envelope.type is invalid");
+    throw runtimeError("Runtime envelope.type is invalid");
   }
-  const decoded: RuntimeV2DecodedEnvelope = {
+  const decoded: RuntimeDecodedEnvelope = {
     protocolVersion: 2,
     runtimeContractId: "openlinker.runtime.v2",
     messageId: assertUUID(object.message_id, "Runtime envelope.message_id"),
-    type: object.type as RuntimeV2MessageType,
+    type: object.type as RuntimeMessageType,
     sentAt: assertTimestamp(object.sent_at, "Runtime envelope.sent_at"),
     payload: object.payload,
   };
@@ -194,7 +194,7 @@ export function decodeRuntimeV2Envelope(value: unknown): RuntimeV2DecodedEnvelop
   return decoded;
 }
 
-export function encodeRuntimeV2Hello(value: RuntimeV2HelloPayload): RuntimeV2WireObject {
+export function encodeRuntimeHello(value: RuntimeHelloPayload): RuntimeWireObject {
   exactObject(value, [
     "nodeId", "agentId", "workerId", "runtimeSessionId", "sessionEpoch",
     "nodeVersion", "capacity", "features", "contractDigest",
@@ -208,7 +208,7 @@ export function encodeRuntimeV2Hello(value: RuntimeV2HelloPayload): RuntimeV2Wir
   assertCapacity(value.capacity, "hello.capacity");
   const features = assertFeatures(value.features, true, "hello.features");
   if (value.contractDigest !== RuntimeContractDigest) {
-    throw runtimeV2Error("hello.contractDigest does not match the packaged contract");
+    throw runtimeError("hello.contractDigest does not match the packaged contract");
   }
   return {
     node_id: value.nodeId,
@@ -223,7 +223,7 @@ export function encodeRuntimeV2Hello(value: RuntimeV2HelloPayload): RuntimeV2Wir
   };
 }
 
-export function decodeRuntimeV2Ready(value: unknown): RuntimeV2ReadyPayload {
+export function decodeRuntimeReady(value: unknown): RuntimeReadyPayload {
   const object = exactObject(value, [
     "core_instance_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time",
   ], [], "ready response");
@@ -235,7 +235,7 @@ export function decodeRuntimeV2Ready(value: unknown): RuntimeV2ReadyPayload {
   return { coreInstanceId, features, offerTtlSeconds, leaseTtlSeconds, databaseTime };
 }
 
-export function encodeRuntimeV2SessionClose(value: RuntimeV2SessionCloseRequest): RuntimeV2WireObject {
+export function encodeRuntimeSessionClose(value: RuntimeSessionCloseRequest): RuntimeWireObject {
   exactObject(value, [
     "nodeId", "agentId", "workerId", "runtimeSessionId", "sessionEpoch", "status", "reason",
   ], [], "session close");
@@ -245,7 +245,7 @@ export function encodeRuntimeV2SessionClose(value: RuntimeV2SessionCloseRequest)
   assertUUID(value.runtimeSessionId, "session close.runtimeSessionId");
   assertInteger(value.sessionEpoch, 1, undefined, "session close.sessionEpoch");
   if (value.status !== "offline" && value.status !== "closed") {
-    throw runtimeV2Error("session close.status is invalid");
+    throw runtimeError("session close.status is invalid");
   }
   assertText(value.reason, 200, "session close.reason");
   return {
@@ -259,7 +259,7 @@ export function encodeRuntimeV2SessionClose(value: RuntimeV2SessionCloseRequest)
   };
 }
 
-export function encodeRuntimeV2Claim(value: RuntimeV2ClaimRequest): RuntimeV2WireObject {
+export function encodeRuntimeClaim(value: RuntimeClaimRequest): RuntimeWireObject {
   exactObject(value, ["runtimeSessionId", "capacity", "inflight"], [], "claim");
   assertUUID(value.runtimeSessionId, "claim.runtimeSessionId");
   assertCapacity(value.capacity, "claim.capacity");
@@ -271,12 +271,12 @@ export function encodeRuntimeV2Claim(value: RuntimeV2ClaimRequest): RuntimeV2Wir
   };
 }
 
-export function decodeRuntimeV2Assignment(value: unknown): RuntimeV2RunAssignedPayload {
+export function decodeRuntimeAssignment(value: unknown): RuntimeRunAssignedPayload {
   const object = exactObject(value, [
     "attempt_identity", "offer_no", "offer_expires_at", "attempt_deadline_at",
     "run_deadline_at", "input", "node_envelope", "agent_invocation_token",
   ], ["metadata"], "assignment response");
-  const assigned: RuntimeV2RunAssignedPayload = {
+  const assigned: RuntimeRunAssignedPayload = {
     attemptIdentity: decodeAttemptIdentity(object.attempt_identity, "assignment.attempt_identity"),
     offerNo: assertInteger(object.offer_no, 1, undefined, "assignment.offer_no"),
     offerExpiresAt: assertTimestamp(object.offer_expires_at, "assignment.offer_expires_at"),
@@ -292,12 +292,12 @@ export function decodeRuntimeV2Assignment(value: unknown): RuntimeV2RunAssignedP
   return assigned;
 }
 
-export function encodeRuntimeV2AssignmentAck(value: RuntimeV2AssignmentAckPayload): RuntimeV2WireObject {
+export function encodeRuntimeAssignmentAck(value: RuntimeAssignmentAckPayload): RuntimeWireObject {
   exactObject(value, ["attemptIdentity"], [], "assignment ACK");
   return { attempt_identity: encodeAttemptIdentity(value.attemptIdentity, "assignment ACK.attemptIdentity") };
 }
 
-export function decodeRuntimeV2AssignmentConfirmed(value: unknown): RuntimeV2AssignmentConfirmedPayload {
+export function decodeRuntimeAssignmentConfirmed(value: unknown): RuntimeAssignmentConfirmedPayload {
   const object = exactObject(value, ["attempt_identity", "attempt_no", "lease_expires_at"], [], "assignment confirmation");
   return {
     attemptIdentity: decodeAttemptIdentity(object.attempt_identity, "assignment confirmation.attempt_identity"),
@@ -306,10 +306,10 @@ export function decodeRuntimeV2AssignmentConfirmed(value: unknown): RuntimeV2Ass
   };
 }
 
-export function encodeRuntimeV2AssignmentReject(value: RuntimeV2AssignmentRejectPayload): RuntimeV2WireObject {
+export function encodeRuntimeAssignmentReject(value: RuntimeAssignmentRejectPayload): RuntimeWireObject {
   exactObject(value, ["attemptIdentity", "reasonCode", "capacity", "inflight"], [], "assignment rejection");
-  if (!Object.values(RuntimeV2AssignmentRejectReasons).includes(value.reasonCode)) {
-    throw runtimeV2Error("assignment rejection.reasonCode is invalid");
+  if (!Object.values(RuntimeAssignmentRejectReasons).includes(value.reasonCode)) {
+    throw runtimeError("assignment rejection.reasonCode is invalid");
   }
   assertCapacity(value.capacity, "assignment rejection.capacity");
   assertCapacity(value.inflight, "assignment rejection.inflight");
@@ -321,11 +321,11 @@ export function encodeRuntimeV2AssignmentReject(value: RuntimeV2AssignmentReject
   };
 }
 
-export function decodeRuntimeV2AssignmentRejected(value: unknown): RuntimeV2AssignmentRejectedPayload {
+export function decodeRuntimeAssignmentRejected(value: unknown): RuntimeAssignmentRejectedPayload {
   const object = exactObject(value, ["attempt_identity", "outcome", "dispatch_state"], [], "assignment rejection response");
   const outcome = object.outcome;
   if (outcome !== "offer_rejected" && outcome !== "lease_revoked") {
-    throw runtimeV2Error("assignment rejection response.outcome is invalid");
+    throw runtimeError("assignment rejection response.outcome is invalid");
   }
   return {
     attemptIdentity: decodeAttemptIdentity(object.attempt_identity, "assignment rejection response.attempt_identity"),
@@ -334,7 +334,7 @@ export function decodeRuntimeV2AssignmentRejected(value: unknown): RuntimeV2Assi
   };
 }
 
-export function encodeRuntimeV2LeaseRenew(value: RuntimeV2LeaseRenewPayload): RuntimeV2WireObject {
+export function encodeRuntimeLeaseRenew(value: RuntimeLeaseRenewPayload): RuntimeWireObject {
   exactObject(value, ["attemptIdentity", "lastClientEventSeq", "capacity", "inflight"], [], "lease renewal");
   assertInteger(value.lastClientEventSeq, 0, undefined, "lease renewal.lastClientEventSeq");
   assertCapacity(value.capacity, "lease renewal.capacity");
@@ -347,9 +347,9 @@ export function encodeRuntimeV2LeaseRenew(value: RuntimeV2LeaseRenewPayload): Ru
   };
 }
 
-export function decodeRuntimeV2LeaseRenewed(value: unknown): RuntimeV2LeaseRenewedPayload {
+export function decodeRuntimeLeaseRenewed(value: unknown): RuntimeLeaseRenewedPayload {
   const object = exactObject(value, ["attempt_identity", "lease_expires_at"], ["pending_command"], "lease renewal response");
-  const renewed: RuntimeV2LeaseRenewedPayload = {
+  const renewed: RuntimeLeaseRenewedPayload = {
     attemptIdentity: decodeAttemptIdentity(object.attempt_identity, "lease renewal response.attempt_identity"),
     leaseExpiresAt: assertTimestamp(object.lease_expires_at, "lease renewal response.lease_expires_at"),
   };
@@ -361,13 +361,13 @@ export function decodeRuntimeV2LeaseRenewed(value: unknown): RuntimeV2LeaseRenew
   return renewed;
 }
 
-export function encodeRuntimeV2Event(value: RuntimeV2RunEventPayload): RuntimeV2WireObject {
+export function encodeRuntimeEvent(value: RuntimeRunEventPayload): RuntimeWireObject {
   exactObject(value, ["attemptIdentity", "clientEventId", "clientEventSeq", "eventType", "payload"], [], "Event");
   assertUUID(value.clientEventId, "Event.clientEventId");
   assertInteger(value.clientEventSeq, 1, undefined, "Event.clientEventSeq");
   assertText(value.eventType, 120, "Event.eventType");
   if (!EVENT_TYPE_PATTERN.test(value.eventType)) {
-    throw runtimeV2Error("Event.eventType is not canonical");
+    throw runtimeError("Event.eventType is not canonical");
   }
   return {
     attempt_identity: encodeAttemptIdentity(value.attemptIdentity, "Event.attemptIdentity"),
@@ -378,7 +378,7 @@ export function encodeRuntimeV2Event(value: RuntimeV2RunEventPayload): RuntimeV2
   };
 }
 
-export function decodeRuntimeV2EventAck(value: unknown): RuntimeV2RunEventAckPayload {
+export function decodeRuntimeEventAck(value: unknown): RuntimeRunEventAckPayload {
   const object = exactObject(value, ["client_event_id", "client_event_seq", "sequence", "replayed"], [], "Event ACK");
   return {
     clientEventId: assertUUID(object.client_event_id, "Event ACK.client_event_id"),
@@ -388,12 +388,12 @@ export function decodeRuntimeV2EventAck(value: unknown): RuntimeV2RunEventAckPay
   };
 }
 
-export function encodeRuntimeV2Result(value: RuntimeV2RunResultPayload): RuntimeV2WireObject {
+export function encodeRuntimeResult(value: RuntimeRunResultPayload): RuntimeWireObject {
   exactObject(value, ["attemptIdentity", "resultId", "status", "durationMs", "finalClientEventSeq"], ["output", "error"], "Result");
   assertUUID(value.resultId, "Result.resultId");
   assertInteger(value.durationMs, 0, undefined, "Result.durationMs");
   assertInteger(value.finalClientEventSeq, 0, undefined, "Result.finalClientEventSeq");
-  const wire: RuntimeV2WireObject = {
+  const wire: RuntimeWireObject = {
     attempt_identity: encodeAttemptIdentity(value.attemptIdentity, "Result.attemptIdentity"),
     result_id: value.resultId,
     status: value.status,
@@ -402,16 +402,16 @@ export function encodeRuntimeV2Result(value: RuntimeV2RunResultPayload): Runtime
   };
   if (value.status === "success") {
     if (value.error !== undefined) {
-      throw runtimeV2Error("successful Result cannot contain error");
+      throw runtimeError("successful Result cannot contain error");
     }
     wire.output = assertJSONObject(value.output, "Result.output");
     return wire;
   }
   if (value.status !== "failed" || value.output !== undefined || value.error === undefined) {
-    throw runtimeV2Error("failed Result must contain only error");
+    throw runtimeError("failed Result must contain only error");
   }
   const error = exactObject(value.error, ["errorCode", "message"], ["retryableHint"], "Result.error");
-  const wireError: RuntimeV2WireObject = {
+  const wireError: RuntimeWireObject = {
     error_code: assertText(error.errorCode, 120, "Result.error.errorCode"),
     message: assertText(error.message, 500, "Result.error.message"),
   };
@@ -422,17 +422,17 @@ export function encodeRuntimeV2Result(value: RuntimeV2RunResultPayload): Runtime
   return wire;
 }
 
-export function decodeRuntimeV2ResultAck(value: unknown): RuntimeV2RunResultAckPayload {
+export function decodeRuntimeResultAck(value: unknown): RuntimeRunResultAckPayload {
   const object = exactObject(value, [
     "result_id", "classification", "run_status", "dispatch_state", "replayed",
   ], ["next_attempt_at"], "Result ACK");
   const classification = object.classification;
-  if (typeof classification !== "string" || !RESULT_CLASSIFICATIONS.has(classification as RuntimeV2ResultClassification)) {
-    throw runtimeV2Error("Result ACK.classification is invalid");
+  if (typeof classification !== "string" || !RESULT_CLASSIFICATIONS.has(classification as RuntimeResultClassification)) {
+    throw runtimeError("Result ACK.classification is invalid");
   }
-  const ack: RuntimeV2RunResultAckPayload = {
+  const ack: RuntimeRunResultAckPayload = {
     resultId: assertUUID(object.result_id, "Result ACK.result_id"),
-    classification: classification as RuntimeV2ResultClassification,
+    classification: classification as RuntimeResultClassification,
     runStatus: assertRunStatus(object.run_status, "Result ACK.run_status"),
     dispatchState: assertDispatchState(object.dispatch_state, "Result ACK.dispatch_state"),
     replayed: assertBoolean(object.replayed, "Result ACK.replayed"),
@@ -443,14 +443,14 @@ export function decodeRuntimeV2ResultAck(value: unknown): RuntimeV2RunResultAckP
   return ack;
 }
 
-export function encodeRuntimeV2Resume(value: RuntimeV2ResumePayload): RuntimeV2WireObject {
+export function encodeRuntimeResume(value: RuntimeResumePayload): RuntimeWireObject {
   exactObject(value, ["nodeId", "agentId", "workerId", "runtimeSessionId", "attempts"], [], "Resume");
   assertUUID(value.nodeId, "Resume.nodeId");
   assertUUID(value.agentId, "Resume.agentId");
   assertText(value.workerId, 200, "Resume.workerId");
   assertUUID(value.runtimeSessionId, "Resume.runtimeSessionId");
-  if (!Array.isArray(value.attempts) || value.attempts.length > RuntimeV2MaxResumeAttempts) {
-    throw runtimeV2Error("Resume.attempts is invalid");
+  if (!Array.isArray(value.attempts) || value.attempts.length > RuntimeMaxResumeAttempts) {
+    throw runtimeError("Resume.attempts is invalid");
   }
   const seen = new Set<string>();
   const attempts = value.attempts.map((attempt, index) => {
@@ -461,16 +461,16 @@ export function encodeRuntimeV2Resume(value: RuntimeV2ResumePayload): RuntimeV2W
     const identity = encodeAttemptIdentity(attempt.attemptIdentity, `${label}.attemptIdentity`);
     if (attempt.attemptIdentity.nodeId !== value.nodeId || attempt.attemptIdentity.agentId !== value.agentId ||
       attempt.attemptIdentity.workerId !== value.workerId) {
-      throw runtimeV2Error(`${label} does not match the target Node identity`);
+      throw runtimeError(`${label} does not match the target Node identity`);
     }
-    const identityKey = runtimeV2IdentityKey(attempt.attemptIdentity);
+    const identityKey = runtimeIdentityKey(attempt.attemptIdentity);
     if (seen.has(identityKey)) {
-      throw runtimeV2Error("Resume contains a duplicate Attempt identity");
+      throw runtimeError("Resume contains a duplicate Attempt identity");
     }
     seen.add(identityKey);
     assertInteger(attempt.lastAckedClientEventSeq, 0, undefined, `${label}.lastAckedClientEventSeq`);
     if (!Array.isArray(attempt.pendingClientEventRanges)) {
-      throw runtimeV2Error(`${label}.pendingClientEventRanges is invalid`);
+      throw runtimeError(`${label}.pendingClientEventRanges is invalid`);
     }
     let previous = attempt.lastAckedClientEventSeq;
     const ranges = attempt.pendingClientEventRanges.map((range, rangeIndex) => {
@@ -479,7 +479,7 @@ export function encodeRuntimeV2Resume(value: RuntimeV2ResumePayload): RuntimeV2W
       const start = assertInteger(range.start, 1, undefined, `${rangeLabel}.start`);
       const end = assertInteger(range.end, start, undefined, `${rangeLabel}.end`);
       if (start <= previous) {
-        throw runtimeV2Error(`${rangeLabel} overlaps or precedes acknowledged Events`);
+        throw runtimeError(`${rangeLabel} overlaps or precedes acknowledged Events`);
       }
       previous = end;
       return { start, end };
@@ -487,9 +487,9 @@ export function encodeRuntimeV2Resume(value: RuntimeV2ResumePayload): RuntimeV2W
     const hasResult = attempt.pendingResultId !== undefined;
     const hasFinalSequence = attempt.finalClientEventSeq !== undefined;
     if (hasResult !== hasFinalSequence) {
-      throw runtimeV2Error(`${label} must provide pendingResultId and finalClientEventSeq together`);
+      throw runtimeError(`${label} must provide pendingResultId and finalClientEventSeq together`);
     }
-    const wire: RuntimeV2WireObject = {
+    const wire: RuntimeWireObject = {
       attempt_identity: identity,
       last_acked_client_event_seq: attempt.lastAckedClientEventSeq,
       pending_client_event_ranges: ranges,
@@ -511,20 +511,20 @@ export function encodeRuntimeV2Resume(value: RuntimeV2ResumePayload): RuntimeV2W
   };
 }
 
-export function decodeRuntimeV2ResumeResponse(value: unknown): RuntimeV2ResumeResponse {
+export function decodeRuntimeResumeResponse(value: unknown): RuntimeResumeResponse {
   const object = exactObject(value, ["decisions"], [], "Resume response");
   if (!Array.isArray(object.decisions)) {
-    throw runtimeV2Error("Resume response.decisions is invalid");
+    throw runtimeError("Resume response.decisions is invalid");
   }
   return {
     decisions: object.decisions.map((decision, index) => decodeResumeDecision(decision, index)),
   };
 }
 
-export function decodeRuntimeV2CommandsResponse(value: unknown): RuntimeV2CommandsResponse {
+export function decodeRuntimeCommandsResponse(value: unknown): RuntimeCommandsResponse {
   const object = exactObject(value, ["commands", "database_time"], [], "commands response");
   if (!Array.isArray(object.commands)) {
-    throw runtimeV2Error("commands response.commands is invalid");
+    throw runtimeError("commands response.commands is invalid");
   }
   return {
     commands: object.commands.map((command, index) => decodePendingCommand(command, `commands response.commands[${index}]`)),
@@ -532,37 +532,37 @@ export function decodeRuntimeV2CommandsResponse(value: unknown): RuntimeV2Comman
   };
 }
 
-export function decodeRuntimeV2PendingCommand(value: unknown): RuntimeV2PendingCommand {
+export function decodeRuntimePendingCommand(value: unknown): RuntimePendingCommand {
   return decodePendingCommand(value, "Runtime command");
 }
 
-export function decodeRuntimeV2ResumeAccepted(value: unknown): RuntimeV2ResumeAcceptedPayload {
+export function decodeRuntimeResumeAccepted(value: unknown): RuntimeResumeAcceptedPayload {
   return decodeResumeDecision(value, 0);
 }
 
-export function encodeRuntimeV2CancelAck(value: RuntimeV2RunCancelAckPayload): RuntimeV2WireObject {
+export function encodeRuntimeCancelAck(value: RuntimeRunCancelAckPayload): RuntimeWireObject {
   const source = exactObject(value, ["cancellationId", "attemptIdentity", "cancelState"], ["errorCode"], "cancel ACK");
   assertUUID(value.cancellationId, "cancel ACK.cancellationId");
   const cancelState = assertCancelState(value.cancelState, "cancel ACK.cancelState");
   const hasError = hasOwn(source, "errorCode") && value.errorCode !== undefined;
   switch (cancelState) {
-    case RuntimeV2CancelStates.delivered:
-    case RuntimeV2CancelStates.stopping:
-    case RuntimeV2CancelStates.stopped:
+    case RuntimeCancelStates.delivered:
+    case RuntimeCancelStates.stopping:
+    case RuntimeCancelStates.stopped:
       if (hasError) {
-        throw runtimeV2Error("cancel ACK.errorCode is not allowed for a successful stop state");
+        throw runtimeError("cancel ACK.errorCode is not allowed for a successful stop state");
       }
       break;
-    case RuntimeV2CancelStates.unsupported:
-    case RuntimeV2CancelStates.failed:
+    case RuntimeCancelStates.unsupported:
+    case RuntimeCancelStates.failed:
       if (!hasError) {
-        throw runtimeV2Error("cancel ACK.errorCode is required for a negative stop state");
+        throw runtimeError("cancel ACK.errorCode is required for a negative stop state");
       }
       break;
     default:
-      throw runtimeV2Error("cancel ACK.cancelState is not an acknowledgement state");
+      throw runtimeError("cancel ACK.cancelState is not an acknowledgement state");
   }
-  const wire: RuntimeV2WireObject = {
+  const wire: RuntimeWireObject = {
     cancellation_id: value.cancellationId,
     attempt_identity: encodeAttemptIdentity(value.attemptIdentity, "cancel ACK.attemptIdentity"),
     cancel_state: cancelState,
@@ -573,9 +573,9 @@ export function encodeRuntimeV2CancelAck(value: RuntimeV2RunCancelAckPayload): R
   return wire;
 }
 
-export function decodeRuntimeV2CancellationState(value: unknown): RuntimeV2RunCancellationState {
+export function decodeRuntimeCancellationState(value: unknown): RuntimeRunCancellationState {
   const object = exactObject(value, ["cancellation_id", "cancel_state", "updated_at"], ["error_code"], "cancellation state");
-  const state: RuntimeV2RunCancellationState = {
+  const state: RuntimeRunCancellationState = {
     cancellationId: assertUUID(object.cancellation_id, "cancellation state.cancellation_id"),
     cancelState: assertCancelState(object.cancel_state, "cancellation state.cancel_state"),
     updatedAt: assertTimestamp(object.updated_at, "cancellation state.updated_at"),
@@ -585,28 +585,28 @@ export function decodeRuntimeV2CancellationState(value: unknown): RuntimeV2RunCa
   }
   const hasError = state.errorCode !== undefined;
   switch (state.cancelState) {
-    case RuntimeV2CancelStates.requested:
-    case RuntimeV2CancelStates.delivered:
-    case RuntimeV2CancelStates.stopping:
-    case RuntimeV2CancelStates.stopped:
+    case RuntimeCancelStates.requested:
+    case RuntimeCancelStates.delivered:
+    case RuntimeCancelStates.stopping:
+    case RuntimeCancelStates.stopped:
       if (hasError) {
-        throw runtimeV2Error("cancellation state.error_code is not allowed for a successful stop state");
+        throw runtimeError("cancellation state.error_code is not allowed for a successful stop state");
       }
       break;
-    case RuntimeV2CancelStates.unsupported:
-    case RuntimeV2CancelStates.failed:
-    case RuntimeV2CancelStates.unconfirmed:
+    case RuntimeCancelStates.unsupported:
+    case RuntimeCancelStates.failed:
+    case RuntimeCancelStates.unconfirmed:
       if (!hasError) {
-        throw runtimeV2Error("cancellation state.error_code is required for a negative stop state");
+        throw runtimeError("cancellation state.error_code is required for a negative stop state");
       }
       break;
   }
   return state;
 }
 
-export function encodeRuntimeV2CallAgent(value: RuntimeV2CallAgentRequest): RuntimeV2WireObject {
+export function encodeRuntimeCallAgent(value: RuntimeCallAgentRequest): RuntimeWireObject {
   const source = exactObject(value, ["targetAgentId", "input"], ["metadata", "reason"], "delegated call");
-  const wire: RuntimeV2WireObject = {
+  const wire: RuntimeWireObject = {
     target_agent_id: assertUUID(value.targetAgentId, "delegated call.targetAgentId"),
     input: assertJSONObject(value.input, "delegated call.input"),
   };
@@ -619,9 +619,9 @@ export function encodeRuntimeV2CallAgent(value: RuntimeV2CallAgentRequest): Runt
   return wire;
 }
 
-export function decodeRuntimeV2RunSummary(value: unknown): RuntimeV2RunSummary {
+export function decodeRuntimeRunSummary(value: unknown): RuntimeRunSummary {
   const object = exactObject(value, ["run_id", "status", "dispatch_state"], [], "delegated call response");
-  const summary: RuntimeV2RunSummary = {
+  const summary: RuntimeRunSummary = {
     runId: assertUUID(object.run_id, "delegated call response.run_id"),
     status: assertRunStatus(object.status, "delegated call response.status"),
     dispatchState: assertDispatchState(object.dispatch_state, "delegated call response.dispatch_state"),
@@ -629,35 +629,35 @@ export function decodeRuntimeV2RunSummary(value: unknown): RuntimeV2RunSummary {
   switch (summary.status) {
     case "running":
       if (!["pending", "offered", "executing", "retry_wait"].includes(summary.dispatchState)) {
-        throw runtimeV2Error("delegated call response has an incoherent running state");
+        throw runtimeError("delegated call response has an incoherent running state");
       }
       break;
     case "success":
     case "timeout":
     case "canceled":
       if (summary.dispatchState !== "terminal") {
-        throw runtimeV2Error("delegated call response has an incoherent terminal state");
+        throw runtimeError("delegated call response has an incoherent terminal state");
       }
       break;
     case "failed":
       if (summary.dispatchState !== "terminal" && summary.dispatchState !== "dead_letter") {
-        throw runtimeV2Error("delegated call response has an incoherent failed state");
+        throw runtimeError("delegated call response has an incoherent failed state");
       }
       break;
   }
   return summary;
 }
 
-export function decodeRuntimeV2ErrorEnvelope(value: unknown): RuntimeV2ErrorEnvelope {
+export function decodeRuntimeErrorEnvelope(value: unknown): RuntimeErrorEnvelope {
   const envelope = exactObject(value, ["error"], [], "error response");
   const object = exactObject(envelope.error, ["code", "message"], [
     "retryable", "missing_event_ranges", "current_run_status", "current_dispatch_state",
   ], "error response.error");
-  if (typeof object.code !== "string" || !ERROR_CODES.has(object.code as RuntimeV2ErrorCode)) {
-    throw runtimeV2Error("error response.error.code is invalid");
+  if (typeof object.code !== "string" || !ERROR_CODES.has(object.code as RuntimeErrorCode)) {
+    throw runtimeError("error response.error.code is invalid");
   }
-  const error: RuntimeV2ErrorBody = {
-    code: object.code as RuntimeV2ErrorCode,
+  const error: RuntimeErrorBody = {
+    code: object.code as RuntimeErrorCode,
     message: assertText(object.message, 500, "error response.error.message"),
   };
   if (hasOwn(object, "retryable")) {
@@ -665,7 +665,7 @@ export function decodeRuntimeV2ErrorEnvelope(value: unknown): RuntimeV2ErrorEnve
   }
   if (hasOwn(object, "missing_event_ranges")) {
     if (!Array.isArray(object.missing_event_ranges)) {
-      throw runtimeV2Error("error response.error.missing_event_ranges is invalid");
+      throw runtimeError("error response.error.missing_event_ranges is invalid");
     }
     error.missingEventRanges = object.missing_event_ranges.map((range, index) =>
       decodeEventRange(range, `error response.error.missing_event_ranges[${index}]`));
@@ -681,9 +681,9 @@ export function decodeRuntimeV2ErrorEnvelope(value: unknown): RuntimeV2ErrorEnve
   return { error };
 }
 
-export function runtimeV2AttemptIdentityEqual(
-  left: RuntimeV2AttemptIdentity,
-  right: RuntimeV2AttemptIdentity,
+export function runtimeAttemptIdentityEqual(
+  left: RuntimeAttemptIdentity,
+  right: RuntimeAttemptIdentity,
 ): boolean {
   return left.runId === right.runId && left.attemptId === right.attemptId &&
     left.leaseId === right.leaseId && left.fencingToken === right.fencingToken &&
@@ -691,7 +691,7 @@ export function runtimeV2AttemptIdentityEqual(
     left.workerId === right.workerId && left.runtimeSessionId === right.runtimeSessionId;
 }
 
-function encodeAttemptIdentity(value: RuntimeV2AttemptIdentity, label: string): RuntimeV2WireObject {
+function encodeAttemptIdentity(value: RuntimeAttemptIdentity, label: string): RuntimeWireObject {
   exactObject(value, [
     "runId", "attemptId", "leaseId", "fencingToken", "nodeId", "agentId", "workerId", "runtimeSessionId",
   ], [], label);
@@ -715,7 +715,7 @@ function encodeAttemptIdentity(value: RuntimeV2AttemptIdentity, label: string): 
   };
 }
 
-function decodeAttemptIdentity(value: unknown, label: string): RuntimeV2AttemptIdentity {
+function decodeAttemptIdentity(value: unknown, label: string): RuntimeAttemptIdentity {
   const object = exactObject(value, [
     "run_id", "attempt_id", "lease_id", "fencing_token", "node_id", "agent_id", "worker_id", "runtime_session_id",
   ], [], label);
@@ -731,21 +731,21 @@ function decodeAttemptIdentity(value: unknown, label: string): RuntimeV2AttemptI
   };
 }
 
-function decodePendingCommand(value: unknown, label: string): RuntimeV2PendingCommand {
+function decodePendingCommand(value: unknown, label: string): RuntimePendingCommand {
   const object = exactObject(value, ["type", "payload"], [], label);
   switch (object.type) {
-    case RuntimeV2MessageTypes.runCancel:
+    case RuntimeMessageTypes.runCancel:
       return { type: object.type, payload: decodeRunCancel(object.payload, `${label}.payload`) };
-    case RuntimeV2MessageTypes.drain:
+    case RuntimeMessageTypes.drain:
       return { type: object.type, payload: decodeDrain(object.payload, `${label}.payload`) };
-    case RuntimeV2MessageTypes.leaseRevoked:
+    case RuntimeMessageTypes.leaseRevoked:
       return { type: object.type, payload: decodeLeaseRevoked(object.payload, `${label}.payload`) };
     default:
-      throw runtimeV2Error(`${label}.type is invalid`);
+      throw runtimeError(`${label}.type is invalid`);
   }
 }
 
-function decodeRunCancel(value: unknown, label: string): RuntimeV2RunCancelPayload {
+function decodeRunCancel(value: unknown, label: string): RuntimeRunCancelPayload {
   const object = exactObject(value, ["cancellation_id", "attempt_identity", "reason_code", "deadline_at"], [], label);
   return {
     cancellationId: assertUUID(object.cancellation_id, `${label}.cancellation_id`),
@@ -755,7 +755,7 @@ function decodeRunCancel(value: unknown, label: string): RuntimeV2RunCancelPaylo
   };
 }
 
-function decodeDrain(value: unknown, label: string): RuntimeV2DrainPayload {
+function decodeDrain(value: unknown, label: string): RuntimeDrainPayload {
   const object = exactObject(value, ["deadline_at", "reason_code", "capacity", "inflight"], [], label);
   return {
     deadlineAt: assertTimestamp(object.deadline_at, `${label}.deadline_at`),
@@ -765,7 +765,7 @@ function decodeDrain(value: unknown, label: string): RuntimeV2DrainPayload {
   };
 }
 
-function decodeLeaseRevoked(value: unknown, label: string): RuntimeV2RunLeaseRevokedPayload {
+function decodeLeaseRevoked(value: unknown, label: string): RuntimeRunLeaseRevokedPayload {
   const object = exactObject(value, ["attempt_identity", "reason_code", "dispatch_state", "run_status"], [], label);
   return {
     attemptIdentity: decodeAttemptIdentity(object.attempt_identity, `${label}.attempt_identity`),
@@ -775,56 +775,56 @@ function decodeLeaseRevoked(value: unknown, label: string): RuntimeV2RunLeaseRev
   };
 }
 
-function decodeResumeDecision(value: unknown, index: number): RuntimeV2ResumeAcceptedPayload {
+function decodeResumeDecision(value: unknown, index: number): RuntimeResumeAcceptedPayload {
   const label = `Resume response.decisions[${index}]`;
   const object = exactObject(value, ["attempt_identity", "decision", "allowed_actions"], ["lease_expires_at"], label);
-  if (typeof object.decision !== "string" || !Object.values(RuntimeV2ResumeDecisions).includes(
-    object.decision as (typeof RuntimeV2ResumeDecisions)[keyof typeof RuntimeV2ResumeDecisions],
+  if (typeof object.decision !== "string" || !Object.values(RuntimeResumeDecisions).includes(
+    object.decision as (typeof RuntimeResumeDecisions)[keyof typeof RuntimeResumeDecisions],
   )) {
-    throw runtimeV2Error(`${label}.decision is invalid`);
+    throw runtimeError(`${label}.decision is invalid`);
   }
   if (!Array.isArray(object.allowed_actions)) {
-    throw runtimeV2Error(`${label}.allowed_actions is invalid`);
+    throw runtimeError(`${label}.allowed_actions is invalid`);
   }
   const actions = object.allowed_actions.map((action, actionIndex) => {
-    if (typeof action !== "string" || !Object.values(RuntimeV2ResumeActions).includes(action as RuntimeV2ResumeAction)) {
-      throw runtimeV2Error(`${label}.allowed_actions[${actionIndex}] is invalid`);
+    if (typeof action !== "string" || !Object.values(RuntimeResumeActions).includes(action as RuntimeResumeAction)) {
+      throw runtimeError(`${label}.allowed_actions[${actionIndex}] is invalid`);
     }
-    return action as RuntimeV2ResumeAction;
+    return action as RuntimeResumeAction;
   });
   if (new Set(actions).size !== actions.length) {
-    throw runtimeV2Error(`${label}.allowed_actions contains duplicates`);
+    throw runtimeError(`${label}.allowed_actions contains duplicates`);
   }
   const hasLease = hasOwn(object, "lease_expires_at");
   const actionSet = new Set(actions);
   switch (object.decision) {
-    case RuntimeV2ResumeDecisions.continueExecution:
-      if (!hasLease || actions.length !== 3 || !actionSet.has(RuntimeV2ResumeActions.continueExecution) ||
-        !actionSet.has(RuntimeV2ResumeActions.uploadEvents) || !actionSet.has(RuntimeV2ResumeActions.uploadResult)) {
-        throw runtimeV2Error(`${label} has incoherent continue_execution actions`);
+    case RuntimeResumeDecisions.continueExecution:
+      if (!hasLease || actions.length !== 3 || !actionSet.has(RuntimeResumeActions.continueExecution) ||
+        !actionSet.has(RuntimeResumeActions.uploadEvents) || !actionSet.has(RuntimeResumeActions.uploadResult)) {
+        throw runtimeError(`${label} has incoherent continue_execution actions`);
       }
       break;
-    case RuntimeV2ResumeDecisions.uploadSpoolOnly:
+    case RuntimeResumeDecisions.uploadSpoolOnly:
       if (hasLease || actions.length < 1 || actions.length > 2 ||
-        actions.some((action) => action !== RuntimeV2ResumeActions.uploadEvents && action !== RuntimeV2ResumeActions.uploadResult)) {
-        throw runtimeV2Error(`${label} has incoherent upload_spool_only actions`);
+        actions.some((action) => action !== RuntimeResumeActions.uploadEvents && action !== RuntimeResumeActions.uploadResult)) {
+        throw runtimeError(`${label} has incoherent upload_spool_only actions`);
       }
       break;
-    case RuntimeV2ResumeDecisions.resultAlreadyAcked:
-      if (hasLease || actions.length !== 1 || actions[0] !== RuntimeV2ResumeActions.clearSpool) {
-        throw runtimeV2Error(`${label} has incoherent result_already_acked actions`);
+    case RuntimeResumeDecisions.resultAlreadyAcked:
+      if (hasLease || actions.length !== 1 || actions[0] !== RuntimeResumeActions.clearSpool) {
+        throw runtimeError(`${label} has incoherent result_already_acked actions`);
       }
       break;
-    case RuntimeV2ResumeDecisions.leaseRevoked:
-      if (hasLease || actions.length !== 2 || !actionSet.has(RuntimeV2ResumeActions.stopExecution) ||
-        !actionSet.has(RuntimeV2ResumeActions.clearSpool)) {
-        throw runtimeV2Error(`${label} has incoherent lease_revoked actions`);
+    case RuntimeResumeDecisions.leaseRevoked:
+      if (hasLease || actions.length !== 2 || !actionSet.has(RuntimeResumeActions.stopExecution) ||
+        !actionSet.has(RuntimeResumeActions.clearSpool)) {
+        throw runtimeError(`${label} has incoherent lease_revoked actions`);
       }
       break;
   }
-  const decoded: RuntimeV2ResumeAcceptedPayload = {
+  const decoded: RuntimeResumeAcceptedPayload = {
     attemptIdentity: decodeAttemptIdentity(object.attempt_identity, `${label}.attempt_identity`),
-    decision: object.decision as RuntimeV2ResumeDecision,
+    decision: object.decision as RuntimeResumeDecision,
     allowedActions: actions,
   };
   if (hasLease) {
@@ -833,14 +833,14 @@ function decodeResumeDecision(value: unknown, index: number): RuntimeV2ResumeAcc
   return decoded;
 }
 
-function decodeEventRange(value: unknown, label: string): RuntimeV2EventRange {
+function decodeEventRange(value: unknown, label: string): RuntimeEventRange {
   const object = exactObject(value, ["start", "end"], [], label);
   const start = assertInteger(object.start, 1, undefined, `${label}.start`);
   const end = assertInteger(object.end, start, undefined, `${label}.end`);
   return { start, end };
 }
 
-function runtimeV2IdentityKey(value: RuntimeV2AttemptIdentity): string {
+function runtimeIdentityKey(value: RuntimeAttemptIdentity): string {
   return [
     value.runId, value.attemptId, value.leaseId, value.fencingToken,
     value.nodeId, value.agentId, value.workerId, value.runtimeSessionId,
@@ -852,19 +852,19 @@ function exactObject(
   required: readonly string[],
   optional: readonly string[],
   label: string,
-): RuntimeV2WireObject {
+): RuntimeWireObject {
   if (!isObject(value)) {
-    throw runtimeV2Error(`${label} must be an object`);
+    throw runtimeError(`${label} must be an object`);
   }
   const allowed = new Set([...required, ...optional]);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
-      throw runtimeV2Error(`${label} contains unknown field ${key}`);
+      throw runtimeError(`${label} contains unknown field ${key}`);
     }
   }
   for (const key of required) {
     if (!hasOwn(value, key)) {
-      throw runtimeV2Error(`${label} is missing field ${key}`);
+      throw runtimeError(`${label} is missing field ${key}`);
     }
   }
   return value;
@@ -872,25 +872,25 @@ function exactObject(
 
 function assertJSONObject(value: unknown, label: string): JsonObject {
   if (!isObject(value)) {
-    throw runtimeV2Error(`${label} must be a JSON object`);
+    throw runtimeError(`${label} must be a JSON object`);
   }
   return value as JsonObject;
 }
 
 function assertUUID(value: unknown, label: string): string {
   if (typeof value !== "string" || value === NIL_UUID || !UUID_PATTERN.test(value)) {
-    throw runtimeV2Error(`${label} must be a canonical lowercase UUID`);
+    throw runtimeError(`${label} must be a canonical lowercase UUID`);
   }
   return value;
 }
 
 function assertTimestamp(value: unknown, label: string): string {
   if (typeof value !== "string") {
-    throw runtimeV2Error(`${label} must be an RFC 3339 timestamp`);
+    throw runtimeError(`${label} must be an RFC 3339 timestamp`);
   }
   const match = TIMESTAMP_PATTERN.exec(value);
   if (!match) {
-    throw runtimeV2Error(`${label} must be an RFC 3339 timestamp`);
+    throw runtimeError(`${label} must be an RFC 3339 timestamp`);
   }
   const year = Number(match[1]);
   const month = Number(match[2]);
@@ -900,15 +900,15 @@ function assertTimestamp(value: unknown, label: string): string {
   const second = Number(match[6]);
   const offsetHour = match[7] === undefined ? 0 : Number(match[7]);
   const offsetMinute = match[8] === undefined ? 0 : Number(match[8]);
-  if (month < 1 || month > 12 || day < 1 || day > runtimeV2DaysInMonth(year, month) ||
+  if (month < 1 || month > 12 || day < 1 || day > runtimeDaysInMonth(year, month) ||
     hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59 ||
     !Number.isFinite(Date.parse(value))) {
-    throw runtimeV2Error(`${label} must be an RFC 3339 timestamp`);
+    throw runtimeError(`${label} must be an RFC 3339 timestamp`);
   }
   return value;
 }
 
-function runtimeV2DaysInMonth(year: number, month: number): number {
+function runtimeDaysInMonth(year: number, month: number): number {
   if (month === 2) {
     const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
     return leap ? 29 : 28;
@@ -918,14 +918,14 @@ function runtimeV2DaysInMonth(year: number, month: number): number {
 
 function assertText(value: unknown, maximum: number | undefined, label: string): string {
   if (typeof value !== "string" || !value.trim() || (maximum !== undefined && [...value].length > maximum)) {
-    throw runtimeV2Error(`${label} must be non-empty text${maximum === undefined ? "" : ` up to ${maximum} characters`}`);
+    throw runtimeError(`${label} must be non-empty text${maximum === undefined ? "" : ` up to ${maximum} characters`}`);
   }
   return value;
 }
 
 function assertOptionalText(value: unknown, maximum: number, label: string): string {
   if (typeof value !== "string" || [...value].length > maximum) {
-    throw runtimeV2Error(`${label} must be text up to ${maximum} characters`);
+    throw runtimeError(`${label} must be text up to ${maximum} characters`);
   }
   return value;
 }
@@ -933,72 +933,72 @@ function assertOptionalText(value: unknown, maximum: number, label: string): str
 function assertInteger(value: unknown, minimum: number, maximum: number | undefined, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum ||
     (maximum !== undefined && value > maximum)) {
-    throw runtimeV2Error(`${label} must be a safe integer in range`);
+    throw runtimeError(`${label} must be a safe integer in range`);
   }
   return value;
 }
 
 function assertCapacity(value: unknown, label: string): number {
-  return assertInteger(value, 0, RuntimeV2MaxNodeCapacity, label);
+  return assertInteger(value, 0, RuntimeMaxNodeCapacity, label);
 }
 
 function assertBoolean(value: unknown, label: string): boolean {
   if (typeof value !== "boolean") {
-    throw runtimeV2Error(`${label} must be a boolean`);
+    throw runtimeError(`${label} must be a boolean`);
   }
   return value;
 }
 
 function assertFeatures(value: unknown, requireProtocol: boolean, label: string): string[] {
   if (!Array.isArray(value)) {
-    throw runtimeV2Error(`${label} must be an array`);
+    throw runtimeError(`${label} must be an array`);
   }
   const features = value.map((feature, index) => assertText(feature, 100, `${label}[${index}]`));
   const seen = new Set(features);
   if (seen.size !== features.length) {
-    throw runtimeV2Error(`${label} contains duplicates`);
+    throw runtimeError(`${label} contains duplicates`);
   }
   if (requireProtocol) {
     for (const required of RuntimeRequiredFeatures) {
       if (!seen.has(required)) {
-        throw runtimeV2Error(`${label} is missing required feature ${required}`);
+        throw runtimeError(`${label} is missing required feature ${required}`);
       }
     }
   }
   return features;
 }
 
-function assertDispatchState(value: unknown, label: string): RuntimeV2DispatchState {
-  if (typeof value !== "string" || !DISPATCH_STATES.has(value as RuntimeV2DispatchState)) {
-    throw runtimeV2Error(`${label} is invalid`);
+function assertDispatchState(value: unknown, label: string): RuntimeDispatchState {
+  if (typeof value !== "string" || !DISPATCH_STATES.has(value as RuntimeDispatchState)) {
+    throw runtimeError(`${label} is invalid`);
   }
-  return value as RuntimeV2DispatchState;
+  return value as RuntimeDispatchState;
 }
 
-function assertRunStatus(value: unknown, label: string): RuntimeV2RunStatus {
-  if (typeof value !== "string" || !RUN_STATUSES.has(value as RuntimeV2RunStatus)) {
-    throw runtimeV2Error(`${label} is invalid`);
+function assertRunStatus(value: unknown, label: string): RuntimeRunStatus {
+  if (typeof value !== "string" || !RUN_STATUSES.has(value as RuntimeRunStatus)) {
+    throw runtimeError(`${label} is invalid`);
   }
-  return value as RuntimeV2RunStatus;
+  return value as RuntimeRunStatus;
 }
 
-function assertCancelState(value: unknown, label: string): RuntimeV2CancelState {
-  if (typeof value !== "string" || !Object.values(RuntimeV2CancelStates).includes(
-    value as (typeof RuntimeV2CancelStates)[keyof typeof RuntimeV2CancelStates],
+function assertCancelState(value: unknown, label: string): RuntimeCancelState {
+  if (typeof value !== "string" || !Object.values(RuntimeCancelStates).includes(
+    value as (typeof RuntimeCancelStates)[keyof typeof RuntimeCancelStates],
   )) {
-    throw runtimeV2Error(`${label} is invalid`);
+    throw runtimeError(`${label} is invalid`);
   }
-  return value as RuntimeV2CancelState;
+  return value as RuntimeCancelState;
 }
 
-function isObject(value: unknown): value is RuntimeV2WireObject {
+function isObject(value: unknown): value is RuntimeWireObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function hasOwn(value: RuntimeV2WireObject, key: string): boolean {
+function hasOwn(value: RuntimeWireObject, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function runtimeV2Error(message: string, cause?: unknown): Error {
-  return new Error(`OpenLinker runtime v2: ${message}`, cause === undefined ? undefined : { cause });
+function runtimeError(message: string, cause?: unknown): Error {
+  return new Error(`OpenLinker Runtime: ${message}`, cause === undefined ? undefined : { cause });
 }
