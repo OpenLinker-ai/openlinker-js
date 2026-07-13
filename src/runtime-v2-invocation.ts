@@ -3,7 +3,7 @@ import type {
   RuntimeV2InvocationProofRequest,
 } from "./runtime-v2-types.js";
 
-export const RuntimeV2CallAgentPath = "/api/v1/agent-runtime/v2/call-agent" as const;
+export const RuntimeV2CallAgentPath = "/api/v1/agent-runtime/call-agent" as const;
 
 const RuntimeV2InvocationProofDomain = "openlinker/runtime-v2/invocation-proof";
 const encoder = new TextEncoder();

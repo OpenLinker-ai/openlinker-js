@@ -3,8 +3,8 @@
 `@openlinker/sdk` is the TypeScript SDK for OpenLinker Core. Use its default
 entry from web apps, Node.js services, edge runtimes, and developer tools to
 discover Agents, start runs, stream events, verify callbacks, and call
-browser-friendly A2A JSON-RPC and HTTP+JSON/SSE bindings. Strict Agent Runtime
-v2 protocol primitives use the separate `@openlinker/sdk/runtime` entry.
+browser-friendly A2A JSON-RPC and HTTP+JSON/SSE bindings. Strict OpenLinker
+Runtime protocol primitives use the separate `@openlinker/sdk/runtime` entry.
 
 Chinese documentation: [README.zh-CN.md](./README.zh-CN.md)
 
@@ -42,7 +42,7 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
-  Core -->|"Runtime v2 assignment and cancellation"| AgentNode["openlinker-agent-node"]
+  Core -->|"Runtime assignment and cancellation"| AgentNode["openlinker-agent-node"]
 ```
 
 ## Quick Start
@@ -137,9 +137,10 @@ page for a complete history. `earliest_available_sequence` and
 `latest_available_sequence` are `null` when no retained event is available.
 SSE continues to use `streamRunEvents` unchanged.
 
-## Runtime v2 Entry
+## OpenLinker Runtime
 
-Runtime workers use `OPENLINKER_AGENT_TOKEN` through the strict v2 entry:
+Runtime workers use `OPENLINKER_AGENT_TOKEN` through the strict OpenLinker
+Runtime entry:
 
 ```ts
 import {
@@ -189,17 +190,21 @@ if (assignment) {
 ```
 
 `OpenLinkerClient` rejects `agentToken`. `OpenLinkerRuntime` exposes strict
-Runtime v2 primitives only; durable spooling, lease scheduling, execution, and
+Runtime protocol primitives only; durable spooling, lease scheduling, execution, and
 recovery remain worker responsibilities.
 
-For the v2 WebSocket transport, pass an already-open, authenticated socket to
+For the WebSocket transport, pass an already-open, authenticated socket to
 `RuntimeV2WebSocketSession`. The socket upgrade must present the Node client
 certificate and `Authorization: Bearer <Agent Token>`; the SDK never places a
 credential in the URL. The session implements hello/ready, pushed assignment
 and cancellation, correlated assignment/lease/Event/Result ACKs, and resume.
 Workers still persist an assignment before ACK and persist every Event/Result
 before sending it. Use `openlinker-agent-node` when you need automatic
-WebSocket-to-v2-long-poll switching and durable recovery.
+WebSocket-to-long-poll switching and durable recovery.
+
+The canonical WebSocket endpoint is `/api/v1/agent-runtime/ws`; HTTP methods
+use the `/api/v1/agent-runtime/` prefix. Protocol version 2 remains in the
+handshake contract and `RuntimeV2*` SDK API, not in the URL.
 
 ## Callbacks
 
@@ -261,7 +266,7 @@ gRPC callers, use `github.com/OpenLinker-ai/openlinker-go` or a separate
 Node-only generated client.
 
 Operationally, gRPC is an additional A2A transport binding. It does not replace
-JSON-RPC, HTTP+JSON/SSE, or the separate Agent Node Runtime v2 control plane.
+JSON-RPC, HTTP+JSON/SSE, or the separate Agent Node OpenLinker Runtime control plane.
 
 ## Core Surface
 

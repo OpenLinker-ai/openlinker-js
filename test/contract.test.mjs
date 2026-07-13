@@ -92,7 +92,8 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
     "https://json-schema.org/draft/2020-12/schema",
   );
   assert.equal(contract.wire_format, "application/json");
-  assert.equal(contract.websocket.path, "/api/v1/agent-runtime/v2/ws");
+  assert.equal(contract.websocket.path, "/api/v1/agent-runtime/ws");
+  assert.equal(contract.websocket.path.includes("/v2/"), false);
   assert.equal(typeof RuntimeV2WebSocketSession, "function");
   assert.equal(contract.websocket.envelope_schema.$ref, "#/$defs/RuntimeMessage");
   assert.ok(contract.websocket.messages.length > 0);
@@ -122,12 +123,13 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
     assert.equal(typeof endpoint.client_method, "string");
     assert.equal(typeof endpoint.http_method, "string");
     assert.equal(typeof endpoint.path, "string");
-    assert.ok(endpoint.path.startsWith("/api/v1/agent-runtime/v2/"));
+    assert.ok(endpoint.path.startsWith("/api/v1/agent-runtime/"));
+    assert.equal(endpoint.path.includes(`/agent-runtime/${contract.version}/`), false);
     const key = `${endpoint.http_method} ${endpoint.path}`;
     assert.ok(!endpointKeys.has(key), `duplicate endpoint ${key}`);
     endpointKeys.add(key);
   }
-  assert.ok(endpointKeys.has("POST /api/v1/agent-runtime/v2/call-agent"));
+  assert.ok(endpointKeys.has("POST /api/v1/agent-runtime/call-agent"));
 
   assert.equal(Object.hasOwn(contract, "legacy_routes"), false);
   for (const definition of [

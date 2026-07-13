@@ -2,7 +2,7 @@
 
 `@openlinker/sdk` 是 OpenLinker Core 的 TypeScript SDK。默认入口用于在 Web 应用、
 Node.js 服务、Edge runtime 和开发者工具中查找 Agent、启动运行、监听事件、校验回调，
-并调用浏览器友好的 A2A JSON-RPC 与 HTTP+JSON/SSE 接口。严格的 Agent Runtime v2
+并调用浏览器友好的 A2A JSON-RPC 与 HTTP+JSON/SSE 接口。严格的 OpenLinker Runtime
 协议原语使用单独的 `@openlinker/sdk/runtime` 入口。
 
 English documentation: [README.md](./README.md)
@@ -33,7 +33,7 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["公网 HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["远程 MCP / JSON-RPC server"]
-  Core -->|"Runtime v2 assignment 与取消"| AgentNode["openlinker-agent-node"]
+  Core -->|"Runtime assignment 与取消"| AgentNode["openlinker-agent-node"]
 ```
 
 ## 安装
@@ -101,9 +101,9 @@ console.log(sameRun.run_id, sameRun.replayed);
 Core 对首次创建返回 `201`，对已结束的重放返回 `200`，对仍在运行的重放返回 `202`。
 SDK 会透明处理这三种状态，可通过 `RunResponse.replayed` 判断是否为重放。
 
-## Runtime v2 入口
+## OpenLinker Runtime
 
-Runtime worker 通过严格的 v2 入口使用 `OPENLINKER_AGENT_TOKEN`：
+Runtime worker 通过严格的 OpenLinker Runtime 入口使用 `OPENLINKER_AGENT_TOKEN`：
 
 ```ts
 import {
@@ -153,14 +153,18 @@ if (assignment) {
 ```
 
 `OpenLinkerClient` 会拒绝 `agentToken`。`OpenLinkerRuntime` 只提供严格的
-Runtime v2 协议原语；持久化队列、续租调度、任务执行和故障恢复由 worker 负责。
+Runtime 协议原语；持久化队列、续租调度、任务执行和故障恢复由 worker 负责。
 
-使用 v2 WebSocket 时，把已经完成认证并处于打开状态的 socket 交给
+使用 WebSocket 时，把已经完成认证并处于打开状态的 socket 交给
 `RuntimeV2WebSocketSession`。升级请求必须携带 Node 客户端证书和
 `Authorization: Bearer <Agent Token>`；SDK 不会把凭证放进 URL。该 Session 实现
 hello/ready、assignment 与取消推送、assignment/lease/Event/Result 业务 ACK 关联和
 resume。worker 仍必须在 ACK assignment 前落盘，并在发送 Event/Result 前落盘。需要
-WebSocket 与 v2 长轮询自动切换及完整崩溃恢复时，使用 `openlinker-agent-node`。
+WebSocket 与长轮询自动切换及完整崩溃恢复时，使用 `openlinker-agent-node`。
+
+WebSocket 的标准端点是 `/api/v1/agent-runtime/ws`，HTTP 方法统一使用
+`/api/v1/agent-runtime/` 前缀。协议版本 2 继续由握手 contract 和 `RuntimeV2*` SDK API
+表达，不再写进 URL。
 
 ## Callback
 

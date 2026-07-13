@@ -99,7 +99,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
   ): Promise<RuntimeV2ReadyPayload> {
     const value = await this.runtimeV2JSON(
       "POST",
-      "/agent-runtime/v2/sessions",
+      "/agent-runtime/sessions",
       encodeRuntimeV2Hello(hello),
       options,
     );
@@ -116,7 +116,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     const body = encodeRuntimeV2Hello(hello);
     const value = await this.runtimeV2JSON(
       "POST",
-      `/agent-runtime/v2/sessions/${encodeURIComponent(hello.runtimeSessionId)}/heartbeat`,
+      `/agent-runtime/sessions/${encodeURIComponent(hello.runtimeSessionId)}/heartbeat`,
       body,
       options,
     );
@@ -133,7 +133,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     const body = encodeRuntimeV2SessionClose(request);
     const response = await this.runtimeV2Fetch(
       "POST",
-      `/agent-runtime/v2/sessions/${encodeURIComponent(request.runtimeSessionId)}/close`,
+      `/agent-runtime/sessions/${encodeURIComponent(request.runtimeSessionId)}/close`,
       body,
       options,
     );
@@ -151,7 +151,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     const query = new URLSearchParams({ wait: String(waitSeconds) });
     const value = await this.runtimeV2JSON(
       "POST",
-      "/agent-runtime/v2/runs/claim",
+      "/agent-runtime/runs/claim",
       encodeRuntimeV2Claim(request),
       options,
       query,
@@ -251,7 +251,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
   ): Promise<RuntimeV2ResumeResponse> {
     const value = await this.runtimeV2RequiredJSON(
       "POST",
-      "/agent-runtime/v2/runs/resume",
+      "/agent-runtime/runs/resume",
       encodeRuntimeV2Resume(request),
       options,
     );
@@ -281,7 +281,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
     });
     const response = await this.runtimeV2Fetch(
       "GET",
-      "/agent-runtime/v2/commands",
+      "/agent-runtime/commands",
       undefined,
       options,
       query,
@@ -409,7 +409,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
 }
 
 function runtimeV2RunPath(runId: string, action: string): string {
-  return `/agent-runtime/v2/runs/${encodeURIComponent(runId)}/${action}`;
+  return `/agent-runtime/runs/${encodeURIComponent(runId)}/${action}`;
 }
 
 function assertRuntimeV2ResponseIdentity(

@@ -42,7 +42,7 @@ test("runtime v2 invocation proof matches the fixed Core and Go vector", async (
     ),
   };
   const proof = await buildRuntimeV2InvocationProof(invocation.token, request);
-  assert.equal(proof, "NPUA_HnpwGbee56_RoGEAUZl-A8j1ASRsSJU2fBaJk0");
+  assert.equal(proof, "lBuoEqAJKl9ujEr72b0oR3cuuoqJPqCs1vkABcw6zA0");
 
   const mutations = [
     { ...request, body: new Uint8Array([...request.body, 0x20]) },
@@ -139,7 +139,7 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
     const headers = new Headers(init.headers);
     calls.push(url.pathname);
     assert.equal(headers.get("authorization"), "Bearer ol_agent_v2");
-    if (url.pathname === "/api/v1/agent-runtime/v2/commands") {
+    if (url.pathname === "/api/v1/agent-runtime/commands") {
       assert.equal(init.method, "GET");
       assert.equal(url.searchParams.get("runtime_session_id"), ids.session);
       assert.equal(url.searchParams.get("wait"), "17");
@@ -177,7 +177,7 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
         database_time: now,
       });
     }
-    assert.equal(url.pathname, `/api/v1/agent-runtime/v2/runs/${ids.run}/cancel-ack`);
+    assert.equal(url.pathname, `/api/v1/agent-runtime/runs/${ids.run}/cancel-ack`);
     assert.equal(init.method, "POST");
     const body = JSON.parse(init.body);
     assert.deepEqual(body, {
@@ -214,8 +214,8 @@ test("runtime v2 commands and cancel ACK are session-bound and strictly typed", 
     errorCode: "CANCEL_NOT_SUPPORTED",
   });
   assert.deepEqual(calls, [
-    "/api/v1/agent-runtime/v2/commands",
-    `/api/v1/agent-runtime/v2/runs/${ids.run}/cancel-ack`,
+    "/api/v1/agent-runtime/commands",
+    `/api/v1/agent-runtime/runs/${ids.run}/cancel-ack`,
   ]);
 });
 

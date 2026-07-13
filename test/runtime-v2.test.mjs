@@ -56,8 +56,8 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
       assert.equal(init.method, "POST");
 
       switch (url.pathname) {
-        case "/api/v1/agent-runtime/v2/sessions":
-        case `/api/v1/agent-runtime/v2/sessions/${ids.session}/heartbeat`:
+        case "/api/v1/agent-runtime/sessions":
+        case `/api/v1/agent-runtime/sessions/${ids.session}/heartbeat`:
           return jsonResponse({
             core_instance_id: ids.core,
             features: [...RuntimeRequiredFeatures],
@@ -65,26 +65,26 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
             lease_ttl_seconds: 60,
             database_time: now,
           });
-        case "/api/v1/agent-runtime/v2/runs/claim":
+        case "/api/v1/agent-runtime/runs/claim":
           assert.equal(url.searchParams.get("wait"), "12");
           claimCalls++;
           if (claimCalls === 1) {
             return new Response(null, { status: 204 });
           }
           return jsonResponse(wireAssignment());
-        case `/api/v1/agent-runtime/v2/runs/${ids.run}/assignment-ack`:
+        case `/api/v1/agent-runtime/runs/${ids.run}/assignment-ack`:
           return jsonResponse({
             attempt_identity: body.attempt_identity,
             attempt_no: 1,
             lease_expires_at: later,
           });
-        case `/api/v1/agent-runtime/v2/runs/${ids.run}/assignment-reject`:
+        case `/api/v1/agent-runtime/runs/${ids.run}/assignment-reject`:
           return jsonResponse({
             attempt_identity: body.attempt_identity,
             outcome: "offer_rejected",
             dispatch_state: "pending",
           });
-        case `/api/v1/agent-runtime/v2/runs/${ids.run}/lease-renew`:
+        case `/api/v1/agent-runtime/runs/${ids.run}/lease-renew`:
           return jsonResponse({
             attempt_identity: body.attempt_identity,
             lease_expires_at: later,
@@ -98,14 +98,14 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
               },
             },
           });
-        case `/api/v1/agent-runtime/v2/runs/${ids.run}/events`:
+        case `/api/v1/agent-runtime/runs/${ids.run}/events`:
           return jsonResponse({
             client_event_id: body.client_event_id,
             client_event_seq: body.client_event_seq,
             sequence: 4,
             replayed: false,
           });
-        case `/api/v1/agent-runtime/v2/runs/${ids.run}/result`:
+        case `/api/v1/agent-runtime/runs/${ids.run}/result`:
           return jsonResponse({
             result_id: body.result_id,
             classification: "success",
@@ -113,7 +113,7 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
             dispatch_state: "terminal",
             replayed: false,
           });
-        case "/api/v1/agent-runtime/v2/runs/resume":
+        case "/api/v1/agent-runtime/runs/resume":
           return jsonResponse({
             decisions: body.attempts.map((attempt) => ({
               attempt_identity: attempt.attempt_identity,
@@ -122,7 +122,7 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
               allowed_actions: ["continue_execution", "upload_events", "upload_result"],
             })),
           });
-        case `/api/v1/agent-runtime/v2/sessions/${ids.session}/close`:
+        case `/api/v1/agent-runtime/sessions/${ids.session}/close`:
           return new Response(null, { status: 204 });
         default:
           return jsonResponse({ error: { code: "NOT_FOUND", message: "not found" } }, { status: 404 });
