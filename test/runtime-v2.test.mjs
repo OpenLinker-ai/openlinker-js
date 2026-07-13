@@ -226,10 +226,36 @@ test("runtime v2 HTTP flow keeps claim and assignment ACK separate", async () =>
     features: [...RuntimeRequiredFeatures],
     contract_digest: RuntimeContractDigest,
   });
+  assert.deepEqual(calls[1].body, calls[0].body);
   const eventCall = calls.find((call) => call.url.pathname.endsWith("/events"));
   assert.equal(eventCall.body.client_event_id, ids.event);
   const resultCall = calls.find((call) => call.url.pathname.endsWith("/result"));
   assert.equal(resultCall.body.result_id, ids.result);
+  assert.deepEqual(calls.at(-1).body, {
+    node_id: ids.node,
+    agent_id: ids.agent,
+    worker_id: "worker-a",
+    runtime_session_id: ids.session,
+    session_epoch: 1,
+    status: "offline",
+    reason: "process restart",
+  });
+});
+
+test("runtime v2 session close requires an empty 204 response", async () => {
+  const runtime = runtimeWithFetch(async () => jsonResponse({}, { status: 200 }));
+  await assert.rejects(
+    () => runtime.closeRuntimeV2Session({
+      nodeId: ids.node,
+      agentId: ids.agent,
+      workerId: "worker-a",
+      runtimeSessionId: ids.session,
+      sessionEpoch: 1,
+      status: "closed",
+      reason: "operator shutdown",
+    }),
+    /session close must return 204/,
+  );
 });
 
 test("runtime v2 validates stable identities, contract, capacity, and request shape locally", async () => {

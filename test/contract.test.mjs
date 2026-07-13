@@ -119,6 +119,7 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
   }
 
   const endpointKeys = new Set();
+  const endpoints = new Map();
   for (const endpoint of contract.endpoints) {
     assert.equal(typeof endpoint.client_method, "string");
     assert.equal(typeof endpoint.http_method, "string");
@@ -128,8 +129,45 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
     const key = `${endpoint.http_method} ${endpoint.path}`;
     assert.ok(!endpointKeys.has(key), `duplicate endpoint ${key}`);
     endpointKeys.add(key);
+    endpoints.set(key, endpoint);
   }
-  assert.ok(endpointKeys.has("POST /api/v1/agent-runtime/call-agent"));
+  assert.deepEqual([...endpointKeys].sort(), [
+    "GET /api/v1/agent-runtime/commands",
+    "POST /api/v1/agent-runtime/call-agent",
+    "POST /api/v1/agent-runtime/runs/claim",
+    "POST /api/v1/agent-runtime/runs/resume",
+    "POST /api/v1/agent-runtime/runs/{id}/assignment-ack",
+    "POST /api/v1/agent-runtime/runs/{id}/assignment-reject",
+    "POST /api/v1/agent-runtime/runs/{id}/cancel-ack",
+    "POST /api/v1/agent-runtime/runs/{id}/events",
+    "POST /api/v1/agent-runtime/runs/{id}/lease-renew",
+    "POST /api/v1/agent-runtime/runs/{id}/result",
+    "POST /api/v1/agent-runtime/sessions",
+    "POST /api/v1/agent-runtime/sessions/{id}/close",
+    "POST /api/v1/agent-runtime/sessions/{id}/heartbeat",
+  ].sort());
+  assert.deepEqual(
+    endpoints.get("POST /api/v1/agent-runtime/sessions/{id}/heartbeat"),
+    {
+      client_method: "heartbeatRuntimeSession",
+      http_method: "POST",
+      path: "/api/v1/agent-runtime/sessions/{id}/heartbeat",
+      request_body_schema: { $ref: "#/$defs/RuntimeHelloPayload" },
+      success_response_schema: { $ref: "#/$defs/RuntimeReadyPayload" },
+      error_response_schema: { $ref: "#/$defs/RuntimeError" },
+    },
+  );
+  assert.deepEqual(
+    endpoints.get("POST /api/v1/agent-runtime/sessions/{id}/close"),
+    {
+      client_method: "closeRuntimeSession",
+      http_method: "POST",
+      path: "/api/v1/agent-runtime/sessions/{id}/close",
+      request_body_schema: { $ref: "#/$defs/RuntimeSessionCloseRequest" },
+      empty_response_status: 204,
+      error_response_schema: { $ref: "#/$defs/RuntimeError" },
+    },
+  );
 
   assert.equal(Object.hasOwn(contract, "legacy_routes"), false);
   for (const definition of [
@@ -138,9 +176,32 @@ test("Runtime v2 contract matches the exported handshake manifest", async () => 
     "ResumeAttempt",
     "PendingCommand",
     "RuntimeCommandsResponse",
+    "RuntimeSessionCloseRequest",
   ]) {
     assert.ok(contract.$defs[definition], `missing definition ${definition}`);
   }
+  assert.deepEqual(contract.$defs.RuntimeSessionCloseRequest, {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "node_id",
+      "agent_id",
+      "worker_id",
+      "runtime_session_id",
+      "session_epoch",
+      "status",
+      "reason",
+    ],
+    properties: {
+      node_id: { $ref: "#/$defs/UUID" },
+      agent_id: { $ref: "#/$defs/UUID" },
+      worker_id: { type: "string", minLength: 1, maxLength: 200 },
+      runtime_session_id: { $ref: "#/$defs/UUID" },
+      session_epoch: { $ref: "#/$defs/PositiveInteger" },
+      status: { type: "string", enum: ["offline", "closed"] },
+      reason: { type: "string", minLength: 1, maxLength: 200 },
+    },
+  });
   assert.deepEqual(
     contract.$defs.RuntimeErrorBody.properties.code.enum,
     contract.stable_error_codes,
