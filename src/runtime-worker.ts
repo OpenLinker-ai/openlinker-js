@@ -185,11 +185,18 @@ export class RuntimeDrainTimeoutError extends Error {
   }
 }
 
+class RuntimeDrainUnsupportedError extends Error {
+  constructor(transport: "HTTP" | "WebSocket") {
+    super(`Runtime ${transport} transport does not support the current session drain contract`);
+    this.name = "RuntimeDrainUnsupportedError";
+  }
+}
+
 /** Strict protocol surface used by RuntimeWorker and by deterministic fakes. */
 export interface RuntimeWorkerClient {
   createRuntimeSession(hello: RuntimeHelloPayload, options?: RequestOptions): Promise<RuntimeReadyPayload>;
   heartbeatRuntimeSession(hello: RuntimeHelloPayload, options?: RequestOptions): Promise<RuntimeReadyPayload>;
-  drainRuntimeSession(
+  drainRuntimeSession?(
     runtimeSessionId: string,
     request: RuntimeDrainPayload,
     options?: RequestOptions,
@@ -288,7 +295,7 @@ export interface RuntimeWorkerDuplex {
     cancelState: "delivered" | "stopping" | "stopped" | "unsupported" | "failed";
     errorCode?: string;
   }): Promise<void>;
-  requestDrain(request: RuntimeDrainPayload): Promise<RuntimeDrainPayload>;
+  requestDrain?(request: RuntimeDrainPayload): Promise<RuntimeDrainPayload>;
   close(code?: number, reason?: string): void;
 }
 
@@ -611,9 +618,15 @@ export class RuntimeWorker {
     const deadlineSignal = AbortSignal.timeout(Math.max(1, remaining));
     return this.retry(async (signal) => {
       if (this.activeMode === "ws" && this.duplex) {
+        if (typeof this.duplex.requestDrain !== "function") {
+          throw new RuntimeDrainUnsupportedError("WebSocket");
+        }
         return Promise.race([this.duplex.requestDrain(request), abortPromise(signal)]);
       }
       if (this.activeMode === "pull" && this.transport) {
+        if (typeof this.transport.http.drainRuntimeSession !== "function") {
+          throw new RuntimeDrainUnsupportedError("HTTP");
+        }
         const modeSignal = this.modeAbort.signal;
         const response = await this.transport.http.drainRuntimeSession(
           this.requiredIdentity().runtimeSessionId,
@@ -2103,7 +2116,8 @@ function websocketCloseError(code: number, reason: string): RuntimeWebSocketErro
 }
 
 function isPermanentRuntimeError(error: unknown): boolean {
-  if (error instanceof RuntimePolicyRecoveryError || isRuntimePolicyRecoverySignal(error)) return true;
+  if (error instanceof RuntimeDrainUnsupportedError || error instanceof RuntimePolicyRecoveryError ||
+      isRuntimePolicyRecoverySignal(error)) return true;
   const code = runtimeErrorCode(error);
   if ([
     "UNAUTHORIZED", "FORBIDDEN", "PERMISSION_DENIED", "RUNTIME_CLIENT_UPGRADE_REQUIRED",
