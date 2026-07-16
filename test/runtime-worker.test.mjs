@@ -8,6 +8,7 @@ import {
   FileRuntimeStore,
   MemoryRuntimeStore,
   OpenLinkerError,
+  RuntimeDrainTimeoutError,
   RuntimeRequiredFeatures,
   RuntimeWebSocketError,
   RuntimeWorker,
@@ -313,6 +314,225 @@ test("RuntimeWorker shutdown retains a finished spool without waiting for Core A
   } finally {
     await reopened.close();
   }
+});
+
+test("RuntimeWorker drain waits for the active handler and durable spool ACK before stopping", async () => {
+  const store = new MemoryRuntimeStore();
+  const handlerStarted = deferred();
+  const handlerGate = deferred();
+  const resultUploadStarted = deferred();
+  const resultAckGate = deferred();
+  let hello;
+  let claimed = false;
+  let drainSettled = false;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return assignmentFor(hello);
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async appendRuntimeEvent(event) {
+      return {
+        clientEventId: event.clientEventId,
+        clientEventSeq: event.clientEventSeq,
+        sequence: event.clientEventSeq,
+        replayed: false,
+      };
+    },
+    async finalizeRuntimeResult(result) {
+      resultUploadStarted.resolve();
+      await resultAckGate.promise;
+      return {
+        resultId: result.resultId,
+        classification: "success",
+        runStatus: "success",
+        dispatchState: "terminal",
+        replayed: false,
+      };
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 5,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      handlerStarted.resolve();
+      await handlerGate.promise;
+      await run.emit("run.progress", { durable: true });
+      return { output: { complete: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+    randomUUID: () => ids.result,
+  });
+
+  const running = worker.start();
+  await handlerStarted.promise;
+  const draining = worker.drain({ timeoutMs: 2_000 }).finally(() => {
+    drainSettled = true;
+  });
+  await delay(20);
+  assert.equal(drainSettled, false, "drain returned before the handler completed");
+
+  handlerGate.resolve();
+  await resultUploadStarted.promise;
+  await delay(20);
+  assert.equal(drainSettled, false, "drain returned before Core ACKed the durable Result");
+
+  resultAckGate.resolve();
+  await draining;
+  await running;
+  assert.equal(worker.transportState, "stopped");
+});
+
+test("RuntimeWorker drain times out explicitly and preserves the unacknowledged spool", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-drain-timeout-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const store = new FileRuntimeStore(dataDir);
+  let hello;
+  let claimed = false;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return assignmentFor(hello);
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async appendRuntimeEvent() {
+      throw new Error("Core Event ACK remains unavailable");
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    retryMinimumMs: 1,
+    retryMaximumMs: 5,
+    heartbeatIntervalMs: 10_000,
+    shutdownTimeoutMs: 100,
+    handler: async (run) => {
+      await run.emit("run.progress", { durable: true });
+      return { output: { complete: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+    randomUUID: () => ids.result,
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "pull_active");
+  await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "finished");
+  const firstIdentity = worker.identity;
+  await assert.rejects(worker.drain({ timeoutMs: 100 }), (error) => {
+    assert.ok(error instanceof RuntimeDrainTimeoutError);
+    assert.equal(error.code, "RUNTIME_DRAIN_TIMEOUT");
+    assert.equal(error.timeoutMs, 100);
+    assert.deepEqual(error.spool, {
+      assignments: 1,
+      events: 1,
+      results: 1,
+      empty: false,
+    });
+    return true;
+  });
+  await running;
+
+  const reopened = new FileRuntimeStore(dataDir);
+  await reopened.open();
+  let retainedEventId;
+  let retainedResultId;
+  try {
+    assert.deepEqual(await reopened.spoolStatus(), {
+      assignments: 1,
+      events: 1,
+      results: 1,
+      empty: false,
+    });
+    const snapshot = await reopened.snapshot();
+    retainedEventId = snapshot.events[0].clientEventId;
+    retainedResultId = snapshot.results[0].payload.resultId;
+  } finally {
+    await reopened.close();
+  }
+
+  const replayedEventIds = [];
+  const replayedResultIds = [];
+  let recoveryHandlerCalls = 0;
+  const recoveryClient = fakeClient({
+    async appendRuntimeEvent(event) {
+      replayedEventIds.push(event.clientEventId);
+      return {
+        clientEventId: event.clientEventId,
+        clientEventSeq: event.clientEventSeq,
+        sequence: event.clientEventSeq,
+        replayed: true,
+      };
+    },
+    async finalizeRuntimeResult(result) {
+      replayedResultIds.push(result.resultId);
+      return {
+        resultId: result.resultId,
+        classification: "success",
+        runStatus: "success",
+        dispatchState: "terminal",
+        replayed: true,
+      };
+    },
+  });
+  const recovery = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    dataDir,
+    retryMinimumMs: 1,
+    retryMaximumMs: 5,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      recoveryHandlerCalls += 1;
+      return { output: {} };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(recoveryClient),
+  });
+
+  const recoveryRunning = recovery.start();
+  await waitFor(() => recovery.transportState === "pull_active");
+  await waitFor(() => replayedEventIds.length === 1 && replayedResultIds.length === 1);
+  await recovery.drain({ timeoutMs: 1_000 });
+  await recoveryRunning;
+  assert.deepEqual(replayedEventIds, [retainedEventId]);
+  assert.deepEqual(replayedResultIds, [retainedResultId]);
+  assert.equal(recoveryHandlerCalls, 0, "recovery re-entered an already finished handler");
+  assert.equal(recovery.identity.workerId, firstIdentity.workerId);
+  assert.equal(recovery.identity.sessionEpoch, firstIdentity.sessionEpoch + 1);
 });
 
 test("RuntimeWorker refuses to re-enter a handler after a persisted started boundary", async (t) => {

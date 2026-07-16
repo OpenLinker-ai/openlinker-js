@@ -24,6 +24,7 @@ import {
   type RuntimeStoredAssignment,
   type RuntimeStoredEvent,
   type RuntimeStoredResult,
+  type RuntimeSpoolStatus,
   type RuntimeWorkerIdentity,
 } from "./runtime-store.js";
 import {
@@ -154,6 +155,31 @@ export interface RuntimeWorkerConfig {
   websocketProbeTimeoutMs?: number | undefined;
   shutdownTimeoutMs?: number | undefined;
   logger?: RuntimeWorkerLogger | undefined;
+}
+
+export interface RuntimeWorkerDrainOptions {
+  /** Maximum time to wait for handlers and every durable ACK. */
+  timeoutMs?: number | undefined;
+}
+
+/**
+ * A drain timeout is an explicit unsafe-to-exit result. The reported durable
+ * records remain in the RuntimeStore for the next process Session to resume.
+ */
+export class RuntimeDrainTimeoutError extends Error {
+  readonly code = "RUNTIME_DRAIN_TIMEOUT";
+
+  constructor(
+    public readonly timeoutMs: number,
+    public readonly spool: Readonly<RuntimeSpoolStatus>,
+  ) {
+    super(
+      `Runtime Worker drain timed out after ${timeoutMs}ms with ` +
+      `${spool.assignments} assignment(s), ${spool.events} Event(s), and ` +
+      `${spool.results} Result(s) still durable`,
+    );
+    this.name = "RuntimeDrainTimeoutError";
+  }
 }
 
 /** Strict protocol surface used by RuntimeWorker and by deterministic fakes. */
@@ -376,6 +402,8 @@ export class RuntimeWorker {
   private draining = false;
   private stopping = false;
   private fatalReported = false;
+  private completionFailure: Error | undefined;
+  private drainOperation: Promise<void> | undefined;
   private loops: Promise<void>[] = [];
   private readonly active = new Map<string, ActiveAttempt>();
   private readonly reservations = new Set<string>();
@@ -446,6 +474,7 @@ export class RuntimeWorker {
         failure ??= asError(error);
       }
       this.completed = true;
+      this.completionFailure = failure;
       this.doneSignal.resolve();
     }
     if (failure) throw failure;
@@ -455,6 +484,80 @@ export class RuntimeWorker {
     if (!this.started) return;
     this.requestStop();
     await this.doneSignal.promise;
+  }
+
+  /**
+   * Stop accepting assignments, keep the Runtime transport alive until all
+   * accepted handlers and durable Event/Result uploads are acknowledged, then
+   * stop the Worker. Unlike stop(), a timeout rejects and must not be treated
+   * as proof that process exit is safe.
+   */
+  drain(options: RuntimeWorkerDrainOptions = {}): Promise<void> {
+    if (this.drainOperation) return this.drainOperation;
+    if (!this.started) {
+      return Promise.reject(new Error("RuntimeWorker must be started before it can drain"));
+    }
+    if (this.completed) {
+      return Promise.reject(this.completionFailure ?? new Error(
+        "RuntimeWorker stopped before a durable drain was requested",
+      ));
+    }
+    const timeoutMs = boundedInteger(
+      options.timeoutMs ?? this.config.shutdownTimeoutMs,
+      1,
+      300_000,
+      "drain timeoutMs",
+    );
+    this.draining = true;
+    this.drainOperation = this.performDrain(timeoutMs);
+    return this.drainOperation;
+  }
+
+  private async performDrain(timeoutMs: number): Promise<void> {
+    const deadline = this.dependencies.now() + timeoutMs;
+    while (true) {
+      if (this.completed) {
+        throw this.completionFailure ?? new Error(
+          "RuntimeWorker stopped before its durable drain completed",
+        );
+      }
+      const store = this.store;
+      if (store) {
+        const spool = await store.spoolStatus();
+        if (spool.empty && this.active.size === 0 &&
+          this.assignmentQueues.size === 0 && this.reservations.size === 0) {
+          this.requestStop();
+          await this.doneSignal.promise;
+          if (this.completionFailure) throw this.completionFailure;
+          return;
+        }
+        const remaining = deadline - this.dependencies.now();
+        if (remaining <= 0) {
+          this.requestStop();
+          throw new RuntimeDrainTimeoutError(timeoutMs, Object.freeze({ ...spool }));
+        }
+        const unfinishedHandlers = [...this.active.values()]
+          .filter((attempt) => !attempt.handlerFinished)
+          .map((attempt) => attempt.done);
+        await Promise.race([
+          ...unfinishedHandlers,
+          sleep(Math.min(25, remaining), this.runtimeAbort.signal),
+          this.doneSignal.promise,
+        ]).catch((error) => {
+          if (!isAbortError(error)) throw error;
+        });
+        continue;
+      }
+      const remaining = deadline - this.dependencies.now();
+      if (remaining <= 0) {
+        this.requestStop();
+        throw new RuntimeDrainTimeoutError(timeoutMs, emptySpoolStatus());
+      }
+      await Promise.race([
+        sleep(Math.min(25, remaining)),
+        this.doneSignal.promise,
+      ]);
+    }
   }
 
   private requestStop(): void {
@@ -752,6 +855,9 @@ export class RuntimeWorker {
   }
 
   private enqueueAssignment(assignment: RuntimeRunAssignedPayload): void {
+    // Once shutdown starts, the closing Session is Core's redispatch fence.
+    // Never create fresh durable work after a successful empty-spool check.
+    if (this.stopping) return;
     const attemptId = assignment.attemptIdentity.attemptId;
     if (!this.reservations.has(attemptId) && !this.active.has(attemptId) &&
       !this.draining && (this.store?.acceptsNewRuns() ?? false) &&
@@ -1998,6 +2104,10 @@ function boundedInteger(value: number, minimum: number, maximum: number, label: 
     throw new Error(`RuntimeWorker ${label} must be between ${minimum} and ${maximum}`);
   }
   return value;
+}
+
+function emptySpoolStatus(): Readonly<RuntimeSpoolStatus> {
+  return Object.freeze({ assignments: 0, events: 0, results: 0, empty: true });
 }
 
 function isUUID(value: string): boolean {

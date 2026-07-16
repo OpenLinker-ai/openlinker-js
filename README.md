@@ -166,6 +166,7 @@ handler is called only after Core confirms the assignment.
 
 ```ts
 import {
+  RuntimeDrainTimeoutError,
   RuntimeWorker,
 } from "@openlinker/sdk/runtime";
 
@@ -197,6 +198,29 @@ exclusive process lock, atomic fsync-backed writes, authenticated encryption,
 private file modes, and fail-closed corruption and capacity checks.
 `MemoryRuntimeStore` is only accepted when `allowUnsafeMemoryStore: true` is
 set explicitly; it is intended for tests, not production.
+
+For a deployment or orchestrator shutdown, call the explicit graceful drain
+instead of treating a normal process stop as proof that uploads are safe:
+
+```ts
+try {
+  await worker.drain({ timeoutMs: 30_000 });
+} catch (error) {
+  if (error instanceof RuntimeDrainTimeoutError) {
+    console.error("Runtime spool is still durable", error.spool);
+  }
+  throw error;
+}
+```
+
+`drain()` first advertises zero capacity and stops claiming new assignments.
+It keeps the Runtime connection, lease renewal, cancellation, and upload loops
+alive until accepted handlers finish and the assignment/Event/Result spool is
+empty. It then stops the worker. A timeout rejects with
+`RUNTIME_DRAIN_TIMEOUT`; the remaining records are retained for fixed-ID
+resume in the next Session. `stop()` deliberately retains its previous bounded
+shutdown behavior and does not wait for remote spool ACKs. Store owners can
+inspect the same durable boundary with `spoolStatus()`.
 
 `transport: "auto"` starts with WebSocket, falls back to pull after a socket
 failure, and probes WebSocket again while pull remains available. `"ws"` and
@@ -319,7 +343,7 @@ Application-side calls:
 
 Reliable Worker and strict Runtime protocol, from `@openlinker/sdk/runtime`:
 
-- `RuntimeWorker`, `FileRuntimeStore`, and explicit-test `MemoryRuntimeStore`
+- `RuntimeWorker`, `RuntimeDrainTimeoutError`, `FileRuntimeStore`, and explicit-test `MemoryRuntimeStore`
 - `OpenLinkerRuntime` and `RuntimeWebSocketSession`
 - `createRuntimeSession`, heartbeat, close, and `claimRuntimeRun`
 - `ackRuntimeAssignment`, `rejectRuntimeAssignment`, and `renewRuntimeLease`

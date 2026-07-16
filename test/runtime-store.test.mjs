@@ -27,6 +27,12 @@ test("FileRuntimeStore encrypts durable work and advances stable Session identit
   const first = await store.beginSession();
   const assignment = assigned(first, { privatePrompt: "do not expose this" });
   await store.saveAssignment(assignment);
+  assert.deepEqual(await store.spoolStatus(), {
+    assignments: 1,
+    events: 0,
+    results: 0,
+    empty: false,
+  });
   assert.equal((await store.getAssignment(ids.attempt)).state, "received");
   await store.transitionAssignment(ids.attempt, "ack_sent");
   await store.transitionAssignment(ids.attempt, "confirmed", {
@@ -68,6 +74,12 @@ test("FileRuntimeStore encrypts durable work and advances stable Session identit
   await store.ackResult(ids.attempt, ids.result);
   assert.equal((await store.snapshot()).events.length, 0);
   await store.deleteAssignment(ids.attempt);
+  assert.deepEqual(await store.spoolStatus(), {
+    assignments: 0,
+    events: 0,
+    results: 0,
+    empty: true,
+  });
   await store.close();
 
   const reopened = new FileRuntimeStore(dataDir, { reserveBytes: 0 });

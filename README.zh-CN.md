@@ -158,6 +158,7 @@ assignment 且该状态已经落盘后，handler 才会运行。
 
 ```ts
 import {
+  RuntimeDrainTimeoutError,
   RuntimeWorker,
 } from "@openlinker/sdk/runtime";
 
@@ -187,6 +188,26 @@ await worker.start();
 身份和单调递增的 Session epoch，并提供进程排他锁、原子写入、fsync、认证加密、私有文件
 权限、损坏检测和容量保护。任何一项不满足都会 fail closed。`MemoryRuntimeStore` 只在显式
 设置 `allowUnsafeMemoryStore: true` 时可用，适合测试，不适合生产。
+
+部署切换或编排器停止进程时，应调用显式 graceful drain，不能把普通进程停止当作上传安全的
+证明：
+
+```ts
+try {
+  await worker.drain({ timeoutMs: 30_000 });
+} catch (error) {
+  if (error instanceof RuntimeDrainTimeoutError) {
+    console.error("Runtime spool 仍在持久化存储中", error.spool);
+  }
+  throw error;
+}
+```
+
+`drain()` 会先公布零容量并停止领取新 assignment，同时保持 Runtime 连接、续租、取消和上传
+循环，直到已接纳 handler 完成且 assignment/Event/Result spool 全部清空，然后才停止 worker。
+超时会以 `RUNTIME_DRAIN_TIMEOUT` 明确失败；剩余记录会原样保留，供下一 Session 使用固定 ID
+resume。`stop()` 刻意保持原有的有界停止语义，不等待远端 spool ACK。Store 使用者可通过
+`spoolStatus()` 检查同一 durable boundary。
 
 `transport: "auto"` 会先用 WebSocket，断线后切到 Pull，并在 Pull 可用期间继续探测
 WebSocket。`"ws"` 和 `"pull"` 可以固定单一 transport。Session create 或 WebSocket 首次
@@ -295,7 +316,7 @@ extended card 和 Push Notification Config 方法。
 
 可靠 Worker 和严格 Runtime 协议只从 `@openlinker/sdk/runtime` 导出：
 
-- `RuntimeWorker`、`FileRuntimeStore` 和仅限显式测试的 `MemoryRuntimeStore`
+- `RuntimeWorker`、`RuntimeDrainTimeoutError`、`FileRuntimeStore` 和仅限显式测试的 `MemoryRuntimeStore`
 - `OpenLinkerRuntime` 和 `RuntimeWebSocketSession`
 - `createRuntimeSession`、heartbeat、close 和 `claimRuntimeRun`
 - `ackRuntimeAssignment`、`rejectRuntimeAssignment` 和 `renewRuntimeLease`

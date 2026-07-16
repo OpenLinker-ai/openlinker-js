@@ -83,6 +83,14 @@ export interface RuntimeStoreSnapshot {
   recordsUsed: number;
 }
 
+/** Counts every durable record that must be cleared before a safe Worker exit. */
+export interface RuntimeSpoolStatus {
+  assignments: number;
+  events: number;
+  results: number;
+  empty: boolean;
+}
+
 /**
  * RuntimeStore mutations must be durable before their promises resolve.
  * RuntimeWorker relies on this boundary before sending assignment, Event, or
@@ -95,6 +103,7 @@ export interface RuntimeStore {
   identity(): RuntimeWorkerIdentity | undefined;
   acceptsNewRuns(): boolean;
   snapshot(): Promise<RuntimeStoreSnapshot>;
+  spoolStatus(): Promise<RuntimeSpoolStatus>;
   saveAssignment(assignment: RuntimeRunAssignedPayload): Promise<RuntimeStoredAssignment>;
   transitionAssignment(
     attemptId: string,
@@ -251,6 +260,10 @@ export class FileRuntimeStore implements RuntimeStore {
       bytesUsed: this.bytesUsed,
       recordsUsed: recordCount(state),
     }));
+  }
+
+  async spoolStatus(): Promise<RuntimeSpoolStatus> {
+    return this.read(runtimeSpoolStatus);
   }
 
   async saveAssignment(assignment: RuntimeRunAssignedPayload): Promise<RuntimeStoredAssignment> {
@@ -603,6 +616,10 @@ export class MemoryRuntimeStore implements RuntimeStore {
       bytesUsed: 0,
       recordsUsed: recordCount(state),
     }));
+  }
+
+  async spoolStatus(): Promise<RuntimeSpoolStatus> {
+    return this.read(runtimeSpoolStatus);
   }
 
   saveAssignment(assignment: RuntimeRunAssignedPayload): Promise<RuntimeStoredAssignment> {
@@ -980,6 +997,18 @@ function eventsInRanges(
 function recordCount(state: RuntimeStoreState): number {
   return Object.keys(state.assignments).length + Object.keys(state.events).length +
     Object.keys(state.results).length;
+}
+
+function runtimeSpoolStatus(state: RuntimeStoreState): RuntimeSpoolStatus {
+  const assignments = Object.keys(state.assignments).length;
+  const events = Object.keys(state.events).length;
+  const results = Object.keys(state.results).length;
+  return {
+    assignments,
+    events,
+    results,
+    empty: assignments === 0 && events === 0 && results === 0,
+  };
 }
 
 function validateState(state: RuntimeStoreState): void {
