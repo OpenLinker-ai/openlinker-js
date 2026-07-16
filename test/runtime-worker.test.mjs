@@ -429,6 +429,90 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
   await running;
 });
 
+test("RuntimeWorker obeys discovered transport order and a fixed server default", async () => {
+  for (const policy of [
+    { allowedTransports: ["pull", "ws"], defaultTransport: "auto" },
+    { allowedTransports: ["ws", "pull"], defaultTransport: "pull" },
+  ]) {
+    let dials = 0;
+    const client = fakeClient();
+    const worker = new RuntimeWorker({
+      platformURL: "https://openlinker.example",
+      transport: "auto",
+      nodeId: ids.node,
+      agentId: ids.agent,
+      agentToken: "ol_agent_private",
+      mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+      store: new MemoryRuntimeStore(),
+      allowUnsafeMemoryStore: true,
+      heartbeatIntervalMs: 10_000,
+      handler: async () => ({ output: {} }),
+    }, {
+      discoverRuntimeConnection: async () => ({
+        runtimeURL: "https://runtime.example",
+        policy,
+      }),
+      connectTransport: async () => ({
+        http: client,
+        async dialWebSocket() {
+          dials += 1;
+          throw new Error("WebSocket must not be selected");
+        },
+        async close() {},
+      }),
+    });
+
+    const running = worker.start();
+    await waitFor(() => worker.transportState === "pull_active");
+    assert.equal(dials, 0, `policy ${JSON.stringify(policy)} crossed into WebSocket`);
+    await worker.stop();
+    await running;
+  }
+});
+
+test("RuntimeWorker applies discovered probe timing over a local preference", async () => {
+  let dials = 0;
+  const client = fakeClient();
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    websocketProbeIntervalMs: 100,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => ({
+      runtimeURL: "https://runtime.example",
+      policy: {
+        allowedTransports: ["ws", "pull"],
+        defaultTransport: "auto",
+        websocketProbeIntervalMs: 1_000,
+        websocketProbeTimeoutMs: 500,
+      },
+    }),
+    connectTransport: async () => ({
+      http: client,
+      async dialWebSocket() {
+        dials += 1;
+        throw new Error("WebSocket unavailable");
+      },
+      async close() {},
+    }),
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "pull_active");
+  await delay(250);
+  assert.equal(dials, 1, "local probe interval overrode the discovered server policy");
+  await worker.stop();
+  await running;
+});
+
 test("RuntimeWorker drops a late Pull assignment after WebSocket reattach", async () => {
   const socketDone = deferred();
   const claimStarted = deferred();

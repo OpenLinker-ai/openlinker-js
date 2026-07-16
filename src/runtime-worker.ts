@@ -3,11 +3,15 @@ import type { JsonObject } from "./types.js";
 import { OpenLinkerError, type RequestOptions } from "./client.js";
 import {
   NodeRuntimeTransport,
+  discoverRuntimeConnection,
   discoverRuntimeURL,
+  resolveRuntimeTransportSelection,
   validatePlatformURL,
   validateRuntimeURL,
   type NodeRuntimeTransportOptions,
+  type RuntimeDiscoveryConnection,
   type RuntimeMTLSConfig,
+  type RuntimeTransportPolicy,
 } from "./runtime-node-transport.js";
 import {
   FileRuntimeStore,
@@ -135,6 +139,7 @@ export interface RuntimeWorkerConfig {
   retryMinimumMs?: number | undefined;
   retryMaximumMs?: number | undefined;
   websocketProbeIntervalMs?: number | undefined;
+  websocketProbeTimeoutMs?: number | undefined;
   shutdownTimeoutMs?: number | undefined;
   logger?: RuntimeWorkerLogger | undefined;
 }
@@ -251,6 +256,7 @@ export interface RuntimeWorkerTransport {
 }
 
 export interface RuntimeWorkerDependencies {
+  discoverRuntimeConnection(platformURL: string, signal?: AbortSignal): Promise<RuntimeDiscoveryConnection>;
   discoverRuntimeURL(platformURL: string, signal?: AbortSignal): Promise<string>;
   connectTransport(options: NodeRuntimeTransportOptions): Promise<RuntimeWorkerTransport>;
   randomUUID(): string;
@@ -299,6 +305,7 @@ interface BusinessClient {
 }
 
 const defaultDependencies: RuntimeWorkerDependencies = {
+  discoverRuntimeConnection: (platformURL, signal) => discoverRuntimeConnection(platformURL, { signal }),
   discoverRuntimeURL: (platformURL, signal) => discoverRuntimeURL(platformURL, { signal }),
   connectTransport: async (options) => {
     const node = await NodeRuntimeTransport.connect(options);
@@ -334,7 +341,7 @@ const defaultDependencies: RuntimeWorkerDependencies = {
  * started boundary.
  */
 export class RuntimeWorker {
-  private readonly config: Readonly<RequiredTimingConfig & RuntimeWorkerConfig>;
+  private config: Readonly<RequiredTimingConfig & RuntimeWorkerConfig>;
   private readonly dependencies: RuntimeWorkerDependencies;
   private readonly stopSignal = deferred<void>();
   private readonly doneSignal = deferred<void>();
@@ -348,6 +355,7 @@ export class RuntimeWorker {
   private ready: RuntimeReadyPayload | undefined;
   private identityValue: RuntimeWorkerIdentity | undefined;
   private activeMode: "ws" | "pull" | undefined;
+  private transportOrder: Array<"ws" | "pull"> = ["ws", "pull"];
   private transportStateValue: RuntimeTransportState = "disconnected";
   private started = false;
   private completed = false;
@@ -364,7 +372,19 @@ export class RuntimeWorker {
     config: RuntimeWorkerConfig,
     dependencies: Partial<RuntimeWorkerDependencies> = {},
   ) {
-    this.dependencies = { ...defaultDependencies, ...dependencies };
+    const discoverConnection = dependencies.discoverRuntimeConnection ?? (
+      dependencies.discoverRuntimeURL
+        ? async (platformURL: string, signal?: AbortSignal): Promise<RuntimeDiscoveryConnection> => ({
+          runtimeURL: await dependencies.discoverRuntimeURL!(platformURL, signal),
+          policy: { allowedTransports: ["ws", "pull"], defaultTransport: "auto" },
+        })
+        : defaultDependencies.discoverRuntimeConnection
+    );
+    this.dependencies = {
+      ...defaultDependencies,
+      ...dependencies,
+      discoverRuntimeConnection: discoverConnection,
+    };
     this.config = Object.freeze(normalizeConfig(config));
   }
 
@@ -430,21 +450,31 @@ export class RuntimeWorker {
     await this.store.open();
     this.identityValue = await this.store.beginSession();
 
-    const runtimeURL = config.runtimeURL
-      ? validateRuntimeURL(config.runtimeURL)
-      : await this.dependencies.discoverRuntimeURL(config.platformURL!, signal);
+    let runtimeURL: string;
+    if (config.runtimeURL) {
+      runtimeURL = validateRuntimeURL(config.runtimeURL);
+    } else {
+      const connection = await this.dependencies.discoverRuntimeConnection(config.platformURL!, signal);
+      runtimeURL = validateRuntimeURL(connection.runtimeURL);
+      this.applyTransportPolicy(connection.policy);
+    }
+    const effectiveConfig = this.config;
     this.transport = await this.dependencies.connectTransport({
       runtimeURL,
-      agentToken: config.agentToken,
-      mtls: config.mtls!,
+      agentToken: effectiveConfig.agentToken,
+      mtls: effectiveConfig.mtls!,
     });
 
-    if (config.transport !== "pull") {
+    if (effectiveConfig.transport === "auto" && !this.autoPrefersWebSocket()) {
+      await this.activatePull(false, signal);
+      return;
+    }
+    if (effectiveConfig.transport !== "pull") {
       try {
         await this.activateWebSocket(false, signal);
         return;
       } catch (error) {
-        if (config.transport === "ws") throw error;
+        if (effectiveConfig.transport === "ws" || !this.autoAllowsPullFallback()) throw error;
         this.log("warn", `Runtime WebSocket unavailable; recovering with pull (${safeError(error)})`);
       }
     }
@@ -463,8 +493,8 @@ export class RuntimeWorker {
     run(() => this.heartbeatLoop());
     run(() => this.leaseLoop());
     run(() => this.spoolLoop());
-    if (this.config.transport === "auto") run(() => this.transportSupervisor());
-    if (this.config.transport === "ws") run(() => this.requiredWebSocketLoop());
+    if (this.autoAllowsPullFallback()) run(() => this.transportSupervisor());
+    if (this.webSocketRequired()) run(() => this.requiredWebSocketLoop());
   }
 
   private async activatePull(reconnect: boolean, signal?: AbortSignal): Promise<void> {
@@ -515,7 +545,7 @@ export class RuntimeWorker {
       },
       onError: (error) => this.log("warn", `Runtime WebSocket error (${safeError(error)})`),
     }, callSignal);
-    const duplex = this.config.transport === "ws"
+    const duplex = this.webSocketRequired()
       ? await this.retry(dial, signal, true)
       : await this.retryInitialAttachConflict(dial, signal);
     this.transportStateValue = "switching_to_ws";
@@ -569,7 +599,11 @@ export class RuntimeWorker {
       await sleep(this.config.websocketProbeIntervalMs, this.runtimeAbort.signal).catch(() => undefined);
       if (this.runtimeAbort.signal.aborted) return;
       try {
-        await this.activateWebSocket(true);
+        const probeSignal = combinedSignal(
+          this.runtimeAbort.signal,
+          AbortSignal.timeout(this.config.websocketProbeTimeoutMs),
+        );
+        await this.activateWebSocket(true, probeSignal);
       } catch (error) {
         this.log("debug", `Runtime WebSocket probe failed (${safeError(error)})`);
         if (this.activeMode !== "pull") {
@@ -1230,6 +1264,52 @@ export class RuntimeWorker {
     throw new Error("Runtime transport is switching");
   }
 
+  private applyTransportPolicy(policy: RuntimeTransportPolicy): void {
+    const selection = resolveRuntimeTransportSelection(this.config.transport, policy);
+    const heartbeatIntervalMs = policy.heartbeatIntervalMs ?? this.config.heartbeatIntervalMs;
+    const retryMinimumMs = policy.retryMinimumMs ?? this.config.retryMinimumMs;
+    const retryMaximumMs = policy.retryMaximumMs ?? this.config.retryMaximumMs;
+    const websocketProbeIntervalMs = policy.websocketProbeIntervalMs ??
+      this.config.websocketProbeIntervalMs;
+    const websocketProbeTimeoutMs = policy.websocketProbeTimeoutMs ??
+      this.config.websocketProbeTimeoutMs;
+    boundedInteger(heartbeatIntervalMs, 250, 300_000, "heartbeatIntervalMs");
+    boundedInteger(retryMinimumMs, 1, 60_000, "retryMinimumMs");
+    boundedInteger(retryMaximumMs, 1, 300_000, "retryMaximumMs");
+    boundedInteger(websocketProbeIntervalMs, 100, 300_000, "websocketProbeIntervalMs");
+    boundedInteger(websocketProbeTimeoutMs, 100, 300_000, "websocketProbeTimeoutMs");
+    if (retryMaximumMs < retryMinimumMs) {
+      throw new Error("OpenLinker Runtime retry maximum is below retry minimum");
+    }
+    const sessionStaleAfterMs = policy.sessionStaleAfterMs ?? 0;
+    if (sessionStaleAfterMs > 0 && heartbeatIntervalMs >= sessionStaleAfterMs) {
+      throw new Error("OpenLinker Runtime heartbeat interval must be below the Session stale interval");
+    }
+    this.config = Object.freeze({
+      ...this.config,
+      transport: selection.mode,
+      heartbeatIntervalMs,
+      retryMinimumMs,
+      retryMaximumMs,
+      websocketProbeIntervalMs,
+      websocketProbeTimeoutMs,
+    });
+    this.transportOrder = selection.order;
+  }
+
+  private autoPrefersWebSocket(): boolean {
+    return this.config.transport === "auto" && this.transportOrder[0] === "ws";
+  }
+
+  private autoAllowsPullFallback(): boolean {
+    return this.autoPrefersWebSocket() && this.transportOrder.slice(1).includes("pull");
+  }
+
+  private webSocketRequired(): boolean {
+    return this.config.transport === "ws" ||
+      (this.autoPrefersWebSocket() && !this.autoAllowsPullFallback());
+  }
+
   private replaceModeAbort(): void {
     this.modeAbort.abort();
     this.modeAbort = new AbortController();
@@ -1319,6 +1399,7 @@ interface RequiredTimingConfig {
   retryMinimumMs: number;
   retryMaximumMs: number;
   websocketProbeIntervalMs: number;
+  websocketProbeTimeoutMs: number;
   shutdownTimeoutMs: number;
 }
 
@@ -1353,6 +1434,9 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
   const websocketProbeIntervalMs = boundedInteger(
     config.websocketProbeIntervalMs ?? 15_000, 100, 300_000, "websocketProbeIntervalMs",
   );
+  const websocketProbeTimeoutMs = boundedInteger(
+    config.websocketProbeTimeoutMs ?? 10_000, 100, 300_000, "websocketProbeTimeoutMs",
+  );
   const shutdownTimeoutMs = boundedInteger(
     config.shutdownTimeoutMs ?? 10_000, 100, 300_000, "shutdownTimeoutMs",
   );
@@ -1367,6 +1451,7 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
     retryMinimumMs,
     retryMaximumMs,
     websocketProbeIntervalMs,
+    websocketProbeTimeoutMs,
     shutdownTimeoutMs,
   };
 }

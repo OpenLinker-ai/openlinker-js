@@ -26,6 +26,29 @@ export interface RuntimeDiscoveryOptions {
   signal?: AbortSignal | undefined;
 }
 
+export type RuntimeDiscoveryTransportMode = "auto" | "ws" | "pull";
+
+export interface RuntimeTransportPolicy {
+  allowedTransports: Array<Exclude<RuntimeDiscoveryTransportMode, "auto">>;
+  defaultTransport: RuntimeDiscoveryTransportMode;
+  heartbeatIntervalMs?: number | undefined;
+  sessionStaleAfterMs?: number | undefined;
+  retryMinimumMs?: number | undefined;
+  retryMaximumMs?: number | undefined;
+  websocketProbeIntervalMs?: number | undefined;
+  websocketProbeTimeoutMs?: number | undefined;
+}
+
+export interface RuntimeDiscoveryConnection {
+  runtimeURL: string;
+  policy: RuntimeTransportPolicy;
+}
+
+export interface RuntimeTransportSelection {
+  mode: RuntimeDiscoveryTransportMode;
+  order: Array<Exclude<RuntimeDiscoveryTransportMode, "auto">>;
+}
+
 export interface NodeRuntimeTransportOptions {
   runtimeURL: string;
   agentToken: string;
@@ -51,10 +74,10 @@ interface RuntimeTLSMaterial {
  * platform manifest. Redirects are rejected and no Agent Token or mTLS client
  * certificate is attached to this request.
  */
-export async function discoverRuntimeURL(
+export async function discoverRuntimeConnection(
   platformURL: string,
   options: RuntimeDiscoveryOptions = {},
-): Promise<string> {
+): Promise<RuntimeDiscoveryConnection> {
   const origin = validatePlatformURL(platformURL);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (!fetchImpl) throw new Error("OpenLinker Runtime discovery requires fetch");
@@ -87,12 +110,18 @@ export async function discoverRuntimeURL(
     } catch (cause) {
       throw new Error("OpenLinker connection information is not valid JSON", { cause });
     }
-    const manifest = decodeDiscoveryManifest(raw);
-    return validateRuntimeURL(manifest.runtimeURL);
+    return decodeRuntimeDiscoveryManifest(raw);
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", abort);
   }
+}
+
+export async function discoverRuntimeURL(
+  platformURL: string,
+  options: RuntimeDiscoveryOptions = {},
+): Promise<string> {
+  return (await discoverRuntimeConnection(platformURL, options)).runtimeURL;
 }
 
 /** Node 20 mTLS HTTP and WebSocket transport for the server-only Runtime entry. */
@@ -275,17 +304,132 @@ async function readBoundedBody(response: Response, maximum: number): Promise<Uin
   return result;
 }
 
-function decodeDiscoveryManifest(value: unknown): { runtimeURL: string } {
+export function decodeRuntimeDiscoveryManifest(value: unknown): RuntimeDiscoveryConnection {
   if (!isObject(value) || !isObject(value.base_urls) || !isObject(value.runtime) ||
     typeof value.base_urls.runtime !== "string" || value.runtime.enabled !== true ||
     value.runtime.mtls_required !== true) {
     throw new Error("OpenLinker connection information does not provide the required mTLS Runtime address");
   }
-  return { runtimeURL: value.base_urls.runtime };
+  return {
+    runtimeURL: validateRuntimeURL(value.base_urls.runtime),
+    policy: decodeRuntimeTransportPolicy(value.runtime),
+  };
+}
+
+export function resolveRuntimeTransportSelection(
+  configured: RuntimeDiscoveryTransportMode,
+  policy: RuntimeTransportPolicy,
+): RuntimeTransportSelection {
+  if (configured !== "auto" && !policy.allowedTransports.includes(configured)) {
+    throw new Error(`configured Runtime transport ${configured} is not allowed by OpenLinker`);
+  }
+  const mode = configured === "auto" ? policy.defaultTransport : configured;
+  if (mode !== "auto") {
+    if (!policy.allowedTransports.includes(mode)) {
+      throw new Error(`OpenLinker Runtime default transport ${mode} is not allowed`);
+    }
+    return { mode, order: [mode] };
+  }
+  return { mode, order: [...policy.allowedTransports] };
+}
+
+function decodeRuntimeTransportPolicy(runtime: Record<string, unknown>): RuntimeTransportPolicy {
+  const allowedTransports: Array<"ws" | "pull"> = [];
+  const rawTransports = hasOwn(runtime, "transports")
+    ? runtime.transports
+    : ["websocket", "long_poll"];
+  if (!Array.isArray(rawTransports)) {
+    throw new Error("OpenLinker Runtime transport allowlist is invalid");
+  }
+  for (const raw of rawTransports) {
+    if (typeof raw !== "string") {
+      throw new Error("OpenLinker Runtime transport allowlist is invalid");
+    }
+    const mode = manifestTransportMode(raw);
+    if (mode && !allowedTransports.includes(mode)) allowedTransports.push(mode);
+  }
+  if (allowedTransports.length === 0) {
+    throw new Error("OpenLinker Runtime does not allow a transport supported by this SDK");
+  }
+
+  const rawDefault = hasOwn(runtime, "default_transport") ? runtime.default_transport : "auto";
+  if (typeof rawDefault !== "string") {
+    throw new Error("OpenLinker Runtime default transport is invalid");
+  }
+  const defaultTransport = rawDefault.trim().toLowerCase() === "auto"
+    ? "auto"
+    : manifestTransportMode(rawDefault);
+  if (!defaultTransport) {
+    throw new Error(`OpenLinker Runtime default transport ${rawDefault.trim()} is unsupported`);
+  }
+  if (defaultTransport !== "auto" && !allowedTransports.includes(defaultTransport)) {
+    throw new Error(`OpenLinker Runtime default transport ${defaultTransport} is outside its allowlist`);
+  }
+
+  const policy: RuntimeTransportPolicy = { allowedTransports, defaultTransport };
+  if (!hasOwn(runtime, "transport_policy")) return policy;
+  if (!isObject(runtime.transport_policy)) {
+    throw new Error("OpenLinker Runtime transport policy is invalid");
+  }
+  const rawPolicy = runtime.transport_policy;
+  if (hasOwn(rawPolicy, "version")) {
+    if (rawPolicy.version !== 1) {
+      throw new Error(`OpenLinker Runtime transport policy version ${String(rawPolicy.version)} is unsupported`);
+    }
+  }
+  policy.heartbeatIntervalMs = optionalPolicyDuration(rawPolicy, "heartbeat_interval_seconds", 1_000);
+  policy.sessionStaleAfterMs = optionalPolicyDuration(rawPolicy, "session_stale_after_seconds", 1_000);
+  policy.retryMinimumMs = optionalPolicyDuration(rawPolicy, "retry_minimum_ms", 1);
+  policy.retryMaximumMs = optionalPolicyDuration(rawPolicy, "retry_maximum_ms", 1);
+  policy.websocketProbeIntervalMs = optionalPolicyDuration(rawPolicy, "websocket_probe_interval_ms", 1);
+  policy.websocketProbeTimeoutMs = optionalPolicyDuration(rawPolicy, "websocket_probe_timeout_ms", 1);
+  if (policy.retryMaximumMs !== undefined &&
+    (policy.retryMinimumMs ?? 250) > policy.retryMaximumMs) {
+    throw new Error("OpenLinker Runtime retry maximum is below retry minimum");
+  }
+  if (policy.sessionStaleAfterMs !== undefined &&
+    (policy.heartbeatIntervalMs ?? 5_000) >= policy.sessionStaleAfterMs) {
+    throw new Error("OpenLinker Runtime heartbeat interval must be below the Session stale interval");
+  }
+  return policy;
+}
+
+function manifestTransportMode(value: string): "ws" | "pull" | undefined {
+  switch (value.trim().toLowerCase()) {
+    case "websocket":
+    case "ws":
+      return "ws";
+    case "long_poll":
+    case "pull":
+      return "pull";
+    default:
+      return undefined;
+  }
+}
+
+function optionalPolicyDuration(
+  policy: Record<string, unknown>,
+  field: string,
+  multiplier: number,
+): number | undefined {
+  if (!hasOwn(policy, field)) return undefined;
+  const value = policy[field];
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 86_400_000) {
+    throw new Error(`OpenLinker Runtime ${field} is outside the supported range`);
+  }
+  const duration = (value as number) * multiplier;
+  if (!Number.isSafeInteger(duration) || duration > 86_400_000) {
+    throw new Error(`OpenLinker Runtime ${field} is outside the supported range`);
+  }
+  return duration;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function waitForSocketOpen(socket: WebSocket, signal?: AbortSignal): Promise<void> {
