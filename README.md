@@ -14,14 +14,30 @@ This SDK is pre-1.0. The package tracks the Core API and runtime contracts while
 they are still stabilizing. Pin versions or commits and review `CHANGELOG.md`
 before upgrading.
 
+The SDK wraps the public Core contract in self-hosted and Hosted deployments.
+Hosted authentication, service listings, orders, wallets, billing, and
+marketplace-operation APIs are intentionally outside this package.
+
 ## Install
 
+`@openlinker/sdk` is not yet published on the public npm registry. Until the
+first registry release, check out a reviewed commit, then build and pack it
+instead of relying on `npm install @openlinker/sdk`:
+
 ```bash
-npm install @openlinker/sdk
+git clone https://github.com/OpenLinker-ai/openlinker-js.git
+cd openlinker-js
+git checkout --detach <reviewed-commit>
+npm ci
+npm run build
+npm pack
 ```
 
-The package may still be used from this repository directly while the API
-contract is being finalized.
+Replace `<reviewed-commit>` with the exact commit you selected. The repository's
+coordination tags are not npm package versions; record the version from
+`package.json` and the generated tarball checksum with your dependency lock.
+Install that `.tgz` in the consuming project. After a public registry release
+exists, the normal installation command will be `npm install @openlinker/sdk`.
 
 ## Open-source Architecture
 
@@ -29,6 +45,8 @@ The TypeScript SDK keeps caller and Agent runtime credentials separate. The
 default `@openlinker/sdk` entry wraps user-token platform calls. The
 `@openlinker/sdk/runtime` entry wraps Agent-token runtime calls. Neither entry
 exposes hosted product internals.
+The `mcp_server` value describes how Core reaches an Agent; this package does
+not currently expose a separate MCP protocol client.
 
 ```mermaid
 flowchart LR
@@ -38,7 +56,7 @@ flowchart LR
   Runtime["Agent runtime process"] --> RuntimeSDK["@openlinker/sdk/runtime"]
   RuntimeSDK -->|"mTLS + Agent Token / session / lease / event / result"| Core
 
-  HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"same Core API contract"| Core
+  HostedBridge["Hosted execution bridge<br/>outside this SDK"] -.->|"protected Core execution APIs"| Core
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
@@ -312,7 +330,7 @@ Reliable Worker and strict Runtime protocol, from `@openlinker/sdk/runtime`:
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm run build
 npm test

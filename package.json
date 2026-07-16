@@ -1,7 +1,7 @@
 {
   "name": "@openlinker/sdk",
   "version": "0.1.4",
-  "description": "TypeScript SDK for OpenLinker, an AI agent registry, agent marketplace, A2A/MCP runtime gateway, and self-hosted agent platform.",
+  "description": "Official TypeScript SDK for OpenLinker Core: Agent calls from browsers and Edge runtimes, runs, SSE, webhooks, A2A, and a server-only durable Runtime Worker.",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -17,12 +17,17 @@
     "sdk",
     "ai-agents",
     "agent-registry",
-    "agent-marketplace",
     "agent-runtime",
-    "runtime-gateway",
+    "runtime-worker",
     "self-hosted-agents",
     "a2a",
-    "mcp"
+    "typescript",
+    "javascript",
+    "browser",
+    "nodejs",
+    "edge-runtime",
+    "sse",
+    "webhooks"
   ],
   "engines": {
     "node": ">=20"

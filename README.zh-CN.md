@@ -15,11 +15,16 @@ commit，并阅读 [CHANGELOG.md](./CHANGELOG.md)。
 本 SDK 不内置原生 gRPC 客户端，也不包含钱包、扣费、Stripe、提现、商业 Dashboard
 或本地 adapter 实现。默认入口使用 `OPENLINKER_USER_TOKEN`，runtime 入口使用
 `OPENLINKER_AGENT_TOKEN`。
+
+SDK 在自托管和 Hosted 部署中都只封装 Core 公共契约。Hosted 认证、服务商品、订单、
+钱包、计费和市场运营 API 不进入本包。
+
 ## 开源架构图
 
 TypeScript SDK 把调用方凭证和 Agent runtime 凭证分开。默认 `@openlinker/sdk`
 入口封装 user-token 平台调用；`@openlinker/sdk/runtime` 入口封装 agent-token
 runtime 调用。两者都不暴露托管产品内部接口。
+`mcp_server` 只描述 Core 如何找到 Agent；本包当前没有单独的 MCP 协议 client。
 
 ```mermaid
 flowchart LR
@@ -29,7 +34,7 @@ flowchart LR
   Runtime["Agent runtime process"] --> RuntimeSDK["@openlinker/sdk/runtime"]
   RuntimeSDK -->|"mTLS + Agent Token / session / lease / event / result"| Core
 
-  HostedBridge["Hosted Bridge<br/>可选部署适配层"] -.->|"同一 Core API contract"| Core
+  HostedBridge["Hosted 执行桥<br/>不属于本 SDK"] -.->|"受保护的 Core 执行 API"| Core
 
   Core -->|"direct_http"| HTTPAgent["公网 HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["远程 MCP / JSON-RPC server"]
@@ -39,11 +44,22 @@ flowchart LR
 
 ## 安装
 
+`@openlinker/sdk` 目前尚未发布到公开 npm registry。在首次公开发布前，请先切到已审核的
+commit，再构建并打包，不要依赖 `npm install @openlinker/sdk`：
+
 ```bash
-npm install @openlinker/sdk
+git clone https://github.com/OpenLinker-ai/openlinker-js.git
+cd openlinker-js
+git checkout --detach <reviewed-commit>
+npm ci
+npm run build
+npm pack
 ```
 
-API 契约稳定前，也可以直接从本仓库目录使用该 package。
+请把 `<reviewed-commit>` 替换成选定的精确 commit。仓库的协同 tag 不是 npm package
+版本；应从 `package.json` 记录版本，并把生成 tarball 的 checksum 与依赖锁一起保存。
+在消费项目中安装该 `.tgz`。公开 registry release 存在后，标准安装命令才是
+`npm install @openlinker/sdk`。
 
 ## 快速开始
 
@@ -101,6 +117,37 @@ console.log(sameRun.run_id, sameRun.replayed);
 
 Core 对首次创建返回 `201`，对已结束的重放返回 `200`，对仍在运行的重放返回 `202`。
 SDK 会透明处理这三种状态，可通过 `RunResponse.replayed` 判断是否为重放。
+
+## 持久化事件分页
+
+`listRunEvents` 返回 `items` 以及持久化游标元数据，不再暴露旧的 `events` alias：
+
+```ts
+const page = await openlinker.listRunEvents(run.run_id, {
+  afterSequence: 0,
+  limit: 100,
+});
+
+for (const event of page.items) {
+  console.log(event.sequence, event.event_type, event.payload);
+}
+
+if (page.meta.retention_gap) {
+  console.warn(
+    `Events through sequence ${page.meta.retained_through_sequence} are no longer available`,
+  );
+}
+
+if (page.meta.terminal && page.meta.stream_complete) {
+  console.log("The terminal event history has been read through its latest sequence");
+}
+```
+
+`requested_after_sequence` 是调用方游标。旧事件已经超出保留期时，Core 会把
+`effective_after_sequence` 推进到 `retained_through_sequence`，并设置
+`retention_gap`，避免调用方误判为完整历史。没有可保留事件时，
+`earliest_available_sequence` 和 `latest_available_sequence` 为 `null`。SSE 仍使用
+`streamRunEvents`。
 
 ## OpenLinker Runtime
 
@@ -168,8 +215,49 @@ contract 内协商。
 
 ## Callback
 
-平台托管 callback 不需要公网 callback URL。外部 webhook callback 适合服务端集成。
-处理 webhook 时必须先校验原始请求体签名，再信任 payload。
+平台托管 callback 不需要公网 callback URL：
+
+```ts
+const result = await openlinker.runAgentWithCallbacks({
+  agentId: agents.items[0].id,
+  input: { query: "Summarize this dataset" },
+  callback: {
+    mode: "platform",
+    eventTypes: ["run.message.delta"],
+    onEvent(event) {
+      console.log("callback", event);
+    },
+  },
+});
+```
+
+外部 webhook callback 适合服务端集成：
+
+```ts
+import { createWebhookRunCallback } from "@openlinker/sdk";
+
+const callback = createWebhookRunCallback({
+  url: process.env.OPENLINKER_CALLBACK_URL!,
+  secret: process.env.OPENLINKER_CALLBACK_SECRET,
+  eventTypes: ["run.completed", "run.failed"],
+});
+```
+
+处理 webhook 时必须先校验原始请求体签名，再信任 payload：
+
+```ts
+import { verifyTaskCallbackHeaders } from "@openlinker/sdk";
+
+const rawBody = await request.text();
+const ok = await verifyTaskCallbackHeaders(
+  rawBody,
+  process.env.OPENLINKER_CALLBACK_SECRET!,
+  request.headers,
+);
+if (!ok) {
+  return new Response("invalid signature", { status: 401 });
+}
+```
 
 ## A2A Transport
 
@@ -190,10 +278,35 @@ extended card 和 Push Notification Config 方法。
 
 这些文件列出本包在 OpenAPI / JSON Schema 生成稳定前允许封装的 Core endpoint。
 
+应用侧调用：
+
+- `listAgents`
+- `getAgent`
+- `getAgentCard`
+- `runAgent`
+- `runAgentWithCallbacks`
+- `startAgentRun`
+- `startAgentRunWithCallbacks`
+- `getRun`
+- `listRunEvents`
+- `listRunArtifacts`
+- `listRunMessages`
+- `streamRunEvents`
+
+可靠 Worker 和严格 Runtime 协议只从 `@openlinker/sdk/runtime` 导出：
+
+- `RuntimeWorker`、`FileRuntimeStore` 和仅限显式测试的 `MemoryRuntimeStore`
+- `OpenLinkerRuntime` 和 `RuntimeWebSocketSession`
+- `createRuntimeSession`、heartbeat、close 和 `claimRuntimeRun`
+- `ackRuntimeAssignment`、`rejectRuntimeAssignment` 和 `renewRuntimeLease`
+- `appendRuntimeEvent`、`finalizeRuntimeResult` 和 `resumeRuntimeRuns`
+- `pollRuntimeCommands`、`ackRuntimeCancel` 和 `callRuntimeAgent`
+- `buildRuntimeInvocationProof`
+
 ## 开发
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm run build
 npm test
