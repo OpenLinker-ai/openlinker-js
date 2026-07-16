@@ -320,11 +320,18 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
   const store = new MemoryRuntimeStore();
   const handlerStarted = deferred();
   const handlerGate = deferred();
+  const handlerResumed = deferred();
+  const handlerEventPersisted = deferred();
   const resultUploadStarted = deferred();
   const resultAckGate = deferred();
+  const serverDrainStarted = deferred();
+  const serverDrainAckGate = deferred();
   let hello;
   let claimed = false;
   let drainSettled = false;
+  let drainedRuntimeSessionId;
+  let serverDrainRequest;
+  let serverDrainCalls = 0;
   const client = fakeClient({
     async createRuntimeSession(value) {
       hello = value;
@@ -337,6 +344,17 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
       }
       await delay(5, options?.signal);
       return undefined;
+    },
+    async drainRuntimeSession(runtimeSessionId, request) {
+      serverDrainCalls += 1;
+      drainedRuntimeSessionId = runtimeSessionId;
+      serverDrainRequest = request;
+      serverDrainStarted.resolve();
+      if (serverDrainCalls === 1) {
+        await serverDrainAckGate.promise;
+        return { ...request, reasonCode: "FIRST_WRITER_REASON", inflight: 1 };
+      }
+      return { ...request, reasonCode: "FIRST_WRITER_REASON", inflight: 0 };
     },
     async appendRuntimeEvent(event) {
       return {
@@ -373,7 +391,9 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
     handler: async (run) => {
       handlerStarted.resolve();
       await handlerGate.promise;
+      handlerResumed.resolve();
       await run.emit("run.progress", { durable: true });
+      handlerEventPersisted.resolve();
       return { output: { complete: true } };
     },
   }, {
@@ -383,13 +403,24 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
 
   const running = worker.start();
   await handlerStarted.promise;
-  const draining = worker.drain({ timeoutMs: 2_000 }).finally(() => {
+  const draining = worker.drain({ timeoutMs: 2_000, reasonCode: "DEPLOYMENT" }).finally(() => {
     drainSettled = true;
   });
+  await serverDrainStarted.promise;
+  assert.equal(drainedRuntimeSessionId, hello.runtimeSessionId);
+  assert.equal(serverDrainRequest.reasonCode, "DEPLOYMENT");
+  assert.equal(serverDrainRequest.capacity, 0);
+  assert.equal(serverDrainRequest.inflight, 1);
+  await delay(20);
+  assert.equal(drainSettled, false, "drain returned before Core committed the drain fence");
+
+  serverDrainAckGate.resolve();
   await delay(20);
   assert.equal(drainSettled, false, "drain returned before the handler completed");
 
   handlerGate.resolve();
+  await handlerResumed.promise;
+  await handlerEventPersisted.promise;
   await resultUploadStarted.promise;
   await delay(20);
   assert.equal(drainSettled, false, "drain returned before Core ACKed the durable Result");
@@ -397,6 +428,7 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
   resultAckGate.resolve();
   await draining;
   await running;
+  assert.equal(serverDrainCalls, 2, "drain did not re-check authoritative Core inflight");
   assert.equal(worker.transportState, "stopped");
 });
 
@@ -533,6 +565,82 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
   assert.equal(recoveryHandlerCalls, 0, "recovery re-entered an already finished handler");
   assert.equal(recovery.identity.workerId, firstIdentity.workerId);
   assert.equal(recovery.identity.sessionEpoch, firstIdentity.sessionEpoch + 1);
+});
+
+test("RuntimeWorker client drain rejects a WebSocket offer delivered after the committed ACK", async () => {
+  const drainRequested = deferred();
+  const drainAck = deferred();
+  const offerRejected = deferred();
+  const socketDone = deferred();
+  let callbacks;
+  let hello;
+  let request;
+  let serverDrainCalls = 0;
+  let drainSettled = false;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(value, handlers) {
+      hello = value;
+      callbacks = handlers;
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.requestDrain = async (payload) => {
+        serverDrainCalls += 1;
+        request = payload;
+        drainRequested.resolve();
+        if (serverDrainCalls === 1) return drainAck.promise;
+        return { ...payload, reasonCode: "FIRST_WRITER_REASON", inflight: 0 };
+      };
+      duplex.rejectAssignment = async (identity, reasonCode) => {
+        offerRejected.resolve(reasonCode);
+        return { attemptIdentity: identity, outcome: "offer_rejected", dispatchState: "pending" };
+      };
+      duplex.close = () => socketDone.resolve();
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      assert.fail("a post-drain offer must never enter the handler");
+    },
+  }, {
+    connectTransport: async () => transport,
+    randomUUID: () => ids.result,
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "ws_active");
+  const draining = worker.drain({ timeoutMs: 2_000, reasonCode: "DEPLOYMENT" }).finally(() => {
+    drainSettled = true;
+  });
+  await drainRequested.promise;
+  assert.ok(Number.isFinite(Date.parse(request.deadlineAt)));
+  assert.deepEqual(request, {
+    deadlineAt: request.deadlineAt,
+    reasonCode: "DEPLOYMENT",
+    capacity: 0,
+    inflight: 0,
+  });
+  assert.equal(drainSettled, false);
+
+  // Resolve the server ACK first, then synchronously deliver a raced offer
+  // before the drain continuation can inspect the local queues.
+  drainAck.resolve({ ...request, reasonCode: "FIRST_WRITER_REASON", inflight: 1 });
+  callbacks.onAssigned(assignmentFor(hello));
+  assert.equal(await offerRejected.promise, "NODE_DRAINING");
+  await draining;
+  await running;
+  assert.equal(serverDrainCalls, 2, "drain did not re-check Core after rejecting the raced offer");
+  assert.equal(worker.transportState, "stopped");
 });
 
 test("RuntimeWorker refuses to re-enter a handler after a persisted started boundary", async (t) => {
@@ -1513,6 +1621,7 @@ function fakeDuplex(done) {
       }));
     },
     async ackCancel() {},
+    async requestDrain(request) { return request; },
     close() {},
   };
 }
@@ -1521,6 +1630,7 @@ function fakeClient(overrides = {}) {
   const base = {
     async createRuntimeSession() { return ready(); },
     async heartbeatRuntimeSession() { return ready(); },
+    async drainRuntimeSession(_runtimeSessionId, request) { return request; },
     async closeRuntimeSession() {},
     async claimRuntimeRun(_wait, _request, options) {
       await delay(5, options?.signal);

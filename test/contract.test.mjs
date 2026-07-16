@@ -84,6 +84,7 @@ test("Runtime contract matches the exported handshake manifest", async () => {
     "result_ack",
     "cancel",
     "persistent_spool",
+    "session_drain",
   ]);
 
   assert.equal(
@@ -115,6 +116,13 @@ test("Runtime contract matches the exported handshake manifest", async () => {
   ]) {
     assert.ok(messageTypes.has(required), `missing message ${required}`);
   }
+  const drainMessage = contract.websocket.messages.find((message) => message.type === "runtime.drain");
+  assert.deepEqual(drainMessage, {
+    type: "runtime.drain",
+    direction: "bidirectional",
+    expects_reply: true,
+    schema: { $ref: "#/$defs/RuntimeDrainMessage" },
+  });
 
   const endpointKeys = new Set();
   const endpoints = new Map();
@@ -142,6 +150,7 @@ test("Runtime contract matches the exported handshake manifest", async () => {
     "POST /api/v1/agent-runtime/runs/{id}/result",
     "POST /api/v1/agent-runtime/sessions",
     "POST /api/v1/agent-runtime/sessions/{id}/close",
+    "POST /api/v1/agent-runtime/sessions/{id}/drain",
     "POST /api/v1/agent-runtime/sessions/{id}/heartbeat",
   ].sort());
   assert.deepEqual(
@@ -153,6 +162,18 @@ test("Runtime contract matches the exported handshake manifest", async () => {
       required_headers: [RuntimeAttachmentHeader],
       request_body_schema: { $ref: "#/$defs/RuntimeHelloPayload" },
       success_response_schema: { $ref: "#/$defs/RuntimeReadyPayload" },
+      error_response_schema: { $ref: "#/$defs/RuntimeError" },
+    },
+  );
+  assert.deepEqual(
+    endpoints.get("POST /api/v1/agent-runtime/sessions/{id}/drain"),
+    {
+      client_method: "drainRuntimeSession",
+      http_method: "POST",
+      path: "/api/v1/agent-runtime/sessions/{id}/drain",
+      required_headers: [RuntimeAttachmentHeader],
+      request_body_schema: { $ref: "#/$defs/RuntimeDrainPayload" },
+      success_response_schema: { $ref: "#/$defs/RuntimeDrainPayload" },
       error_response_schema: { $ref: "#/$defs/RuntimeError" },
     },
   );
@@ -180,6 +201,7 @@ test("Runtime contract matches the exported handshake manifest", async () => {
     "POST /api/v1/agent-runtime/runs/{id}/lease-renew",
     "POST /api/v1/agent-runtime/runs/{id}/result",
     "POST /api/v1/agent-runtime/sessions/{id}/close",
+    "POST /api/v1/agent-runtime/sessions/{id}/drain",
     "POST /api/v1/agent-runtime/sessions/{id}/heartbeat",
   ]);
   for (const [key, endpoint] of endpoints) {
@@ -203,9 +225,14 @@ test("Runtime contract matches the exported handshake manifest", async () => {
     "PendingCommand",
     "RuntimeCommandsResponse",
     "RuntimeSessionCloseRequest",
+    "RuntimeDrainPayload",
   ]) {
     assert.ok(contract.$defs[definition], `missing definition ${definition}`);
   }
+  assert.deepEqual(contract.$defs.RuntimeDrainPayload.properties.capacity, { const: 0 });
+  assert.deepEqual(contract.$defs.RunAssignmentRejectPayload.properties.capacity, {
+    $ref: "#/$defs/NonNegativeInteger",
+  });
   assert.deepEqual(contract.$defs.RuntimeSessionCloseRequest, {
     type: "object",
     additionalProperties: false,

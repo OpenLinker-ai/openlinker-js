@@ -3,7 +3,7 @@ import type { JsonObject } from "./types.js";
 export const RuntimeProtocolVersion = 2 as const;
 export const RuntimeContractID = "openlinker.runtime.v2" as const;
 export const RuntimeContractDigest =
-  "3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9" as const;
+  "4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481" as const;
 export const RuntimeAttachmentHeader = "OpenLinker-Runtime-Attachment" as const;
 export const RuntimeRequiredFeatures = Object.freeze([
   "lease_fence",
@@ -14,6 +14,7 @@ export const RuntimeRequiredFeatures = Object.freeze([
   "result_ack",
   "cancel",
   "persistent_spool",
+  "session_drain",
 ] as const);
 
 export const RuntimeMaxMessageBytes = 4 * 1024 * 1024;

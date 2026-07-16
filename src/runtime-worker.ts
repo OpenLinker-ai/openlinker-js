@@ -37,6 +37,7 @@ import {
   type RuntimeAssignmentRejectedPayload,
   type RuntimeAttemptIdentity,
   type RuntimeCommandsResponse,
+  type RuntimeDrainPayload,
   type RuntimeHelloPayload,
   type RuntimeLeaseRenewedPayload,
   type RuntimePendingCommand,
@@ -160,6 +161,8 @@ export interface RuntimeWorkerConfig {
 export interface RuntimeWorkerDrainOptions {
   /** Maximum time to wait for handlers and every durable ACK. */
   timeoutMs?: number | undefined;
+  /** Stable server-side reason stored by the first successful drain request. */
+  reasonCode?: string | undefined;
 }
 
 /**
@@ -186,6 +189,11 @@ export class RuntimeDrainTimeoutError extends Error {
 export interface RuntimeWorkerClient {
   createRuntimeSession(hello: RuntimeHelloPayload, options?: RequestOptions): Promise<RuntimeReadyPayload>;
   heartbeatRuntimeSession(hello: RuntimeHelloPayload, options?: RequestOptions): Promise<RuntimeReadyPayload>;
+  drainRuntimeSession(
+    runtimeSessionId: string,
+    request: RuntimeDrainPayload,
+    options?: RequestOptions,
+  ): Promise<RuntimeDrainPayload>;
   closeRuntimeSession(
     request: {
       nodeId: string;
@@ -280,6 +288,7 @@ export interface RuntimeWorkerDuplex {
     cancelState: "delivered" | "stopping" | "stopped" | "unsupported" | "failed";
     errorCode?: string;
   }): Promise<void>;
+  requestDrain(request: RuntimeDrainPayload): Promise<RuntimeDrainPayload>;
   close(code?: number, reason?: string): void;
 }
 
@@ -364,6 +373,7 @@ const defaultDependencies: RuntimeWorkerDependencies = {
           finalizeResult: (result) => connection.session.finalizeResult(result),
           resume: (request) => connection.session.resume(request),
           ackCancel: async (request) => connection.session.ackCancel(request),
+          requestDrain: (request) => connection.session.requestDrain(request),
           close: connection.close,
         };
       },
@@ -508,13 +518,33 @@ export class RuntimeWorker {
       300_000,
       "drain timeoutMs",
     );
+    const reasonCode = drainReasonCode(options.reasonCode ?? "SDK_GRACEFUL_SHUTDOWN");
     this.draining = true;
-    this.drainOperation = this.performDrain(timeoutMs);
+    this.drainOperation = this.performDrain(timeoutMs, reasonCode).catch((error: unknown) => {
+      this.requestStop();
+      throw error;
+    });
     return this.drainOperation;
   }
 
-  private async performDrain(timeoutMs: number): Promise<void> {
+  private async performDrain(timeoutMs: number, reasonCode: string): Promise<void> {
     const deadline = this.dependencies.now() + timeoutMs;
+    const drainRequest: RuntimeDrainPayload = {
+      deadlineAt: new Date(deadline).toISOString(),
+      reasonCode,
+      capacity: 0,
+      inflight: this.capacitySnapshot().inflight,
+    };
+    let serverDrain: RuntimeDrainPayload;
+    try {
+      serverDrain = await this.requestServerDrain(drainRequest, deadline);
+    } catch (error) {
+      if (deadline - this.dependencies.now() <= 0 || isAbortError(error) ||
+          error instanceof DOMException && error.name === "TimeoutError") {
+        throw await this.drainTimeoutError(timeoutMs);
+      }
+      throw error;
+    }
     while (true) {
       if (this.completed) {
         throw this.completionFailure ?? new Error(
@@ -526,6 +556,23 @@ export class RuntimeWorker {
         const spool = await store.spoolStatus();
         if (spool.empty && this.active.size === 0 &&
           this.assignmentQueues.size === 0 && this.reservations.size === 0) {
+          if (serverDrain.inflight > 0) {
+            const remaining = deadline - this.dependencies.now();
+            if (remaining <= 0) throw new RuntimeDrainTimeoutError(timeoutMs, Object.freeze({ ...spool }));
+            try {
+              serverDrain = await this.requestServerDrain(drainRequest, deadline);
+            } catch (error) {
+              if (deadline - this.dependencies.now() <= 0 || isAbortError(error) ||
+                  error instanceof DOMException && error.name === "TimeoutError") {
+                throw new RuntimeDrainTimeoutError(timeoutMs, Object.freeze({ ...spool }));
+              }
+              throw error;
+            }
+            if (serverDrain.inflight > 0) {
+              await sleep(Math.min(25, remaining), this.runtimeAbort.signal);
+              continue;
+            }
+          }
           this.requestStop();
           await this.doneSignal.promise;
           if (this.completionFailure) throw this.completionFailure;
@@ -533,7 +580,6 @@ export class RuntimeWorker {
         }
         const remaining = deadline - this.dependencies.now();
         if (remaining <= 0) {
-          this.requestStop();
           throw new RuntimeDrainTimeoutError(timeoutMs, Object.freeze({ ...spool }));
         }
         const unfinishedHandlers = [...this.active.values()]
@@ -550,7 +596,6 @@ export class RuntimeWorker {
       }
       const remaining = deadline - this.dependencies.now();
       if (remaining <= 0) {
-        this.requestStop();
         throw new RuntimeDrainTimeoutError(timeoutMs, emptySpoolStatus());
       }
       await Promise.race([
@@ -558,6 +603,33 @@ export class RuntimeWorker {
         this.doneSignal.promise,
       ]);
     }
+  }
+
+  private async requestServerDrain(request: RuntimeDrainPayload, deadline: number): Promise<RuntimeDrainPayload> {
+    const remaining = deadline - this.dependencies.now();
+    if (remaining <= 0) throw new DOMException("Runtime drain deadline elapsed", "TimeoutError");
+    const deadlineSignal = AbortSignal.timeout(Math.max(1, remaining));
+    return this.retry(async (signal) => {
+      if (this.activeMode === "ws" && this.duplex) {
+        return Promise.race([this.duplex.requestDrain(request), abortPromise(signal)]);
+      }
+      if (this.activeMode === "pull" && this.transport) {
+        const modeSignal = this.modeAbort.signal;
+        const response = await this.transport.http.drainRuntimeSession(
+          this.requiredIdentity().runtimeSessionId,
+          request,
+          { signal: combinedSignal(signal, modeSignal) },
+        );
+        if (modeSignal.aborted || this.activeMode !== "pull") throw abortError(modeSignal);
+        return response;
+      }
+      throw new Error("Runtime transport is switching during drain");
+    }, deadlineSignal);
+  }
+
+  private async drainTimeoutError(timeoutMs: number): Promise<RuntimeDrainTimeoutError> {
+    const spool = this.store ? await this.store.spoolStatus() : emptySpoolStatus();
+    return new RuntimeDrainTimeoutError(timeoutMs, Object.freeze({ ...spool }));
   }
 
   private requestStop(): void {
@@ -1469,7 +1541,10 @@ export class RuntimeWorker {
   }
 
   private capacitySnapshot(): { capacity: number; inflight: number } {
-    const inflight = this.active.size + this.reservations.size;
+    // The same Attempt is briefly both reserved and active while its confirmed
+    // handler is launched. Report distinct Attempt identities so the snapshot
+    // never double-counts that hand-off.
+    const inflight = new Set([...this.active.keys(), ...this.reservations]).size;
     const accepting = !this.draining && (this.store?.acceptsNewRuns() ?? true);
     return { capacity: accepting ? this.config.capacity : 0, inflight };
   }
@@ -2102,6 +2177,14 @@ function durationSeconds(milliseconds: number): number {
 function boundedInteger(value: number, minimum: number, maximum: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`RuntimeWorker ${label} must be between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+function drainReasonCode(value: string): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 120 || value.trim() !== value ||
+      /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error("RuntimeWorker drain reasonCode must be 1-120 non-control characters without edge whitespace");
   }
   return value;
 }

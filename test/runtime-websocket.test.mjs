@@ -275,6 +275,45 @@ test("Runtime WebSocket delivers cancellation with exact reply correlation", asy
   assert.equal(sent.reply_to_message_id, cancelMessageId);
 });
 
+test("Runtime WebSocket drain waits for a correlated committed ACK", async () => {
+  const socket = new FakeSocket();
+  const session = await startSession(socket);
+  socket.onSend = (message) => {
+    if (message.type !== "runtime.drain") return;
+    assert.equal("reply_to_message_id" in message, false);
+    assert.deepEqual(message.payload, {
+      deadline_at: later,
+      reason_code: "SDK_GRACEFUL_SHUTDOWN",
+      capacity: 0,
+      inflight: 2,
+    });
+    socket.receive(envelope("runtime.drain", {
+      deadline_at: later,
+      reason_code: "FIRST_WRITER_REASON",
+      capacity: 0,
+      inflight: 1,
+    }, { replyTo: message.message_id }));
+  };
+
+  assert.deepEqual(await session.requestDrain({
+    deadlineAt: later,
+    reasonCode: "SDK_GRACEFUL_SHUTDOWN",
+    capacity: 0,
+    inflight: 2,
+  }), {
+    deadlineAt: later,
+    reasonCode: "FIRST_WRITER_REASON",
+    capacity: 0,
+    inflight: 1,
+  });
+  assert.throws(() => session.requestDrain({
+    deadlineAt: later,
+    reasonCode: "INVALID",
+    capacity: 1,
+    inflight: 0,
+  }), /capacity must be zero/);
+});
+
 test("Runtime WebSocket rejects pending requests on close and closes malformed protocol frames", async () => {
   const socket = new FakeSocket();
   const session = await startSession(socket, { requestTimeoutMs: 5_000 });

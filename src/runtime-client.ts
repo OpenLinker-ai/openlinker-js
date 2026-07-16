@@ -13,6 +13,7 @@ import {
   decodeRuntimeAssignmentRejected,
   decodeRuntimeCancellationState,
   decodeRuntimeCommandsResponse,
+  decodeRuntimeDrain,
   decodeRuntimeErrorEnvelope,
   decodeRuntimeEventAck,
   decodeRuntimeLeaseRenewed,
@@ -25,6 +26,7 @@ import {
   encodeRuntimeCallAgent,
   encodeRuntimeCancelAck,
   encodeRuntimeClaim,
+  encodeRuntimeDrain,
   encodeRuntimeEvent,
   encodeRuntimeHello,
   encodeRuntimeLeaseRenew,
@@ -48,6 +50,7 @@ import type {
   RuntimeCallAgentRequest,
   RuntimeClaimRequest,
   RuntimeCommandsResponse,
+  RuntimeDrainPayload,
   RuntimeHelloPayload,
   RuntimeLeaseRenewedPayload,
   RuntimeLeaseRenewPayload,
@@ -168,6 +171,23 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
       }
       this.attachmentIdValue = undefined;
     });
+  }
+
+  async drainRuntimeSession(
+    runtimeSessionId: string,
+    request: RuntimeDrainPayload,
+    options: RequestOptions = {},
+  ): Promise<RuntimeDrainPayload> {
+    assertRuntimeUUID(runtimeSessionId, "drain.runtimeSessionId");
+    const value = await this.runtimeAttachedRequiredJSON(
+      "POST",
+      `/agent-runtime/sessions/${encodeURIComponent(runtimeSessionId)}/drain`,
+      encodeRuntimeDrain(request),
+      options,
+      undefined,
+      "session drain",
+    );
+    return decodeRuntimeDrain(value);
   }
 
   async claimRuntimeRun(

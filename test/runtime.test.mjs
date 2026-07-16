@@ -126,6 +126,14 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
               allowed_actions: ["continue_execution", "upload_events", "upload_result"],
             })),
           });
+        case `/api/v1/agent-runtime/sessions/${ids.session}/drain`:
+          assert.deepEqual(body, {
+            deadline_at: later,
+            reason_code: "DEPLOYMENT",
+            capacity: 0,
+            inflight: 1,
+          });
+          return jsonResponse(body);
         case `/api/v1/agent-runtime/sessions/${ids.session}/close`:
           return new Response(null, { status: 204 });
         default:
@@ -210,6 +218,18 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
     RuntimeResumeActions.uploadResult,
   ]);
 
+  assert.deepEqual(await runtime.drainRuntimeSession(ids.session, {
+    deadlineAt: later,
+    reasonCode: "DEPLOYMENT",
+    capacity: 0,
+    inflight: 1,
+  }), {
+    deadlineAt: later,
+    reasonCode: "DEPLOYMENT",
+    capacity: 0,
+    inflight: 1,
+  });
+
   await runtime.closeRuntimeSession({
     nodeId: ids.node,
     agentId: ids.agent,
@@ -221,7 +241,7 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
   });
   assert.equal(runtime.runtimeAttachmentId, undefined);
 
-  assert.equal(calls.length, 11);
+  assert.equal(calls.length, 12);
   assert.deepEqual(calls[0].body, {
     node_id: ids.node,
     agent_id: ids.agent,

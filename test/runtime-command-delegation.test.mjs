@@ -173,7 +173,7 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
             payload: {
               deadline_at: later,
               reason_code: "DEPLOY",
-              capacity: 5000,
+              capacity: 0,
               inflight: 4000,
             },
           },
@@ -212,7 +212,7 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
   assert.equal(commands.databaseTime, now);
   assert.equal(commands.commands.length, 3);
   assert.equal(commands.commands[0].payload.cancellationId, ids.cancellation);
-  assert.equal(commands.commands[1].payload.capacity, 5000);
+  assert.equal(commands.commands[1].payload.capacity, 0);
   assert.equal(commands.commands[2].payload.runStatus, "canceled");
 
   const state = await runtime.ackRuntimeCancel({

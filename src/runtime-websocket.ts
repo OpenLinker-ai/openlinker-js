@@ -4,6 +4,7 @@ import {
   decodeRuntimeAssignmentRejected,
   decodeRuntimeEnvelope,
   decodeRuntimeErrorEnvelope,
+  decodeRuntimeDrain,
   decodeRuntimeEventAck,
   decodeRuntimeLeaseRenewed,
   decodeRuntimePendingCommand,
@@ -14,6 +15,7 @@ import {
   encodeRuntimeAssignmentReject,
   encodeRuntimeCancelAck,
   encodeRuntimeEnvelope,
+  encodeRuntimeDrain,
   encodeRuntimeEvent,
   encodeRuntimeHello,
   encodeRuntimeLeaseRenew,
@@ -31,6 +33,7 @@ import {
   type RuntimeAssignmentRejectedPayload,
   type RuntimeAttemptIdentity,
   type RuntimeHelloPayload,
+  type RuntimeDrainPayload,
   type RuntimeLeaseRenewedPayload,
   type RuntimeLeaseRenewPayload,
   type RuntimeMessageType,
@@ -253,6 +256,15 @@ export class RuntimeWebSocketSession {
       RuntimeMessageTypes.runCancelAck,
       encodeRuntimeCancelAck(request),
       replyTo,
+    );
+  }
+
+  requestDrain(request: RuntimeDrainPayload): Promise<RuntimeDrainPayload> {
+    return this.requestOne(
+      RuntimeMessageTypes.drain,
+      encodeRuntimeDrain(request),
+      new Set([RuntimeMessageTypes.drain]),
+      (envelope) => decodeRuntimeDrain(envelope.payload),
     );
   }
 

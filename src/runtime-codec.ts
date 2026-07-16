@@ -261,6 +261,24 @@ export function encodeRuntimeSessionClose(value: RuntimeSessionCloseRequest): Ru
   };
 }
 
+export function encodeRuntimeDrain(value: RuntimeDrainPayload): RuntimeWireObject {
+  exactObject(value, ["deadlineAt", "reasonCode", "capacity", "inflight"], [], "drain");
+  const deadlineAt = assertTimestamp(value.deadlineAt, "drain.deadlineAt");
+  const reasonCode = assertText(value.reasonCode, 120, "drain.reasonCode");
+  if (value.capacity !== 0) throw runtimeError("drain.capacity must be zero");
+  const inflight = assertInteger(value.inflight, 0, undefined, "drain.inflight");
+  return {
+    deadline_at: deadlineAt,
+    reason_code: reasonCode,
+    capacity: 0,
+    inflight,
+  };
+}
+
+export function decodeRuntimeDrain(value: unknown): RuntimeDrainPayload {
+  return decodeDrain(value, "drain response");
+}
+
 export function encodeRuntimeClaim(value: RuntimeClaimRequest): RuntimeWireObject {
   exactObject(value, ["runtimeSessionId", "capacity", "inflight"], [], "claim");
   assertUUID(value.runtimeSessionId, "claim.runtimeSessionId");
@@ -759,10 +777,12 @@ function decodeRunCancel(value: unknown, label: string): RuntimeRunCancelPayload
 
 function decodeDrain(value: unknown, label: string): RuntimeDrainPayload {
   const object = exactObject(value, ["deadline_at", "reason_code", "capacity", "inflight"], [], label);
+  const capacity = assertInteger(object.capacity, 0, undefined, `${label}.capacity`);
+  if (capacity !== 0) throw runtimeError(`${label}.capacity must be zero`);
   return {
     deadlineAt: assertTimestamp(object.deadline_at, `${label}.deadline_at`),
     reasonCode: assertText(object.reason_code, 120, `${label}.reason_code`),
-    capacity: assertInteger(object.capacity, 0, undefined, `${label}.capacity`),
+    capacity,
     inflight: assertInteger(object.inflight, 0, undefined, `${label}.inflight`),
   };
 }
