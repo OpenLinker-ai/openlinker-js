@@ -3,6 +3,7 @@ import type { JsonObject } from "./types.js";
 import { OpenLinkerError, type RequestOptions } from "./client.js";
 import {
   NodeRuntimeTransport,
+  RuntimeFallbackReasonHeader,
   discoverRuntimeConnection,
   discoverRuntimeURL,
   resolveRuntimeTransportSelection,
@@ -10,6 +11,7 @@ import {
   validateRuntimeURL,
   type NodeRuntimeTransportOptions,
   type RuntimeDiscoveryConnection,
+  type RuntimeFallbackReason,
   type RuntimeMTLSConfig,
   type RuntimeTransportPolicy,
 } from "./runtime-node-transport.js";
@@ -49,9 +51,19 @@ import {
   type RuntimeRunResultPayload,
   type RuntimeRunSummary,
 } from "./runtime-types.js";
-import type { RuntimeWebSocketSessionOptions } from "./runtime-websocket.js";
+import {
+  RuntimeWebSocketError,
+  type RuntimeWebSocketSessionOptions,
+} from "./runtime-websocket.js";
 
 export type RuntimeTransportMode = "auto" | "ws" | "pull";
+export type RuntimeFallbackTransition =
+  | "policy_selected"
+  | "same_transport_reconnect"
+  | "policy_rediscovery"
+  | "websocket_to_long_poll"
+  | "failed_websocket_probe_restore_long_poll"
+  | "long_poll_to_websocket";
 export type RuntimeTransportState =
   | "disconnected"
   | "connecting_ws"
@@ -251,6 +263,7 @@ export interface RuntimeWorkerTransport {
     hello: RuntimeHelloPayload,
     callbacks: Pick<RuntimeWebSocketSessionOptions, "onAssigned" | "onCommand" | "onError" | "onClose">,
     signal?: AbortSignal,
+    fallbackReason?: RuntimeFallbackReason,
   ): Promise<RuntimeWorkerDuplex>;
   close(): Promise<void>;
 }
@@ -311,8 +324,8 @@ const defaultDependencies: RuntimeWorkerDependencies = {
     const node = await NodeRuntimeTransport.connect(options);
     return {
       http: node.client,
-      dialWebSocket: async (hello, callbacks, signal) => {
-        const connection = await node.dialWebSocket(hello, callbacks, signal);
+      dialWebSocket: async (hello, callbacks, signal, fallbackReason) => {
+        const connection = await node.dialWebSocket(hello, callbacks, signal, fallbackReason);
         return {
           ready: connection.ready,
           done: connection.done,
@@ -342,6 +355,7 @@ const defaultDependencies: RuntimeWorkerDependencies = {
  */
 export class RuntimeWorker {
   private config: Readonly<RequiredTimingConfig & RuntimeWorkerConfig>;
+  private readonly configured: Readonly<RequiredTimingConfig & RuntimeWorkerConfig>;
   private readonly dependencies: RuntimeWorkerDependencies;
   private readonly stopSignal = deferred<void>();
   private readonly doneSignal = deferred<void>();
@@ -367,6 +381,12 @@ export class RuntimeWorker {
   private readonly reservations = new Set<string>();
   private readonly assignmentQueues = new Map<string, Promise<void>>();
   private readonly cancellations = new Set<string>();
+  private readonly duplexCloseErrors = new WeakMap<RuntimeWorkerDuplex, RuntimeWebSocketError>();
+  private policyRevision = 0;
+  private policyRecovery: Promise<void> | undefined;
+  private policyLastObserved = -1;
+  private policyLastRecovery: Promise<void> | undefined;
+  private policyTerminalError: RuntimePolicyRecoveryError | undefined;
 
   constructor(
     config: RuntimeWorkerConfig,
@@ -385,7 +405,9 @@ export class RuntimeWorker {
       ...dependencies,
       discoverRuntimeConnection: discoverConnection,
     };
-    this.config = Object.freeze(normalizeConfig(config));
+    const normalized = Object.freeze(normalizeConfig(config));
+    this.config = normalized;
+    this.configured = normalized;
   }
 
   get transportState(): RuntimeTransportState {
@@ -464,21 +486,44 @@ export class RuntimeWorker {
       agentToken: effectiveConfig.agentToken,
       mtls: effectiveConfig.mtls!,
     });
+    const observedRevision = this.policyRevision;
+    try {
+      await this.startConfiguredTransport(false, signal);
+    } catch (error) {
+      if (!isRuntimePolicyRecoverySignal(error)) throw error;
+      await this.recoverRuntimePolicy(observedRevision, signal);
+    }
+  }
 
+  private async startConfiguredTransport(
+    reconnect: boolean,
+    signal?: AbortSignal,
+    previousMode: "ws" | "pull" | undefined = this.activeMode,
+    policyRefresh = false,
+  ): Promise<void> {
+    const effectiveConfig = this.config;
+    const selectedReason = policyRefresh
+      ? resolveRuntimeFallbackReason(this.configured.transport, "policy_rediscovery")
+      : this.transportReason(previousMode);
     if (effectiveConfig.transport === "auto" && !this.autoPrefersWebSocket()) {
-      await this.activatePull(false, signal);
+      await this.activatePull(reconnect, signal, selectedReason);
       return;
     }
-    if (effectiveConfig.transport !== "pull") {
-      try {
-        await this.activateWebSocket(false, signal);
-        return;
-      } catch (error) {
-        if (effectiveConfig.transport === "ws" || !this.autoAllowsPullFallback()) throw error;
-        this.log("warn", `Runtime WebSocket unavailable; recovering with pull (${safeError(error)})`);
-      }
+    if (effectiveConfig.transport === "pull") {
+      await this.activatePull(reconnect, signal, selectedReason);
+      return;
     }
-    await this.activatePull(false, signal);
+    try {
+      await this.activateWebSocket(reconnect, signal, selectedReason);
+      return;
+    } catch (error) {
+      if (isPermanentRuntimeError(error) && runtimeErrorCode(error) !== "RUNTIME_SESSION_CONFLICT") {
+        throw error;
+      }
+      if (effectiveConfig.transport === "ws" || !this.autoAllowsPullFallback()) throw error;
+      this.log("warn", `Runtime WebSocket unavailable; recovering with pull (${safeError(error)})`);
+    }
+    await this.activatePull(reconnect, signal, "websocket_unavailable");
   }
 
   private startLoops(): void {
@@ -493,36 +538,48 @@ export class RuntimeWorker {
     run(() => this.heartbeatLoop());
     run(() => this.leaseLoop());
     run(() => this.spoolLoop());
-    if (this.autoAllowsPullFallback()) run(() => this.transportSupervisor());
-    if (this.webSocketRequired()) run(() => this.requiredWebSocketLoop());
+    if (this.configured.transport !== "pull") {
+      run(() => this.transportSupervisor());
+    }
   }
 
-  private async activatePull(reconnect: boolean, signal?: AbortSignal): Promise<void> {
-    const transport = this.requiredTransport();
+  private async activatePull(
+    reconnect: boolean,
+    signal?: AbortSignal,
+    fallbackReason: RuntimeFallbackReason = this.transportReason(this.activeMode),
+  ): Promise<void> {
     this.transportStateValue = "switching_to_pull";
     this.replaceModeAbort();
     this.activeMode = undefined;
     this.duplex?.close(1012, "Switching to pull");
     this.duplex = undefined;
     const ready = await this.retry(
-      (callSignal) => transport.http.createRuntimeSession(this.hello(), { signal: callSignal }),
+      (callSignal) => this.requiredTransport().http.createRuntimeSession(this.hello(), {
+        signal: callSignal,
+        headers: { [RuntimeFallbackReasonHeader]: fallbackReason },
+      }),
       signal ?? this.runtimeAbort.signal,
       true,
+      false,
     );
     this.ready = ready;
     await this.resumeDurableState(
-      httpBusiness(transport.http, this.modeAbort.signal),
+      httpBusiness(this.requiredTransport().http, this.modeAbort.signal),
       reconnect,
       signal,
       true,
+      false,
     );
     this.activeMode = "pull";
     this.transportStateValue = "pull_active";
     this.replaceModeAbort();
   }
 
-  private async activateWebSocket(reconnect: boolean, signal?: AbortSignal): Promise<void> {
-    const transport = this.requiredTransport();
+  private async activateWebSocket(
+    reconnect: boolean,
+    signal?: AbortSignal,
+    fallbackReason: RuntimeFallbackReason = this.transportReason(this.activeMode),
+  ): Promise<void> {
     const replacingPull = this.activeMode === "pull";
     this.transportStateValue = replacingPull ? "probing_ws" : "connecting_ws";
     if (replacingPull) {
@@ -534,7 +591,9 @@ export class RuntimeWorker {
     const queuedAssignments: RuntimeRunAssignedPayload[] = [];
     const queuedCommands: RuntimePendingCommand[] = [];
     let activated = false;
-    const dial = (callSignal: AbortSignal) => transport.dialWebSocket(this.hello(), {
+    let duplexReference: RuntimeWorkerDuplex | undefined;
+    let pendingCloseError: RuntimeWebSocketError | undefined;
+    const dial = (callSignal: AbortSignal) => this.requiredTransport().dialWebSocket(this.hello(), {
       onAssigned: (assignment) => {
         if (activated) this.enqueueAssignment(assignment);
         else queuedAssignments.push(assignment);
@@ -544,10 +603,17 @@ export class RuntimeWorker {
         queuedCommands.push(command);
       },
       onError: (error) => this.log("warn", `Runtime WebSocket error (${safeError(error)})`),
-    }, callSignal);
+      onClose: (event) => {
+        const error = websocketCloseError(event.code, event.reason);
+        if (duplexReference) this.duplexCloseErrors.set(duplexReference, error);
+        else pendingCloseError = error;
+      },
+    }, callSignal, fallbackReason);
     const duplex = this.webSocketRequired()
-      ? await this.retry(dial, signal, true)
+      ? await this.retry(dial, signal, true, false)
       : await this.retryInitialAttachConflict(dial, signal);
+    duplexReference = duplex;
+    if (pendingCloseError) this.duplexCloseErrors.set(duplex, pendingCloseError);
     this.transportStateValue = "switching_to_ws";
     this.replaceModeAbort();
     this.activeMode = undefined;
@@ -571,44 +637,75 @@ export class RuntimeWorker {
     }
   }
 
-  private async requiredWebSocketLoop(): Promise<void> {
-    const duplex = this.duplex;
-    if (!duplex) throw new Error("Runtime WebSocket transport is unavailable");
-    await Promise.race([duplex.done, abortPromise(this.runtimeAbort.signal)]);
-    if (!this.runtimeAbort.signal.aborted) {
-      throw new Error("Runtime WebSocket transport closed");
-    }
-  }
-
   private async transportSupervisor(): Promise<void> {
     while (!this.runtimeAbort.signal.aborted) {
       if (this.activeMode === "ws" && this.duplex) {
+        const duplex = this.duplex;
+        const observedRevision = this.policyRevision;
         await Promise.race([
-          this.duplex.done,
+          duplex.done,
           abortPromise(this.runtimeAbort.signal),
         ]).catch(() => undefined);
         if (this.runtimeAbort.signal.aborted) return;
+        if (duplex !== this.duplex) continue;
+        const closeError = this.duplexCloseErrors.get(duplex);
+        if (closeError && isRuntimePolicyRecoverySignal(closeError)) {
+          try {
+            await this.recoverRuntimePolicy(observedRevision);
+          } catch (error) {
+            this.reportFatal(asError(error));
+            return;
+          }
+          continue;
+        }
         try {
-          await this.activatePull(true);
+          if (this.webSocketRequired()) {
+            await this.activateWebSocket(true, undefined, this.transportReason("ws"));
+          } else {
+            await this.activatePull(true, undefined, "websocket_unavailable");
+          }
         } catch (error) {
+          if (isRuntimePolicyRecoverySignal(error)) {
+            try {
+              await this.recoverRuntimePolicy(observedRevision);
+              continue;
+            } catch (recoveryError) {
+              this.reportFatal(asError(recoveryError));
+              return;
+            }
+          }
           this.reportFatal(asError(error));
           return;
         }
         continue;
       }
+      if (!this.autoAllowsPullFallback()) {
+        await sleep(this.config.retryMinimumMs, this.runtimeAbort.signal).catch(() => undefined);
+        continue;
+      }
       await sleep(this.config.websocketProbeIntervalMs, this.runtimeAbort.signal).catch(() => undefined);
       if (this.runtimeAbort.signal.aborted) return;
+      const observedRevision = this.policyRevision;
       try {
         const probeSignal = combinedSignal(
           this.runtimeAbort.signal,
           AbortSignal.timeout(this.config.websocketProbeTimeoutMs),
         );
-        await this.activateWebSocket(true, probeSignal);
+        await this.activateWebSocket(true, probeSignal, "recovery");
       } catch (error) {
+        if (isRuntimePolicyRecoverySignal(error)) {
+          try {
+            await this.recoverRuntimePolicy(observedRevision);
+          } catch (recoveryError) {
+            this.reportFatal(asError(recoveryError));
+            return;
+          }
+          continue;
+        }
         this.log("debug", `Runtime WebSocket probe failed (${safeError(error)})`);
         if (this.activeMode !== "pull") {
           try {
-            await this.activatePull(true);
+            await this.activatePull(true, undefined, "websocket_unavailable");
           } catch (pullError) {
             this.reportFatal(asError(pullError));
             return;
@@ -633,13 +730,16 @@ export class RuntimeWorker {
         await sleep(50, this.runtimeAbort.signal);
         continue;
       }
-      const signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
+      let signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
       try {
-        const assignment = await this.requiredTransport().http.claimRuntimeRun(
-          durationSeconds(this.config.claimWaitMs),
-          { runtimeSessionId: this.requiredIdentity().runtimeSessionId, capacity, inflight },
-          { signal },
-        );
+        const assignment = await this.policyOperation(() => {
+          signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
+          return this.requiredTransport().http.claimRuntimeRun(
+            durationSeconds(this.config.claimWaitMs),
+            { runtimeSessionId: this.requiredIdentity().runtimeSessionId, capacity, inflight },
+            { signal },
+          );
+        }, this.runtimeAbort.signal);
         if (signal.aborted || this.activeMode !== "pull") continue;
         failures = 0;
         if (assignment) this.enqueueAssignment(assignment);
@@ -847,16 +947,16 @@ export class RuntimeWorker {
           throw abortError(active.controller.signal);
         }
         assertIdempotencyKey(options.idempotencyKey);
-        return this.requiredTransport().http.callRuntimeAgent({
-          invocationContext: assignment.nodeEnvelope,
-          token: assignment.agentInvocationToken,
-          idempotencyKey: options.idempotencyKey,
-        }, {
-          targetAgentId,
-          input,
-          ...(options.metadata ? { metadata: options.metadata } : {}),
-          ...(options.reason ? { reason: options.reason } : {}),
-        }, { signal: active.controller.signal });
+        return this.policyOperation(() => this.requiredTransport().http.callRuntimeAgent({
+            invocationContext: assignment.nodeEnvelope,
+            token: assignment.agentInvocationToken,
+            idempotencyKey: options.idempotencyKey,
+          }, {
+            targetAgentId,
+            input,
+            ...(options.metadata ? { metadata: options.metadata } : {}),
+            ...(options.reason ? { reason: options.reason } : {}),
+          }, { signal: active.controller.signal }), active.controller.signal);
       },
     };
   }
@@ -884,10 +984,10 @@ export class RuntimeWorker {
       const attemptId = assignment.assignment.attemptIdentity.attemptId;
       if (assignment.state !== "started" && assignment.state !== "finished") continue;
       for (const event of await store.listPendingEvents(attemptId)) {
-        const ack = await this.business().appendEvent(
-          runtimeEventPayload(event),
-          this.runtimeAbort.signal,
-        );
+        const ack = await this.policyOperation(() => this.business().appendEvent(
+            runtimeEventPayload(event),
+            this.runtimeAbort.signal,
+          ), this.runtimeAbort.signal);
         if (ack.clientEventId !== event.clientEventId || ack.clientEventSeq !== event.clientEventSeq) {
           throw new Error("Runtime Event ACK identity mismatch");
         }
@@ -898,7 +998,9 @@ export class RuntimeWorker {
       if (!result) continue;
       let ack: RuntimeRunResultAckPayload;
       try {
-        ack = await this.business().finalizeResult(result.payload, this.runtimeAbort.signal);
+        ack = await this.policyOperation(() =>
+          this.business().finalizeResult(result.payload, this.runtimeAbort.signal),
+        this.runtimeAbort.signal);
       } catch (error) {
         if (runtimeErrorCode(error) !== "EVENTS_MISSING") throw error;
         const ranges = missingEventRanges(error);
@@ -906,10 +1008,10 @@ export class RuntimeWorker {
           throw new Error("Runtime Result reported missing Events without replay ranges");
         }
         for (const event of await store.listEventsInRanges(attemptId, ranges)) {
-          const eventAck = await this.business().appendEvent(
-            runtimeEventPayload(event),
-            this.runtimeAbort.signal,
-          );
+          const eventAck = await this.policyOperation(() => this.business().appendEvent(
+              runtimeEventPayload(event),
+              this.runtimeAbort.signal,
+            ), this.runtimeAbort.signal);
           if (eventAck.clientEventId !== event.clientEventId ||
             eventAck.clientEventSeq !== event.clientEventSeq) {
             throw new Error("Runtime replay Event ACK identity mismatch");
@@ -933,6 +1035,7 @@ export class RuntimeWorker {
     reconnect: boolean,
     signal?: AbortSignal,
     retryTransport = true,
+    policyAware = true,
   ): Promise<void> {
     const store = this.requiredStore();
     const assignments = await store.listAssignments();
@@ -959,7 +1062,7 @@ export class RuntimeWorker {
       attempts,
     };
     const decisions = retryTransport
-      ? await this.retry((callSignal) => business.resume(request, callSignal), signal)
+      ? await this.retry((callSignal) => business.resume(request, callSignal), signal, false, policyAware)
       : await business.resume(request, signal);
     if (decisions.length !== assignments.length) throw new Error("Runtime resume response count mismatch");
     for (let index = 0; index < decisions.length; index += 1) {
@@ -1050,13 +1153,16 @@ export class RuntimeWorker {
         await sleep(50, this.runtimeAbort.signal);
         continue;
       }
-      const signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
+      let signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
       try {
-        const response = await this.requiredTransport().http.pollRuntimeCommands(
-          this.requiredIdentity().runtimeSessionId,
-          durationSeconds(this.config.commandWaitMs),
-          { signal },
-        );
+        const response = await this.policyOperation(() => {
+          signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
+          return this.requiredTransport().http.pollRuntimeCommands(
+            this.requiredIdentity().runtimeSessionId,
+            durationSeconds(this.config.commandWaitMs),
+            { signal },
+          );
+        }, this.runtimeAbort.signal);
         if (signal.aborted || this.activeMode !== "pull") continue;
         failures = 0;
         for (const command of response.commands) await this.handleCommand(command);
@@ -1128,12 +1234,15 @@ export class RuntimeWorker {
       }
       await sleep(this.config.heartbeatIntervalMs, this.runtimeAbort.signal);
       if (this.activeMode !== "pull") continue;
-      const signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
+      let signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
       try {
-        const ready = await this.requiredTransport().http.heartbeatRuntimeSession(
-          this.hello(),
-          { signal },
-        );
+        const ready = await this.policyOperation(() => {
+          signal = combinedSignal(this.runtimeAbort.signal, this.modeAbort.signal);
+          return this.requiredTransport().http.heartbeatRuntimeSession(
+            this.hello(),
+            { signal },
+          );
+        }, this.runtimeAbort.signal);
         if (!signal.aborted && this.activeMode === "pull") this.ready = ready;
       } catch (error) {
         if (signal.aborted) continue;
@@ -1160,13 +1269,13 @@ export class RuntimeWorker {
         if (!assignment || this.active.get(attemptId) !== active) continue;
         const snapshot = this.capacitySnapshot();
         try {
-          const renewed = await this.business().renewLease(
-            assignment.assignment.attemptIdentity,
-            assignment.lastClientEventSeq,
-            snapshot.capacity,
-            snapshot.inflight,
-            this.runtimeAbort.signal,
-          );
+          const renewed = await this.policyOperation(() => this.business().renewLease(
+              assignment.assignment.attemptIdentity,
+              assignment.lastClientEventSeq,
+              snapshot.capacity,
+              snapshot.inflight,
+              this.runtimeAbort.signal,
+            ), this.runtimeAbort.signal);
           if (this.active.get(attemptId) !== active) continue;
           active.leaseExpiresAt = Date.parse(renewed.leaseExpiresAt);
           await this.requiredStore().transitionAssignment(
@@ -1180,6 +1289,9 @@ export class RuntimeWorker {
           if (runtimeErrorCode(error) === "STALE_LEASE" || runtimeErrorCode(error) === "LEASE_EXPIRED") {
             await this.clearRevokedAttempt(assignment);
             continue;
+          }
+          if (error instanceof RuntimePolicyRecoveryError || isRuntimePolicyRecoverySignal(error)) {
+            throw error;
           }
           if (this.dependencies.now() >= active.leaseExpiresAt) {
             active.controller.abort(new RuntimeAttemptError("LEASE_EXPIRED", "Runtime lease expired"));
@@ -1265,14 +1377,14 @@ export class RuntimeWorker {
   }
 
   private applyTransportPolicy(policy: RuntimeTransportPolicy): void {
-    const selection = resolveRuntimeTransportSelection(this.config.transport, policy);
-    const heartbeatIntervalMs = policy.heartbeatIntervalMs ?? this.config.heartbeatIntervalMs;
-    const retryMinimumMs = policy.retryMinimumMs ?? this.config.retryMinimumMs;
-    const retryMaximumMs = policy.retryMaximumMs ?? this.config.retryMaximumMs;
+    const selection = resolveRuntimeTransportSelection(this.configured.transport, policy);
+    const heartbeatIntervalMs = policy.heartbeatIntervalMs ?? this.configured.heartbeatIntervalMs;
+    const retryMinimumMs = policy.retryMinimumMs ?? this.configured.retryMinimumMs;
+    const retryMaximumMs = policy.retryMaximumMs ?? this.configured.retryMaximumMs;
     const websocketProbeIntervalMs = policy.websocketProbeIntervalMs ??
-      this.config.websocketProbeIntervalMs;
+      this.configured.websocketProbeIntervalMs;
     const websocketProbeTimeoutMs = policy.websocketProbeTimeoutMs ??
-      this.config.websocketProbeTimeoutMs;
+      this.configured.websocketProbeTimeoutMs;
     boundedInteger(heartbeatIntervalMs, 250, 300_000, "heartbeatIntervalMs");
     boundedInteger(retryMinimumMs, 1, 60_000, "retryMinimumMs");
     boundedInteger(retryMaximumMs, 1, 300_000, "retryMaximumMs");
@@ -1287,7 +1399,6 @@ export class RuntimeWorker {
     }
     this.config = Object.freeze({
       ...this.config,
-      transport: selection.mode,
       heartbeatIntervalMs,
       retryMinimumMs,
       retryMaximumMs,
@@ -1298,7 +1409,7 @@ export class RuntimeWorker {
   }
 
   private autoPrefersWebSocket(): boolean {
-    return this.config.transport === "auto" && this.transportOrder[0] === "ws";
+    return this.configured.transport === "auto" && this.transportOrder[0] === "ws";
   }
 
   private autoAllowsPullFallback(): boolean {
@@ -1306,8 +1417,117 @@ export class RuntimeWorker {
   }
 
   private webSocketRequired(): boolean {
-    return this.config.transport === "ws" ||
+    return this.configured.transport === "ws" ||
       (this.autoPrefersWebSocket() && !this.autoAllowsPullFallback());
+  }
+
+  private transportReason(previousMode: "ws" | "pull" | undefined): RuntimeFallbackReason {
+    const transition = previousMode === "pull" && this.transportOrder[0] === "ws"
+      ? "long_poll_to_websocket"
+      : (previousMode ? "same_transport_reconnect" : "policy_selected");
+    return resolveRuntimeFallbackReason(this.configured.transport, transition);
+  }
+
+  private async policyOperation<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const activeRecovery = this.policyRecovery;
+    if (activeRecovery) await activeRecovery;
+    if (this.policyTerminalError) throw this.policyTerminalError;
+    if (signal?.aborted) throw abortError(signal);
+    const observedRevision = this.policyRevision;
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isRuntimePolicyRecoverySignal(error)) throw error;
+      await this.recoverRuntimePolicy(observedRevision, signal);
+      // Deliberately retry the original operation exactly once. A second
+      // signal becomes a shared terminal error and cannot start another
+      // rediscovery loop or allow later operations to reach the transport.
+      try {
+        return await operation();
+      } catch (retryError) {
+        if (!isRuntimePolicyRecoverySignal(retryError)) throw retryError;
+        throw this.failRuntimePolicyRecovery(retryError);
+      }
+    }
+  }
+
+  private async recoverRuntimePolicy(
+    observedRevision: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.policyTerminalError) throw this.policyTerminalError;
+    if (this.policyRecovery) return this.policyRecovery;
+    if (observedRevision !== this.policyRevision) {
+      if (this.policyLastObserved === observedRevision && this.policyLastRecovery) {
+        return this.policyLastRecovery;
+      }
+      return;
+    }
+    this.policyRevision += 1;
+    this.policyLastObserved = observedRevision;
+    const recovery = this.recoverRuntimePolicyOnce(signal).catch((error: unknown) => {
+      if (isAbortError(error)) throw error;
+      throw this.latchRuntimePolicyRecoveryError(error);
+    });
+    this.policyRecovery = recovery;
+    this.policyLastRecovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (this.policyRecovery === recovery) this.policyRecovery = undefined;
+    }
+  }
+
+  private failRuntimePolicyRecovery(cause: unknown): RuntimePolicyRecoveryError {
+    if (this.policyTerminalError) return this.policyTerminalError;
+    const error = asError(cause);
+    return this.latchRuntimePolicyRecoveryError(new Error(
+      "policy signal persisted after one canonical rediscovery",
+      { cause: error },
+    ));
+  }
+
+  private latchRuntimePolicyRecoveryError(cause: unknown): RuntimePolicyRecoveryError {
+    if (this.policyTerminalError) return this.policyTerminalError;
+    const error = cause instanceof RuntimePolicyRecoveryError
+      ? cause
+      : new RuntimePolicyRecoveryError(asError(cause));
+    this.policyTerminalError = error;
+    return error;
+  }
+
+  private async recoverRuntimePolicyOnce(signal?: AbortSignal): Promise<void> {
+    if (!this.config.platformURL?.trim()) {
+      throw new RuntimePolicyRecoveryError(new Error(
+        "canonical rediscovery requires platformURL; an explicit runtimeURL alone fails closed",
+      ));
+    }
+    const connection = await this.dependencies.discoverRuntimeConnection(
+      this.config.platformURL,
+      signal ?? this.runtimeAbort.signal,
+    );
+    this.applyTransportPolicy(connection.policy);
+    const replacement = await this.dependencies.connectTransport({
+      runtimeURL: validateRuntimeURL(connection.runtimeURL),
+      agentToken: this.config.agentToken,
+      mtls: this.config.mtls!,
+    });
+    const previous = this.transport;
+    const previousMode = this.activeMode;
+    this.transport = replacement;
+    try {
+      await this.startConfiguredTransport(true, signal, previousMode, true);
+    } catch (error) {
+      await replacement.close().catch(() => undefined);
+      if (previous && previous !== replacement) await previous.close().catch(() => undefined);
+      throw error;
+    }
+    if (previous && previous !== replacement) await previous.close();
+    this.spoolSignal.notify();
+    this.log("debug", "Runtime transport policy recovered through canonical rediscovery");
   }
 
   private replaceModeAbort(): void {
@@ -1319,13 +1539,16 @@ export class RuntimeWorker {
     operation: (signal: AbortSignal) => Promise<T>,
     externalSignal?: AbortSignal,
     retrySessionConflict = false,
+    policyAware = true,
   ): Promise<T> {
     let failures = 0;
     while (true) {
       const signal = combinedSignal(this.runtimeAbort.signal, externalSignal);
       if (signal.aborted) throw abortError(signal);
       try {
-        return await operation(signal);
+        return await (policyAware
+          ? this.policyOperation(() => operation(signal), signal)
+          : operation(signal));
       } catch (error) {
         if (signal.aborted) throw abortError(signal);
         if (isPermanentRuntimeError(error) && !(
@@ -1628,7 +1851,78 @@ class RuntimeAttemptError extends Error {
   }
 }
 
+class RuntimePolicyRecoveryError extends Error {
+  constructor(public readonly cause: Error) {
+    super(`OpenLinker Runtime policy recovery failed: ${cause.message}`);
+    this.name = "RuntimePolicyRecoveryError";
+  }
+}
+
+export function isRuntimePolicyRecoverySignal(error: unknown): boolean {
+  if (error instanceof RuntimePolicyRecoveryError) return false;
+  if (error instanceof OpenLinkerError) {
+    return error.status === 403 && error.code === "FORBIDDEN" && (
+      error.message === "RUNTIME_TRANSPORT_FORBIDDEN" ||
+      error.message === "RUNTIME_POLICY_CHANGED"
+    );
+  }
+  return error instanceof RuntimeWebSocketError &&
+    error.closeCode === 1008 && error.message === "RUNTIME_POLICY_CHANGED";
+}
+
+export async function runtimePolicyRecoverOnce<T>(
+  operation: () => Promise<T>,
+  recoverPolicy: (error: unknown) => Promise<void>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isRuntimePolicyRecoverySignal(error)) throw error;
+    await recoverPolicy(error);
+    try {
+      return await operation();
+    } catch (retryError) {
+      if (!isRuntimePolicyRecoverySignal(retryError)) throw retryError;
+      const cause = asError(retryError);
+      throw new RuntimePolicyRecoveryError(new Error(
+        "policy signal persisted after one canonical rediscovery",
+        { cause },
+      ));
+    }
+  }
+}
+
+export function resolveRuntimeFallbackReason(
+  configured: RuntimeTransportMode,
+  transition: RuntimeFallbackTransition,
+): RuntimeFallbackReason {
+  if (!(["auto", "ws", "pull"] as string[]).includes(configured)) {
+    throw new Error("invalid configured Runtime transport " + configured);
+  }
+  switch (transition) {
+    case "websocket_to_long_poll":
+    case "failed_websocket_probe_restore_long_poll":
+      return "websocket_unavailable";
+    case "long_poll_to_websocket":
+      return "recovery";
+    case "policy_selected":
+    case "same_transport_reconnect":
+    case "policy_rediscovery":
+      return configured === "auto" ? "policy_forced" : "explicit";
+  }
+}
+
+function websocketCloseError(code: number, reason: string): RuntimeWebSocketError {
+  return new RuntimeWebSocketError(
+    reason || `Runtime WebSocket closed (${code})`,
+    `WS_CLOSE_${code}`,
+    code === 1006 || code === 1011,
+    code,
+  );
+}
+
 function isPermanentRuntimeError(error: unknown): boolean {
+  if (error instanceof RuntimePolicyRecoveryError || isRuntimePolicyRecoverySignal(error)) return true;
   const code = runtimeErrorCode(error);
   if ([
     "UNAUTHORIZED", "FORBIDDEN", "PERMISSION_DENIED", "RUNTIME_CLIENT_UPGRADE_REQUIRED",

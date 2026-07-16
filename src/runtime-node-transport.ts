@@ -1,9 +1,12 @@
 import { readFile } from "node:fs/promises";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import type { ConnectionOptions } from "node:tls";
 import { Agent, fetch as undiciFetch } from "undici";
 import WebSocket, { type ClientOptions } from "ws";
+import { OpenLinkerError } from "./client.js";
 import { OpenLinkerRuntime } from "./runtime-client.js";
 import {
+  RuntimeWebSocketError,
   RuntimeWebSocketSession,
   type RuntimeWebSocketSessionOptions,
 } from "./runtime-websocket.js";
@@ -13,6 +16,13 @@ const discoveryPath = "/.well-known/openlinker.json";
 const discoveryMaxBytes = 64 * 1024;
 const runtimeWebSocketPath = "/api/v1/agent-runtime/ws";
 const workerAgent = "openlinker-js/runtime-worker";
+
+export const RuntimeFallbackReasonHeader = "OpenLinker-Runtime-Fallback-Reason" as const;
+export type RuntimeFallbackReason =
+  | "explicit"
+  | "websocket_unavailable"
+  | "policy_forced"
+  | "recovery";
 
 export interface RuntimeMTLSConfig {
   certFile: string;
@@ -173,6 +183,7 @@ export class NodeRuntimeTransport {
     hello: RuntimeHelloPayload,
     options: RuntimeWebSocketSessionOptions = {},
     signal?: AbortSignal,
+    fallbackReason?: RuntimeFallbackReason,
   ): Promise<RuntimeWebSocketConnection> {
     const url = new URL(this.runtimeURL);
     url.protocol = "wss:";
@@ -193,6 +204,10 @@ export class NodeRuntimeTransport {
       maxPayload: 4 * 1024 * 1024,
       perMessageDeflate: false,
     };
+    if (fallbackReason) {
+      assertRuntimeFallbackReason(fallbackReason);
+      socketOptions.headers![RuntimeFallbackReasonHeader] = fallbackReason;
+    }
     const socket = new WebSocket(url, [], socketOptions);
     await waitForSocketOpen(socket, signal);
     let resolveDone: (() => void) | undefined;
@@ -202,8 +217,8 @@ export class NodeRuntimeTransport {
     const session = new RuntimeWebSocketSession(socket as unknown as ConstructorParameters<typeof RuntimeWebSocketSession>[0], {
       ...options,
       onClose: (event) => {
-        resolveDone?.();
         options.onClose?.(event);
+        resolveDone?.();
       },
     });
     try {
@@ -438,6 +453,7 @@ function waitForSocketOpen(socket: WebSocket, signal?: AbortSignal): Promise<voi
       socket.off("open", onOpen);
       socket.off("error", onError);
       socket.off("close", onClose);
+      socket.off("unexpected-response", onUnexpectedResponse);
       signal?.removeEventListener("abort", onAbort);
     };
     const onOpen = () => {
@@ -450,17 +466,73 @@ function waitForSocketOpen(socket: WebSocket, signal?: AbortSignal): Promise<voi
     };
     const onClose = (code: number, reason: Buffer) => {
       cleanup();
-      reject(new Error(`Runtime WebSocket closed during handshake (${code} ${reason.toString("utf8")})`));
+      const text = reason.toString("utf8");
+      reject(new RuntimeWebSocketError(
+        text || `Runtime WebSocket closed during handshake (${code})`,
+        `WS_CLOSE_${code}`,
+        code === 1006 || code === 1011,
+        code,
+      ));
+    };
+    const onUnexpectedResponse = (_request: ClientRequest, response: IncomingMessage) => {
+      cleanup();
+      const settle = (error: unknown) => {
+        // Handling `unexpected-response` transfers handshake cleanup to us.
+        // Terminate after consuming the bounded body and absorb ws's synthetic
+        // abort error so the structured Core error remains the only rejection.
+        socket.once("error", () => undefined);
+        socket.terminate();
+        reject(error);
+      };
+      void runtimeUpgradeError(response).then(settle, settle);
     };
     const onAbort = () => {
       cleanup();
+      socket.once("error", () => undefined);
       socket.terminate();
       reject(signal?.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
     };
     socket.once("open", onOpen);
     socket.once("error", onError);
     socket.once("close", onClose);
+    socket.once("unexpected-response", onUnexpectedResponse);
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+async function runtimeUpgradeError(response: IncomingMessage): Promise<Error> {
+  const chunks: Buffer[] = [];
+  let length = 0;
+  for await (const raw of response) {
+    const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    length += chunk.length;
+    if (length > discoveryMaxBytes) {
+      response.destroy();
+      return new Error("Runtime WebSocket upgrade error exceeds 64 KiB");
+    }
+    chunks.push(chunk);
+  }
+  const body = Buffer.concat(chunks).toString("utf8");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return new Error(`Runtime WebSocket upgrade returned HTTP ${response.statusCode ?? 0}`);
+  }
+  const error = isObject(parsed) && isObject(parsed.error) ? parsed.error : undefined;
+  if (error && typeof error.code === "string" && typeof error.message === "string") {
+    return new OpenLinkerError(error.message, {
+      status: response.statusCode ?? 0,
+      code: error.code,
+      responseBody: parsed,
+    });
+  }
+  return new Error(`Runtime WebSocket upgrade returned HTTP ${response.statusCode ?? 0}`);
+}
+
+function assertRuntimeFallbackReason(reason: string): asserts reason is RuntimeFallbackReason {
+  if (!["explicit", "websocket_unavailable", "policy_forced", "recovery"].includes(reason)) {
+    throw new Error(`invalid Runtime fallback reason ${reason}`);
+  }
 }

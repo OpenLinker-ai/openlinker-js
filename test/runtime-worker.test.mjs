@@ -387,16 +387,20 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
   const secondClosed = deferred();
   let dials = 0;
   let pullSessions = 0;
+  const dialReasons = [];
+  const pullReasons = [];
   const client = fakeClient({
-    async createRuntimeSession() {
+    async createRuntimeSession(_hello, options) {
       pullSessions += 1;
+      pullReasons.push(new Headers(options?.headers).get("openlinker-runtime-fallback-reason"));
       return ready();
     },
   });
   const transport = {
     http: client,
-    async dialWebSocket() {
+    async dialWebSocket(_hello, _callbacks, _signal, fallbackReason) {
       dials += 1;
+      dialReasons.push(fallbackReason);
       return fakeDuplex(dials === 1 ? firstClosed.promise : secondClosed.promise);
     },
     async close() {},
@@ -423,6 +427,8 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
   await waitFor(() => worker.transportState === "pull_active");
   assert.ok(pullSessions >= 1);
   await waitFor(() => dials >= 2 && worker.transportState === "ws_active");
+  assert.deepEqual(dialReasons.slice(0, 2), ["policy_forced", "recovery"]);
+  assert.equal(pullReasons[0], "websocket_unavailable");
 
   await worker.stop();
   secondClosed.resolve();
@@ -943,6 +949,294 @@ test("RuntimeWorker auto mode still falls back to Pull for a non-conflict WebSoc
   const running = worker.start();
   await waitFor(() => worker.transportState === "pull_active");
   assert.equal(sessionCreates, 1);
+  await worker.stop();
+  await running;
+});
+
+test("RuntimeWorker coalesces concurrent policy signals into one canonical rediscovery", async () => {
+  const store = new MemoryRuntimeStore();
+  const entered = deferred();
+  const release = deferred();
+  let failingCalls = 0;
+  let replacementCalls = 0;
+  let discoveryCalls = 0;
+  let connectCalls = 0;
+  const attachmentReasons = [];
+  const signal = () => new OpenLinkerError("RUNTIME_POLICY_CHANGED", {
+    status: 403,
+    code: "FORBIDDEN",
+  });
+  const failTogether = async () => {
+    failingCalls += 1;
+    if (failingCalls === 2) entered.resolve();
+    await release.promise;
+    throw signal();
+  };
+  const initial = fakeClient({
+    async createRuntimeSession(_hello, options) {
+      attachmentReasons.push(new Headers(options?.headers).get("openlinker-runtime-fallback-reason"));
+      return ready();
+    },
+    claimRuntimeRun: failTogether,
+    pollRuntimeCommands: failTogether,
+  });
+  const replacement = fakeClient({
+    async createRuntimeSession(_hello, options) {
+      attachmentReasons.push(new Headers(options?.headers).get("openlinker-runtime-fallback-reason"));
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      replacementCalls += 1;
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async pollRuntimeCommands(_session, _wait, options) {
+      replacementCalls += 1;
+      await delay(5, options?.signal);
+      return { commands: [], databaseTime: new Date().toISOString() };
+    },
+  });
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: `https://runtime-${discoveryCalls}.example`,
+        policy: { allowedTransports: ["pull"], defaultTransport: "auto" },
+      };
+    },
+    connectTransport: async () => fakeTransport(connectCalls++ === 0 ? initial : replacement),
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "pull_active");
+  const identity = worker.identity;
+  await entered.promise;
+  release.resolve();
+  await waitFor(() => replacementCalls >= 2);
+  assert.equal(discoveryCalls, 2, "concurrent failures triggered more than one rediscovery");
+  assert.equal(connectCalls, 2);
+  assert.deepEqual(worker.identity, identity, "policy recovery replaced durable Session identity");
+  assert.deepEqual(attachmentReasons, ["policy_forced", "policy_forced"]);
+  await worker.stop();
+  await running;
+});
+
+test("RuntimeWorker returns a second policy signal without another rediscovery", async () => {
+  let discoveryCalls = 0;
+  let connectCalls = 0;
+  const signal = () => new OpenLinkerError("RUNTIME_TRANSPORT_FORBIDDEN", {
+    status: 403,
+    code: "FORBIDDEN",
+  });
+  const initial = fakeClient({ async claimRuntimeRun() { throw signal(); } });
+  const replacement = fakeClient({ async claimRuntimeRun() { throw signal(); } });
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: `https://runtime-${discoveryCalls}.example`,
+        policy: { allowedTransports: ["pull"], defaultTransport: "auto" },
+      };
+    },
+    connectTransport: async () => fakeTransport(connectCalls++ === 0 ? initial : replacement),
+  });
+
+  let terminalError;
+  await assert.rejects(worker.start(), (error) => {
+    terminalError = error;
+    assert.equal(error.name, "RuntimePolicyRecoveryError");
+    assert.equal(
+      error.message,
+      "OpenLinker Runtime policy recovery failed: policy signal persisted after one canonical rediscovery",
+    );
+    return true;
+  });
+  assert.equal(discoveryCalls, 2);
+  assert.equal(connectCalls, 2);
+  let laterOperationCalls = 0;
+  await assert.rejects(worker.policyOperation(async () => {
+    laterOperationCalls += 1;
+  }), (error) => error === terminalError);
+  assert.equal(laterOperationCalls, 0, "terminal policy failure allowed another transport call");
+});
+
+test("RuntimeWorker policy recovery fails closed without canonical discovery or with an incompatible explicit transport", async (t) => {
+  await t.test("runtimeURL without platformURL", async () => {
+    const client = fakeClient({
+      async claimRuntimeRun() {
+        throw new OpenLinkerError("RUNTIME_POLICY_CHANGED", { status: 403, code: "FORBIDDEN" });
+      },
+    });
+    const worker = new RuntimeWorker({
+      runtimeURL: "https://runtime.example",
+      transport: "pull",
+      nodeId: ids.node,
+      agentId: ids.agent,
+      agentToken: "ol_agent_private",
+      mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+      store: new MemoryRuntimeStore(),
+      allowUnsafeMemoryStore: true,
+      heartbeatIntervalMs: 10_000,
+      handler: async () => ({ output: {} }),
+    }, { connectTransport: async () => fakeTransport(client) });
+    await assert.rejects(worker.start(), /canonical rediscovery requires platformURL/);
+  });
+
+  await t.test("explicit transport removed by the allowlist", async () => {
+    let discoveryCalls = 0;
+    let connectCalls = 0;
+    const initial = fakeClient({
+      async claimRuntimeRun() {
+        throw new OpenLinkerError("RUNTIME_POLICY_CHANGED", { status: 403, code: "FORBIDDEN" });
+      },
+    });
+    const worker = new RuntimeWorker({
+      platformURL: "https://openlinker.example",
+      transport: "pull",
+      nodeId: ids.node,
+      agentId: ids.agent,
+      agentToken: "ol_agent_private",
+      mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+      store: new MemoryRuntimeStore(),
+      allowUnsafeMemoryStore: true,
+      heartbeatIntervalMs: 10_000,
+      handler: async () => ({ output: {} }),
+    }, {
+      discoverRuntimeConnection: async () => {
+        discoveryCalls += 1;
+        return {
+          runtimeURL: `https://runtime-${discoveryCalls}.example`,
+          policy: discoveryCalls === 1
+            ? { allowedTransports: ["pull"], defaultTransport: "auto" }
+            : { allowedTransports: ["ws"], defaultTransport: "auto" },
+        };
+      },
+      connectTransport: async () => {
+        connectCalls += 1;
+        return fakeTransport(initial);
+      },
+    });
+    await assert.rejects(worker.start(), /configured Runtime transport pull is not allowed/);
+    assert.equal(discoveryCalls, 2);
+    assert.equal(connectCalls, 1, "incompatible policy connected before allowlist validation");
+  });
+});
+
+test("RuntimeWorker rediscovers once on an established WebSocket 1008 policy close", async () => {
+  let discoveryCalls = 0;
+  let connectCalls = 0;
+  const sockets = [];
+  const reasons = [];
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: `https://runtime-${discoveryCalls}.example`,
+        policy: { allowedTransports: ["ws"], defaultTransport: "auto" },
+      };
+    },
+    connectTransport: async () => {
+      connectCalls += 1;
+      return {
+        http: fakeClient(),
+        async dialWebSocket(_hello, callbacks, _signal, fallbackReason) {
+          const done = deferred();
+          const duplex = fakeDuplex(done.promise);
+          sockets.push({ callbacks, done, duplex });
+          reasons.push(fallbackReason);
+          return duplex;
+        },
+        async close() {},
+      };
+    },
+  });
+
+  const running = worker.start();
+  await waitFor(() => sockets.length === 1 && worker.transportState === "ws_active");
+  sockets[0].callbacks.onClose({ code: 1008, reason: "RUNTIME_POLICY_CHANGED", clean: true });
+  sockets[0].done.resolve();
+  await waitFor(() => sockets.length === 2 && worker.transportState === "ws_active");
+  assert.equal(discoveryCalls, 2);
+  assert.equal(connectCalls, 2);
+  assert.deepEqual(reasons, ["policy_forced", "policy_forced"]);
+  await worker.stop();
+  await running;
+});
+
+test("RuntimeWorker retains a WebSocket policy close delivered before dial settles", async () => {
+  let discoveryCalls = 0;
+  let dialCalls = 0;
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: `https://runtime-${discoveryCalls}.example`,
+        policy: { allowedTransports: ["ws"], defaultTransport: "auto" },
+      };
+    },
+    connectTransport: async () => ({
+      http: fakeClient(),
+      async dialWebSocket(_hello, callbacks) {
+        dialCalls += 1;
+        const done = deferred();
+        const duplex = fakeDuplex(done.promise);
+        if (dialCalls === 1) {
+          callbacks.onClose({ code: 1008, reason: "RUNTIME_POLICY_CHANGED", clean: true });
+          done.resolve();
+        }
+        return duplex;
+      },
+      async close() {},
+    }),
+  });
+
+  const running = worker.start();
+  await waitFor(() => dialCalls === 2 && worker.transportState === "ws_active");
+  assert.equal(discoveryCalls, 2);
   await worker.stop();
   await running;
 });

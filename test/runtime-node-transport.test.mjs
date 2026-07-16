@@ -3,9 +3,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  OpenLinkerError,
+  RuntimeWebSocketError,
   decodeRuntimeDiscoveryManifest,
   discoverRuntimeURL,
+  isRuntimePolicyRecoverySignal,
+  resolveRuntimeFallbackReason,
   resolveRuntimeTransportSelection,
+  runtimePolicyRecoverOnce,
   validatePlatformURL,
   validateRuntimeURL,
 } from "../dist/runtime.js";
@@ -47,6 +52,67 @@ test("Runtime discovery policy fixtures stay consistent with Core transport sema
       }
       const selection = resolveRuntimeTransportSelection(item.configured, connection.policy);
       assert.equal(selection.mode, item.effective);
+    });
+  }
+
+  for (const item of fixture.policy_recovery.http) {
+    await t.test(`policy_http_${item.name}`, () => {
+      const error = new OpenLinkerError(item.message, {
+        status: item.status,
+        code: item.code,
+      });
+      assert.equal(isRuntimePolicyRecoverySignal(error), item.recover);
+    });
+  }
+  for (const item of fixture.policy_recovery.websocket_close) {
+    await t.test(`policy_ws_${item.name}`, () => {
+      const error = new RuntimeWebSocketError(
+        item.reason,
+        `WS_CLOSE_${item.code}`,
+        false,
+        item.code,
+      );
+      assert.equal(isRuntimePolicyRecoverySignal(error), item.recover);
+    });
+  }
+  for (const item of fixture.policy_recovery.retry) {
+    await t.test(`policy_retry_${item.name}`, async () => {
+      let operationCalls = 0;
+      let discoveryCalls = 0;
+      const value = await runtimePolicyRecoverOnce(async () => {
+        const outcome = item.outcomes[operationCalls++];
+        if (outcome === "signal") {
+          throw new OpenLinkerError("RUNTIME_POLICY_CHANGED", {
+            status: 403,
+            code: "FORBIDDEN",
+          });
+        }
+        return "ok";
+      }, async () => {
+        discoveryCalls += 1;
+      }).then(
+        (result) => ({ result, error: undefined }),
+        (error) => ({ result: undefined, error }),
+      );
+      assert.equal(operationCalls, item.operation_calls);
+      assert.equal(discoveryCalls, item.discovery_calls);
+      assert.equal(value.error === undefined, item.success);
+      if (item.success) assert.equal(value.result, "ok");
+      else {
+        assert.equal(value.error.name, "RuntimePolicyRecoveryError");
+        assert.equal(
+          value.error.message,
+          "OpenLinker Runtime policy recovery failed: policy signal persisted after one canonical rediscovery",
+        );
+      }
+    });
+  }
+  for (const item of fixture.fallback_reason_cases) {
+    await t.test(`fallback_reason_${item.name}`, () => {
+      assert.equal(
+        resolveRuntimeFallbackReason(item.configured, item.transition),
+        item.reason,
+      );
     });
   }
 });
