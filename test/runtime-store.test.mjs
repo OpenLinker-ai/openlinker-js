@@ -91,6 +91,46 @@ test("FileRuntimeStore encrypts durable work and advances stable Session identit
   await reopened.close();
 });
 
+test("FileRuntimeStore retains revoked tombstones without counting them as drain work", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-revoked-tombstone-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+
+  const store = new FileRuntimeStore(dataDir, { reserveBytes: 0 });
+  await store.open();
+  const identity = await store.beginSession();
+  const assignment = assigned(identity, { privatePrompt: "cancel me" });
+  await store.saveAssignment(assignment);
+  await store.transitionAssignment(ids.attempt, "ack_sent");
+  await store.transitionAssignment(ids.attempt, "confirmed", {
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await store.transitionAssignment(ids.attempt, "started");
+  await store.appendEvent(assignment.attemptIdentity, "run.progress", { step: 1 });
+  await store.saveResult({
+    attemptIdentity: assignment.attemptIdentity,
+    resultId: ids.result,
+    durationMs: 20,
+    finalClientEventSeq: 1,
+    status: "success",
+    output: { tooLate: true },
+  });
+  await store.revokeAttempt(ids.attempt);
+  assert.deepEqual(await store.spoolStatus(), {
+    assignments: 0,
+    events: 0,
+    results: 0,
+    empty: true,
+  });
+  assert.equal((await store.getAssignment(ids.attempt))?.state, "revoked");
+  await store.close();
+
+  const reopened = new FileRuntimeStore(dataDir, { reserveBytes: 0 });
+  await reopened.open();
+  assert.equal((await reopened.getAssignment(ids.attempt))?.state, "revoked");
+  assert.equal((await reopened.spoolStatus()).empty, true);
+  await reopened.close();
+});
+
 test("FileRuntimeStore holds an exclusive process lock and fails closed on corruption", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-lock-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

@@ -698,6 +698,64 @@ test("RuntimeWorker refuses to re-enter a handler after a persisted started boun
   assert.equal(handlerCalls, 0);
 });
 
+test("RuntimeWorker deletes a revoked tombstone only after Core confirms it during Resume", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-revoked-resume-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+
+  const seed = new FileRuntimeStore(dataDir);
+  await seed.open();
+  const previousIdentity = await seed.beginSession();
+  const assignment = assignmentFor({
+    workerId: previousIdentity.workerId,
+    runtimeSessionId: previousIdentity.runtimeSessionId,
+  });
+  await seed.saveAssignment(assignment);
+  await seed.transitionAssignment(ids.attempt, "ack_sent");
+  await seed.transitionAssignment(ids.attempt, "confirmed", {
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await seed.transitionAssignment(ids.attempt, "started");
+  await seed.revokeAttempt(ids.attempt);
+  await seed.close();
+
+  const store = new FileRuntimeStore(dataDir);
+  let resumeCalls = 0;
+  const client = fakeClient({
+    async resumeRuntimeRuns(request) {
+      resumeCalls += 1;
+      return {
+        decisions: request.attempts.map((attempt) => ({
+          attemptIdentity: attempt.attemptIdentity,
+          decision: "lease_revoked",
+          allowedActions: ["stop_execution", "clear_spool"],
+        })),
+      };
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      assert.fail("a revoked tombstone must never re-enter the handler");
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "pull_active");
+  assert.equal(resumeCalls, 1);
+  assert.equal(await store.getAssignment(ids.attempt), undefined);
+  await worker.stop();
+  await running;
+});
+
 test("RuntimeWorker requires an explicit unsafe flag for MemoryRuntimeStore", () => {
   assert.throws(() => new RuntimeWorker({
     runtimeURL: "https://runtime.example",
@@ -1299,9 +1357,9 @@ test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async
 test("RuntimeWorker cancels only the matching Attempt and drain rejects new offers", async () => {
   const socketDone = deferred();
   const handlerStarted = deferred();
-  const canceledResult = deferred();
   const drainRejected = deferred();
   const cancelStates = [];
+  const store = new MemoryRuntimeStore();
   let callbacks;
   let firstAssignment;
   const transport = {
@@ -1313,17 +1371,8 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
       duplex.ackCancel = async (request) => {
         cancelStates.push(request.cancelState);
       };
-      duplex.finalizeResult = async (result) => {
-        if (result.attemptIdentity.attemptId === ids.attempt) {
-          canceledResult.resolve(result);
-        }
-        return {
-          resultId: result.resultId,
-          classification: "canceled",
-          runStatus: "canceled",
-          dispatchState: "terminal",
-          replayed: false,
-        };
+      duplex.finalizeResult = async () => {
+        assert.fail("a canceled Attempt must not submit a competing Result");
       };
       duplex.rejectAssignment = async (identity, reasonCode) => {
         if (identity.attemptId !== ids.attempt) drainRejected.resolve(reasonCode);
@@ -1341,7 +1390,7 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
     agentId: ids.agent,
     agentToken: "ol_agent_private",
     mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
-    store: new MemoryRuntimeStore(),
+    store,
     allowUnsafeMemoryStore: true,
     heartbeatIntervalMs: 10_000,
     handler: async (run) => {
@@ -1360,7 +1409,7 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
 
   const running = worker.start();
   await handlerStarted.promise;
-  await callbacks.onCommand({
+  const cancelCommand = {
     type: "run.cancel",
     payload: {
       cancellationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -1368,11 +1417,20 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
       reasonCode: "USER_REQUESTED",
       deadlineAt: new Date(Date.now() + 5_000).toISOString(),
     },
-  });
-  const result = await canceledResult.promise;
-  assert.equal(result.status, "failed");
-  assert.equal(result.error.errorCode, "RUN_CANCELED");
+  };
+  await callbacks.onCommand(cancelCommand);
   assert.deepEqual(cancelStates, ["stopping", "stopped"]);
+  assert.deepEqual(await store.spoolStatus(), {
+    assignments: 0,
+    events: 0,
+    results: 0,
+    empty: true,
+  });
+  assert.equal((await store.getAssignment(ids.attempt))?.state, "revoked");
+
+  await callbacks.onCommand(cancelCommand);
+  assert.deepEqual(cancelStates, ["stopping", "stopped", "stopping", "stopped"]);
+  await waitFor(async () => await store.getAssignment(ids.attempt) === undefined);
 
   await callbacks.onCommand({
     type: "runtime.drain",
@@ -1394,6 +1452,832 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
   assert.equal(await drainRejected.promise, "NODE_DRAINING");
 
   await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker aborts the handler while a stopping ACK is bounded by the cancel deadline", async () => {
+  const socketDone = deferred();
+  const handlerStarted = deferred();
+  const handlerAborted = deferred();
+  const stuckStoppingAck = deferred();
+  const cancelAcks = [];
+  let callbacks;
+  let assignment;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, value) {
+      callbacks = value;
+      assignment = assignmentFor(hello);
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.ackCancel = async (request) => {
+        cancelAcks.push(request.cancelState);
+        if (request.cancelState === "stopping") await stuckStoppingAck.promise;
+      };
+      setTimeout(() => value.onAssigned?.(assignment), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      handlerStarted.resolve();
+      await new Promise((_, reject) => {
+        const abort = () => {
+          handlerAborted.resolve(Date.now());
+          reject(run.signal.reason);
+        };
+        if (run.signal.aborted) abort();
+        else run.signal.addEventListener("abort", abort, { once: true });
+      });
+      return { output: { unreachable: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await handlerStarted.promise;
+  const deadline = Date.now() + 120;
+  const canceled = callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      attemptIdentity: assignment.attemptIdentity,
+      reasonCode: "USER_REQUESTED",
+      deadlineAt: new Date(deadline).toISOString(),
+    },
+  });
+  assert.ok(await handlerAborted.promise < deadline, "handler abort waited until after the cancel deadline");
+  await canceled;
+  assert.deepEqual(cancelAcks, ["stopping", "stopped"]);
+
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker fences Result persistence when cancel arrives after the final assignment read", async () => {
+  const socketDone = deferred();
+  const finalReadEntered = deferred();
+  const finalReadRelease = deferred();
+  const store = new MemoryRuntimeStore();
+  const originalGetAssignment = store.getAssignment.bind(store);
+  const originalSaveResult = store.saveResult.bind(store);
+  let blockNextFinalRead = false;
+  let saveResultCalls = 0;
+  let callbacks;
+  let assignment;
+  store.getAssignment = async (attemptId) => {
+    const current = await originalGetAssignment(attemptId);
+    if (blockNextFinalRead && attemptId === ids.attempt) {
+      blockNextFinalRead = false;
+      finalReadEntered.resolve();
+      await finalReadRelease.promise;
+    }
+    return current;
+  };
+  store.saveResult = async (payload) => {
+    saveResultCalls += 1;
+    return originalSaveResult(payload);
+  };
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, value) {
+      callbacks = value;
+      assignment = assignmentFor(hello);
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.finalizeResult = async () => {
+        assert.fail("a fenced canceled Attempt must not upload a Result");
+      };
+      setTimeout(() => value.onAssigned?.(assignment), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      blockNextFinalRead = true;
+      return { output: { too_late: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await finalReadEntered.promise;
+  const canceled = callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      attemptIdentity: assignment.attemptIdentity,
+      reasonCode: "USER_REQUESTED",
+      deadlineAt: new Date(Date.now() + 1_000).toISOString(),
+    },
+  });
+  await waitFor(() => assignment && callbacks);
+  finalReadRelease.resolve();
+  await canceled;
+  assert.equal(saveResultCalls, 0);
+  assert.ok([undefined, "revoked"].includes((await store.getAssignment(ids.attempt))?.state));
+  assert.equal((await store.spoolStatus()).empty, true);
+
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker fences cancellation between durable confirmation and handler start", async () => {
+  const socketDone = deferred();
+  const confirmedPersisted = deferred();
+  const confirmedRelease = deferred();
+  const store = new MemoryRuntimeStore();
+  const originalTransition = store.transitionAssignment.bind(store);
+  let callbacks;
+  let assignment;
+  let handlerCalls = 0;
+  store.transitionAssignment = async (attemptId, next, options) => {
+    const current = await originalTransition(attemptId, next, options);
+    if (next === "confirmed") {
+      confirmedPersisted.resolve();
+      await confirmedRelease.promise;
+    }
+    return current;
+  };
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, value) {
+      callbacks = value;
+      assignment = assignmentFor(hello);
+      const duplex = fakeDuplex(socketDone.promise);
+      setTimeout(() => value.onAssigned?.(assignment), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerCalls += 1;
+      return { output: { must_not_run: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await confirmedPersisted.promise;
+  await callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "abababab-abab-4bab-8bab-abababababab",
+      attemptIdentity: assignment.attemptIdentity,
+      reasonCode: "USER_REQUESTED",
+      deadlineAt: new Date(Date.now() + 1_000).toISOString(),
+    },
+  });
+  confirmedRelease.resolve();
+  await waitFor(async () => [undefined, "revoked"].includes(
+    (await store.getAssignment(ids.attempt))?.state,
+  ));
+  assert.equal(handlerCalls, 0);
+  assert.equal((await store.spoolStatus()).empty, true);
+
+  await worker.drain({ timeoutMs: 1_000 });
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker fences cancellation while assignment confirmation is in flight", async () => {
+  const socketDone = deferred();
+  const confirmationEntered = deferred();
+  const confirmationRelease = deferred();
+  const store = new MemoryRuntimeStore();
+  let callbacks;
+  let assignment;
+  let handlerCalls = 0;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, value) {
+      callbacks = value;
+      assignment = assignmentFor(hello);
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.ackAssignment = async (identity) => {
+        confirmationEntered.resolve();
+        await confirmationRelease.promise;
+        return {
+          attemptIdentity: identity,
+          attemptNo: 1,
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      };
+      setTimeout(() => value.onAssigned?.(assignment), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerCalls += 1;
+      return { output: { must_not_run: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await confirmationEntered.promise;
+  await callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "acacacac-acac-4cac-8cac-acacacacacac",
+      attemptIdentity: assignment.attemptIdentity,
+      reasonCode: "USER_REQUESTED",
+      deadlineAt: new Date(Date.now() + 1_000).toISOString(),
+    },
+  });
+  confirmationRelease.resolve();
+  await waitFor(async () => [undefined, "revoked"].includes(
+    (await store.getAssignment(ids.attempt))?.state,
+  ));
+  assert.equal(handlerCalls, 0);
+  assert.equal((await store.spoolStatus()).empty, true);
+
+  await worker.drain({ timeoutMs: 1_000 });
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker rejects missing and wrong-fence cancel identities without aborting the owned Attempt", async () => {
+  const socketDone = deferred();
+  const handlerStarted = deferred();
+  const handlerRelease = deferred();
+  const cancelAcks = [];
+  const store = new MemoryRuntimeStore();
+  let callbacks;
+  let assignment;
+  let handlerAborted = false;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, value) {
+      callbacks = value;
+      assignment = assignmentFor(hello);
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.ackCancel = async (request) => cancelAcks.push(request);
+      setTimeout(() => value.onAssigned?.(assignment), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      handlerStarted.resolve();
+      run.signal.addEventListener("abort", () => { handlerAborted = true; }, { once: true });
+      await handlerRelease.promise;
+      return { output: { completed: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await handlerStarted.promise;
+  const deadlineAt = new Date(Date.now() + 1_000).toISOString();
+  await callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      attemptIdentity: { ...assignment.attemptIdentity, fencingToken: 2 },
+      reasonCode: "USER_REQUESTED",
+      deadlineAt,
+    },
+  });
+  await callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      attemptIdentity: {
+        ...assignment.attemptIdentity,
+        runId: "99999999-9999-4999-8999-999999999999",
+        attemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        leaseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      },
+      reasonCode: "USER_REQUESTED",
+      deadlineAt,
+    },
+  });
+  assert.equal(handlerAborted, false);
+  assert.deepEqual(cancelAcks.map((request) => ({
+    state: request.cancelState,
+    errorCode: request.errorCode,
+  })), [
+    { state: "failed", errorCode: "ATTEMPT_IDENTITY_MISMATCH" },
+    { state: "failed", errorCode: "ATTEMPT_IDENTITY_MISMATCH" },
+  ]);
+
+  handlerRelease.resolve();
+  await waitFor(async () => (await store.spoolStatus()).empty);
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker reports cancel deadline failure without claiming the handler stopped", async () => {
+  const socketDone = deferred();
+  const handlerStarted = deferred();
+  const handlerRelease = deferred();
+  const cancelAcks = [];
+  const store = new MemoryRuntimeStore();
+  let callbacks;
+  let assignment;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, value) {
+      callbacks = value;
+      assignment = assignmentFor(hello);
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.ackCancel = async (request) => cancelAcks.push({
+        state: request.cancelState,
+        errorCode: request.errorCode,
+      });
+      setTimeout(() => value.onAssigned?.(assignment), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerStarted.resolve();
+      await handlerRelease.promise;
+      return { output: { ignored_cancel: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await handlerStarted.promise;
+  await callbacks.onCommand({
+    type: "run.cancel",
+    payload: {
+      cancellationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      attemptIdentity: assignment.attemptIdentity,
+      reasonCode: "USER_REQUESTED",
+      deadlineAt: new Date(Date.now() + 20).toISOString(),
+    },
+  });
+  assert.deepEqual(cancelAcks, [
+    { state: "stopping", errorCode: undefined },
+    { state: "failed", errorCode: "CANCEL_DEADLINE_EXCEEDED" },
+  ]);
+  assert.equal((await store.snapshot()).assignments.length, 1);
+
+  handlerRelease.resolve();
+  await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "started");
+  await callbacks.onCommand({
+    type: "run.lease.revoked",
+    payload: {
+      attemptIdentity: assignment.attemptIdentity,
+      reasonCode: "CANCEL_FAILED",
+      dispatchState: "terminal",
+      runStatus: "canceled",
+    },
+  });
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+for (const transportMode of ["pull", "ws"]) {
+  test(`RuntimeWorker ${transportMode} absorbs RUN_CANCEL_REQUESTED as one Attempt terminal`, async () => {
+    const store = new MemoryRuntimeStore();
+    const socketDone = deferred();
+    let hello;
+    let claimed = false;
+    let resultCalls = 0;
+    const cancelError = () => transportMode === "ws"
+      ? new RuntimeWebSocketError("Run cancellation has been requested", "RUN_CANCEL_REQUESTED", false)
+      : new OpenLinkerError("Run cancellation has been requested", {
+        status: 409,
+        code: "RUN_CANCEL_REQUESTED",
+        details: { code: "RUN_CANCEL_REQUESTED", message: "cancel requested" },
+      });
+    const client = fakeClient({
+      async createRuntimeSession(value) {
+        hello = value;
+        return ready();
+      },
+      async claimRuntimeRun(_wait, _request, options) {
+        if (!claimed) {
+          claimed = true;
+          return assignmentFor(hello);
+        }
+        await delay(5, options?.signal);
+        return undefined;
+      },
+      async finalizeRuntimeResult() {
+        resultCalls += 1;
+        throw cancelError();
+      },
+    });
+    const transport = transportMode === "ws"
+      ? {
+        http: client,
+        async dialWebSocket(value, callbacks) {
+          hello = value;
+          const duplex = fakeDuplex(socketDone.promise);
+          duplex.finalizeResult = async () => {
+            resultCalls += 1;
+            throw cancelError();
+          };
+          setTimeout(() => callbacks.onAssigned?.(assignmentFor(value)), 0);
+          return duplex;
+        },
+        async close() {},
+      }
+      : fakeTransport(client);
+    const worker = new RuntimeWorker({
+      runtimeURL: "https://runtime.example",
+      transport: transportMode,
+      nodeId: ids.node,
+      agentId: ids.agent,
+      agentToken: "ol_agent_private",
+      mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+      store,
+      allowUnsafeMemoryStore: true,
+      retryMinimumMs: 1,
+      retryMaximumMs: 1,
+      heartbeatIntervalMs: 10_000,
+      handler: async () => ({ output: { late: true } }),
+    }, {
+      connectTransport: async () => transport,
+      randomUUID: () => ids.result,
+    });
+
+    const running = worker.start();
+    await waitFor(() => resultCalls === 1);
+    await waitFor(async () => (await store.spoolStatus()).empty);
+    assert.ok([undefined, "revoked"].includes((await store.getAssignment(ids.attempt))?.state));
+    assert.equal(resultCalls, 1);
+    await worker.drain({ timeoutMs: 1_000 });
+    socketDone.resolve();
+    await running;
+  });
+}
+
+test("RuntimeWorker absorbs a terminal error while uploading a durable Event", async () => {
+  const store = new MemoryRuntimeStore();
+  let hello;
+  let claimed = false;
+  let eventCalls = 0;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return assignmentFor(hello);
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async appendRuntimeEvent() {
+      eventCalls += 1;
+      throw new OpenLinkerError("Runtime Attempt is already terminal", {
+        status: 409,
+        code: "RUN_ALREADY_TERMINAL",
+        details: { code: "RUN_ALREADY_TERMINAL", message: "terminal" },
+      });
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      await run.emit("run.progress", { step: 1 });
+      return { output: { late: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await waitFor(() => eventCalls === 1);
+  await waitFor(async () => (await store.spoolStatus()).empty);
+  assert.ok([undefined, "revoked"].includes((await store.getAssignment(ids.attempt))?.state));
+  assert.equal(eventCalls, 1);
+  await worker.drain({ timeoutMs: 1_000 });
+  await running;
+});
+
+test("RuntimeWorker absorbs a terminal error while replaying EVENTS_MISSING", async () => {
+  const store = new MemoryRuntimeStore();
+  let hello;
+  let claimed = false;
+  let eventCalls = 0;
+  let resultCalls = 0;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return assignmentFor(hello);
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async appendRuntimeEvent(event) {
+      eventCalls += 1;
+      if (eventCalls === 2) {
+        throw new OpenLinkerError("Runtime Attempt is already terminal", {
+          status: 409,
+          code: "RUN_ALREADY_TERMINAL",
+          details: { code: "RUN_ALREADY_TERMINAL", message: "terminal" },
+        });
+      }
+      return {
+        clientEventId: event.clientEventId,
+        clientEventSeq: event.clientEventSeq,
+        sequence: event.clientEventSeq,
+        replayed: false,
+      };
+    },
+    async finalizeRuntimeResult() {
+      resultCalls += 1;
+      throw new OpenLinkerError("Core needs an exact Event replay", {
+        status: 409,
+        code: "EVENTS_MISSING",
+        details: {
+          code: "EVENTS_MISSING",
+          message: "missing Event",
+          missingEventRanges: [{ start: 1, end: 1 }],
+        },
+      });
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      await run.emit("run.progress", { step: 1 });
+      return { output: { late: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await waitFor(() => eventCalls === 2 && resultCalls === 1);
+  await waitFor(async () => (await store.spoolStatus()).empty);
+  assert.ok([undefined, "revoked"].includes((await store.getAssignment(ids.attempt))?.state));
+  assert.equal(eventCalls, 2);
+  assert.equal(resultCalls, 1);
+  await worker.drain({ timeoutMs: 1_000 });
+  await running;
+});
+
+for (const transportMode of ["pull", "ws"]) {
+  test(`RuntimeWorker ${transportMode} absorbs RUN_CANCEL_REQUESTED during lease renewal`, async () => {
+    const store = new MemoryRuntimeStore();
+    const socketDone = deferred();
+    const handlerStarted = deferred();
+    let hello;
+    let claimed = false;
+    let renewCalls = 0;
+    const cancelError = () => transportMode === "ws"
+      ? new RuntimeWebSocketError("Run cancellation has been requested", "RUN_CANCEL_REQUESTED", false)
+      : new OpenLinkerError("Run cancellation has been requested", {
+        status: 409,
+        code: "RUN_CANCEL_REQUESTED",
+        details: { code: "RUN_CANCEL_REQUESTED", message: "cancel requested" },
+      });
+    const client = fakeClient({
+      async createRuntimeSession(value) {
+        hello = value;
+        return ready();
+      },
+      async claimRuntimeRun(_wait, _request, options) {
+        if (!claimed) {
+          claimed = true;
+          return assignmentFor(hello);
+        }
+        await delay(5, options?.signal);
+        return undefined;
+      },
+      async renewRuntimeLease() {
+        renewCalls += 1;
+        throw cancelError();
+      },
+    });
+    const transport = transportMode === "ws"
+      ? {
+        http: client,
+        async dialWebSocket(value, callbacks) {
+          hello = value;
+          const duplex = fakeDuplex(socketDone.promise);
+          duplex.renewLease = async () => {
+            renewCalls += 1;
+            throw cancelError();
+          };
+          setTimeout(() => callbacks.onAssigned?.(assignmentFor(value)), 0);
+          return duplex;
+        },
+        async close() {},
+      }
+      : fakeTransport(client);
+    const worker = new RuntimeWorker({
+      runtimeURL: "https://runtime.example",
+      transport: transportMode,
+      nodeId: ids.node,
+      agentId: ids.agent,
+      agentToken: "ol_agent_private",
+      mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+      store,
+      allowUnsafeMemoryStore: true,
+      retryMinimumMs: 1,
+      retryMaximumMs: 1,
+      heartbeatIntervalMs: 250,
+      handler: async (run) => {
+        handlerStarted.resolve();
+        await new Promise((_, reject) => {
+          const canceled = () => reject(run.signal.reason);
+          if (run.signal.aborted) canceled();
+          else run.signal.addEventListener("abort", canceled, { once: true });
+        });
+        return { output: { unreachable: true } };
+      },
+    }, {
+      connectTransport: async () => transport,
+    });
+
+    const running = worker.start();
+    await handlerStarted.promise;
+    await waitFor(() => renewCalls === 1);
+    await waitFor(async () => (await store.spoolStatus()).empty);
+    assert.ok([undefined, "revoked"].includes((await store.getAssignment(ids.attempt))?.state));
+    await worker.drain({ timeoutMs: 1_000 });
+    socketDone.resolve();
+    await running;
+  });
+}
+
+test("RuntimeWorker continues renewing other Attempts when a canceled handler ignores abort", async () => {
+  const socketDone = deferred();
+  const targetStarted = deferred();
+  const otherStarted = deferred();
+  const targetRelease = deferred();
+  const otherRelease = deferred();
+  const store = new MemoryRuntimeStore();
+  let targetAssignment;
+  let otherAssignment;
+  let targetRenewCalls = 0;
+  let otherRenewCalls = 0;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, callbacks) {
+      targetAssignment = assignmentFor(hello);
+      otherAssignment = assignmentFor(hello, {
+        runId: "99999999-9999-4999-8999-999999999999",
+        attemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        leaseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.renewLease = async (identity) => {
+        if (identity.attemptId === targetAssignment.attemptIdentity.attemptId) {
+          targetRenewCalls += 1;
+          throw new RuntimeWebSocketError(
+            "Run cancellation has been requested",
+            "RUN_CANCEL_REQUESTED",
+            false,
+          );
+        }
+        otherRenewCalls += 1;
+        return {
+          attemptIdentity: identity,
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      };
+      setTimeout(() => {
+        callbacks.onAssigned?.(targetAssignment);
+        callbacks.onAssigned?.(otherAssignment);
+      }, 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    capacity: 2,
+    heartbeatIntervalMs: 250,
+    handler: async (run) => {
+      if (run.runId === ids.run) {
+        targetStarted.resolve();
+        await targetRelease.promise;
+        return { output: { target: true } };
+      }
+      otherStarted.resolve();
+      await otherRelease.promise;
+      return { output: { other: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await Promise.all([targetStarted.promise, otherStarted.promise]);
+  await waitFor(() => targetRenewCalls >= 1 && otherRenewCalls >= 1, 2_000);
+  assert.ok([undefined, "revoked"].includes(
+    (await store.getAssignment(targetAssignment.attemptIdentity.attemptId))?.state,
+  ));
+  assert.ok(await store.getAssignment(otherAssignment.attemptIdentity.attemptId));
+
+  otherRelease.resolve();
+  await waitFor(async () => (await store.spoolStatus()).empty);
+  await assert.rejects(worker.drain({ timeoutMs: 50 }), RuntimeDrainTimeoutError);
+  targetRelease.resolve();
   socketDone.resolve();
   await running;
 });
@@ -1855,11 +2739,18 @@ function fakeDuplex(done) {
       };
     },
     async resume(request) {
-      return request.attempts.map((attempt) => ({
-        attemptIdentity: attempt.attemptIdentity,
-        decision: "upload_spool_only",
-        allowedActions: ["upload_events", "upload_result"],
-      }));
+      return request.attempts.map((attempt) => attempt.pendingResultId ||
+        attempt.pendingClientEventRanges.length > 0
+        ? {
+          attemptIdentity: attempt.attemptIdentity,
+          decision: "upload_spool_only",
+          allowedActions: ["upload_events", "upload_result"],
+        }
+        : {
+          attemptIdentity: attempt.attemptIdentity,
+          decision: "lease_revoked",
+          allowedActions: ["stop_execution", "clear_spool"],
+        });
     },
     async ackCancel() {},
     async requestDrain(request) { return request; },
@@ -1916,11 +2807,18 @@ function fakeClient(overrides = {}) {
     },
     async resumeRuntimeRuns(request) {
       return {
-        decisions: request.attempts.map((attempt) => ({
-          attemptIdentity: attempt.attemptIdentity,
-          decision: "upload_spool_only",
-          allowedActions: ["upload_events", "upload_result"],
-        })),
+        decisions: request.attempts.map((attempt) => attempt.pendingResultId ||
+          attempt.pendingClientEventRanges.length > 0
+          ? {
+            attemptIdentity: attempt.attemptIdentity,
+            decision: "upload_spool_only",
+            allowedActions: ["upload_events", "upload_result"],
+          }
+          : {
+            attemptIdentity: attempt.attemptIdentity,
+            decision: "lease_revoked",
+            allowedActions: ["stop_execution", "clear_spool"],
+          }),
       };
     },
     async pollRuntimeCommands(_session, _wait, options) {

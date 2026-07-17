@@ -425,7 +425,10 @@ export class RuntimeWorker {
   private readonly active = new Map<string, ActiveAttempt>();
   private readonly reservations = new Set<string>();
   private readonly assignmentQueues = new Map<string, Promise<void>>();
+  private readonly executions = new Set<Promise<void>>();
   private readonly cancellations = new Set<string>();
+  private readonly terminalAttempts = new Set<string>();
+  private readonly terminalAttemptCleanups = new Map<string, Promise<void>>();
   private readonly duplexCloseErrors = new WeakMap<RuntimeWorkerDuplex, RuntimeWebSocketError>();
   private policyRevision = 0;
   private policyRecovery: Promise<void> | undefined;
@@ -561,7 +564,7 @@ export class RuntimeWorker {
       const store = this.store;
       if (store) {
         const spool = await store.spoolStatus();
-        if (spool.empty && this.active.size === 0 &&
+        if (spool.empty && this.active.size === 0 && this.executions.size === 0 &&
           this.assignmentQueues.size === 0 && this.reservations.size === 0) {
           if (serverDrain.inflight > 0) {
             const remaining = deadline - this.dependencies.now();
@@ -589,11 +592,8 @@ export class RuntimeWorker {
         if (remaining <= 0) {
           throw new RuntimeDrainTimeoutError(timeoutMs, Object.freeze({ ...spool }));
         }
-        const unfinishedHandlers = [...this.active.values()]
-          .filter((attempt) => !attempt.handlerFinished)
-          .map((attempt) => attempt.done);
         await Promise.race([
-          ...unfinishedHandlers,
+          ...this.executions,
           sleep(Math.min(25, remaining), this.runtimeAbort.signal),
           this.doneSignal.promise,
         ]).catch((error) => {
@@ -963,6 +963,7 @@ export class RuntimeWorker {
 
   private async handleAssignment(assignment: RuntimeRunAssignedPayload): Promise<void> {
     assertAssignmentIdentity(assignment.attemptIdentity, this.config, this.requiredIdentity());
+    const attemptId = assignment.attemptIdentity.attemptId;
     const store = this.requiredStore();
     if (!store.acceptsNewRuns()) {
       await this.rejectWithoutStore(assignment.attemptIdentity, "NODE_AT_CAPACITY");
@@ -978,6 +979,7 @@ export class RuntimeWorker {
       }
       throw error;
     }
+    if (this.terminalAttempts.has(attemptId)) return;
     if (stored.state === "started" || stored.state === "finished") {
       await this.retry((signal) => this.business().ackAssignment(assignment.attemptIdentity, signal));
       return;
@@ -988,6 +990,7 @@ export class RuntimeWorker {
     if (stored.state === "received" && (this.draining || !admitted)) {
       const reason = this.draining ? "NODE_DRAINING" : "NODE_AT_CAPACITY";
       await store.transitionAssignment(assignment.attemptIdentity.attemptId, "reject_sent");
+      if (this.terminalAttempts.has(attemptId)) return;
       await this.retry((signal) => this.business().rejectAssignment(
         assignment.attemptIdentity,
         reason,
@@ -995,17 +998,20 @@ export class RuntimeWorker {
         snapshot.inflight,
         signal,
       ));
+      if (this.terminalAttempts.has(attemptId)) return;
       await store.transitionAssignment(assignment.attemptIdentity.attemptId, "rejected");
       await store.deleteAssignment(assignment.attemptIdentity.attemptId);
       return;
     }
     if (stored.state === "received") {
       stored = await store.transitionAssignment(assignment.attemptIdentity.attemptId, "ack_sent");
+      if (this.terminalAttempts.has(attemptId)) return;
     }
     if (stored.state === "ack_sent") {
       const confirmed = await this.retry(
         (signal) => this.business().ackAssignment(assignment.attemptIdentity, signal),
       );
+      if (this.terminalAttempts.has(attemptId)) return;
       assertIdentityEqual(assignment.attemptIdentity, confirmed.attemptIdentity, "assignment confirmation");
       if (Date.parse(confirmed.leaseExpiresAt) <= this.dependencies.now()) {
         throw new Error("Runtime assignment confirmation has an expired lease");
@@ -1033,9 +1039,10 @@ export class RuntimeWorker {
 
   private async startConfirmedAttempt(stored: RuntimeStoredAssignment): Promise<void> {
     const attemptId = stored.assignment.attemptIdentity.attemptId;
-    if (this.active.has(attemptId)) return;
+    if (this.active.has(attemptId) || this.terminalAttempts.has(attemptId)) return;
     if (stored.state !== "confirmed") throw new Error("Runtime handler requires a confirmed assignment");
     stored = await this.requiredStore().transitionAssignment(attemptId, "started");
+    if (this.terminalAttempts.has(attemptId)) return;
     const controller = new AbortController();
     const done = deferred<void>();
     const active: ActiveAttempt = {
@@ -1049,7 +1056,12 @@ export class RuntimeWorker {
       handlerFinished: false,
     };
     this.active.set(attemptId, active);
-    void this.executeAttempt(active).catch((error) => this.reportFatal(asError(error)));
+    const execution = this.executeAttempt(active);
+    this.executions.add(execution);
+    void execution.catch((error) => this.reportFatal(asError(error))).finally(() => {
+      active.resolveDone();
+      this.executions.delete(execution);
+    });
   }
 
   private async executeAttempt(active: ActiveAttempt): Promise<void> {
@@ -1081,10 +1093,16 @@ export class RuntimeWorker {
       ? result.durationMs
       : Math.max(0, this.dependencies.now() - active.startedAt);
     active.handlerFinished = true;
+    // Core owns the canceled terminal state. Once a matching cancel command
+    // has fenced this Attempt, a late handler return must never create a
+    // competing Result spool entry.
+    if (active.canceled) {
+      return;
+    }
     const current = await this.requiredStore().getAssignment(attemptId);
+    if (active.canceled) return;
     if (!current || current.state === "revoked") {
       this.active.delete(attemptId);
-      active.resolveDone();
       return;
     }
     const payload: RuntimeRunResultPayload = result.status === "failed"
@@ -1113,8 +1131,14 @@ export class RuntimeWorker {
     // Handler completion is not Attempt completion. Keep this Attempt in the
     // active set so its lease and capacity remain owned until Core durably
     // acknowledges the terminal Result.
-    await this.requiredStore().saveResult(payload);
-    active.resolveDone();
+    if (active.canceled) return;
+    try {
+      await this.requiredStore().saveResult(payload);
+    } catch (error) {
+      if (active.canceled) return;
+      throw error;
+    }
+    if (active.canceled) return;
     this.spoolSignal.notify();
   }
 
@@ -1171,54 +1195,120 @@ export class RuntimeWorker {
     if (!this.activeMode) return false;
     let progressed = false;
     const store = this.requiredStore();
-    for (const assignment of await store.listAssignments()) {
+    assignments: for (const assignment of await store.listAssignments()) {
       const attemptId = assignment.assignment.attemptIdentity.attemptId;
-      if (assignment.state !== "started" && assignment.state !== "finished") continue;
-      for (const event of await store.listPendingEvents(attemptId)) {
-        const ack = await this.policyOperation(() => this.business().appendEvent(
-            runtimeEventPayload(event),
-            this.runtimeAbort.signal,
-          ), this.runtimeAbort.signal);
-        if (ack.clientEventId !== event.clientEventId || ack.clientEventSeq !== event.clientEventSeq) {
-          throw new Error("Runtime Event ACK identity mismatch");
-        }
-        await store.ackEvent(attemptId, event.clientEventId, event.clientEventSeq);
-        progressed = true;
-      }
-      const result = await store.getPendingResult(attemptId);
-      if (!result) continue;
-      let ack: RuntimeRunResultAckPayload;
-      try {
-        ack = await this.policyOperation(() =>
-          this.business().finalizeResult(result.payload, this.runtimeAbort.signal),
-        this.runtimeAbort.signal);
-      } catch (error) {
-        if (runtimeErrorCode(error) !== "EVENTS_MISSING") throw error;
-        const ranges = missingEventRanges(error);
-        if (ranges.length === 0) {
-          throw new Error("Runtime Result reported missing Events without replay ranges");
-        }
-        for (const event of await store.listEventsInRanges(attemptId, ranges)) {
-          const eventAck = await this.policyOperation(() => this.business().appendEvent(
-              runtimeEventPayload(event),
-              this.runtimeAbort.signal,
-            ), this.runtimeAbort.signal);
-          if (eventAck.clientEventId !== event.clientEventId ||
-            eventAck.clientEventSeq !== event.clientEventSeq) {
-            throw new Error("Runtime replay Event ACK identity mismatch");
-          }
-          await store.ackEvent(attemptId, event.clientEventId, event.clientEventSeq);
-        }
+      if (assignment.state === "revoked") {
+        if (this.terminalAttemptCleanups.has(attemptId)) continue;
+        await this.reconcileTerminalAttempt(assignment);
         progressed = true;
         continue;
       }
-      if (ack.resultId !== result.payload.resultId) throw new Error("Runtime Result ACK identity mismatch");
-      this.active.delete(attemptId);
-      await store.ackResult(attemptId, result.payload.resultId);
-      await store.deleteAssignment(attemptId);
-      progressed = true;
+      if (assignment.state !== "started" && assignment.state !== "finished") continue;
+      if (this.terminalAttemptCleanups.has(attemptId)) continue;
+      try {
+        for (const event of await store.listPendingEvents(attemptId)) {
+          const ack = await this.policyOperation(() => this.business().appendEvent(
+              runtimeEventPayload(event),
+              this.runtimeAbort.signal,
+            ), this.runtimeAbort.signal);
+          if (ack.clientEventId !== event.clientEventId || ack.clientEventSeq !== event.clientEventSeq) {
+            throw new Error("Runtime Event ACK identity mismatch");
+          }
+          const current = await store.getAssignment(attemptId);
+          if (this.terminalAttemptCleanups.has(attemptId) || !current || current.state === "revoked") {
+            progressed = true;
+            continue assignments;
+          }
+          await store.ackEvent(attemptId, event.clientEventId, event.clientEventSeq);
+          progressed = true;
+        }
+        const result = await store.getPendingResult(attemptId);
+        if (!result) continue;
+        let ack: RuntimeRunResultAckPayload;
+        try {
+          ack = await this.policyOperation(() =>
+            this.business().finalizeResult(result.payload, this.runtimeAbort.signal),
+          this.runtimeAbort.signal);
+        } catch (error) {
+          if (runtimeErrorCode(error) !== "EVENTS_MISSING") throw error;
+          const ranges = missingEventRanges(error);
+          if (ranges.length === 0) {
+            throw new Error("Runtime Result reported missing Events without replay ranges");
+          }
+          for (const event of await store.listEventsInRanges(attemptId, ranges)) {
+            const eventAck = await this.policyOperation(() => this.business().appendEvent(
+                runtimeEventPayload(event),
+                this.runtimeAbort.signal,
+              ), this.runtimeAbort.signal);
+            if (eventAck.clientEventId !== event.clientEventId ||
+              eventAck.clientEventSeq !== event.clientEventSeq) {
+              throw new Error("Runtime replay Event ACK identity mismatch");
+            }
+            const current = await store.getAssignment(attemptId);
+            if (this.terminalAttemptCleanups.has(attemptId) || !current || current.state === "revoked") {
+              progressed = true;
+              continue assignments;
+            }
+            await store.ackEvent(attemptId, event.clientEventId, event.clientEventSeq);
+          }
+          progressed = true;
+          continue;
+        }
+        if (ack.resultId !== result.payload.resultId) throw new Error("Runtime Result ACK identity mismatch");
+        const current = await store.getAssignment(attemptId);
+        if (this.terminalAttemptCleanups.has(attemptId) || !current || current.state === "revoked") {
+          progressed = true;
+          continue;
+        }
+        this.active.delete(attemptId);
+        await store.ackResult(attemptId, result.payload.resultId);
+        await store.deleteAssignment(attemptId);
+        progressed = true;
+      } catch (error) {
+        const code = runtimeErrorCode(error);
+        if (code === "RUN_CANCEL_REQUESTED") {
+          await this.clearCanceledAttempt(assignment);
+        } else if (["STALE_LEASE", "LEASE_EXPIRED", "RUN_ALREADY_TERMINAL"].includes(code)) {
+          await this.clearRevokedAttempt(assignment);
+        } else {
+          throw error;
+        }
+        progressed = true;
+      }
     }
     return progressed;
+  }
+
+  private async reconcileTerminalAttempt(assignment: RuntimeStoredAssignment): Promise<void> {
+    const identity = this.requiredIdentity();
+    const request: RuntimeResumePayload = {
+      nodeId: this.config.nodeId,
+      agentId: this.config.agentId,
+      workerId: identity.workerId,
+      runtimeSessionId: identity.runtimeSessionId,
+      attempts: [{
+        attemptIdentity: assignment.assignment.attemptIdentity,
+        lastAckedClientEventSeq: assignment.ackedClientEventSeq,
+        pendingClientEventRanges: [],
+      }],
+    };
+    const decisions = await this.policyOperation(
+      () => this.business().resume(request, this.runtimeAbort.signal),
+      this.runtimeAbort.signal,
+    );
+    if (decisions.length !== 1) throw new Error("Runtime terminal Resume response count mismatch");
+    const decision = decisions[0]!;
+    assertIdentityEqual(
+      assignment.assignment.attemptIdentity,
+      decision.attemptIdentity,
+      "terminal resume response",
+    );
+    assertResumeDecisionCoherent(decision);
+    if (decision.decision !== RuntimeResumeDecisions.resultAlreadyAcked &&
+      decision.decision !== RuntimeResumeDecisions.leaseRevoked) {
+      throw new Error("Runtime terminal tombstone was not confirmed by Core");
+    }
+    await this.clearConfirmedTerminalAttempt(assignment);
   }
 
   private async resumeDurableState(
@@ -1313,7 +1403,7 @@ export class RuntimeWorker {
         }
         case RuntimeResumeDecisions.resultAlreadyAcked:
         case RuntimeResumeDecisions.leaseRevoked:
-          await this.clearRevokedAttempt(assignment);
+          await this.clearConfirmedTerminalAttempt(assignment);
           break;
         default:
           throw new Error("Runtime resume returned an unknown decision");
@@ -1323,17 +1413,69 @@ export class RuntimeWorker {
   }
 
   private async clearRevokedAttempt(assignment: RuntimeStoredAssignment): Promise<void> {
+    return this.clearTerminalAttempt(
+      assignment,
+      new RuntimeAttemptError("LEASE_REVOKED", "Runtime lease was revoked"),
+    );
+  }
+
+  private async clearCanceledAttempt(assignment: RuntimeStoredAssignment): Promise<void> {
+    return this.clearTerminalAttempt(
+      assignment,
+      new RuntimeAttemptError("RUN_CANCELED", "Run was canceled"),
+    );
+  }
+
+  private async clearConfirmedTerminalAttempt(assignment: RuntimeStoredAssignment): Promise<void> {
     const attemptId = assignment.assignment.attemptIdentity.attemptId;
+    await this.clearTerminalAttempt(
+      assignment,
+      new RuntimeAttemptError("LEASE_REVOKED", "Runtime terminal state was confirmed by Core"),
+    );
+    const store = this.requiredStore();
+    try {
+      await store.deleteAssignment(attemptId);
+    } catch (error) {
+      if (await store.getAssignment(attemptId)) throw error;
+    }
+    this.terminalAttempts.delete(attemptId);
+  }
+
+  private clearTerminalAttempt(
+    assignment: RuntimeStoredAssignment,
+    reason: RuntimeAttemptError,
+  ): Promise<void> {
+    const attemptId = assignment.assignment.attemptIdentity.attemptId;
+    // Every authoritative terminal signal is monotonic. Fence the handler and
+    // retire the lease/capacity ownership synchronously before sharing any
+    // in-flight durable cleanup Promise.
+    this.terminalAttempts.add(attemptId);
     const active = this.active.get(attemptId);
     if (active) {
-      active.controller.abort(new RuntimeAttemptError("LEASE_REVOKED", "Runtime lease was revoked"));
-      await active.done;
+      active.canceled = true;
+      active.controller.abort(reason);
       if (this.active.get(attemptId) === active) this.active.delete(attemptId);
     }
-    const current = await this.requiredStore().getAssignment(attemptId);
-    if (!current) return;
-    await this.requiredStore().revokeAttempt(attemptId);
-    await this.requiredStore().deleteAssignment(attemptId);
+    const existing = this.terminalAttemptCleanups.get(attemptId);
+    if (existing) return existing;
+    const cleanup = (async () => {
+      const store = this.requiredStore();
+      const current = await store.getAssignment(attemptId);
+      if (!current) return;
+      try {
+        await store.revokeAttempt(attemptId);
+      } catch (error) {
+        if (!await store.getAssignment(attemptId)) return;
+        throw error;
+      }
+    })();
+    const guarded = cleanup.finally(() => {
+      if (this.terminalAttemptCleanups.get(attemptId) === guarded) {
+        this.terminalAttemptCleanups.delete(attemptId);
+      }
+    });
+    this.terminalAttemptCleanups.set(attemptId, guarded);
+    return guarded;
   }
 
   private async commandLoop(): Promise<void> {
@@ -1380,37 +1522,59 @@ export class RuntimeWorker {
     if (this.cancellations.has(cancellationKey)) return;
     this.cancellations.add(cancellationKey);
     try {
+      const deadline = Date.parse(command.payload.deadlineAt);
       const stored = await this.requiredStore().getAssignment(command.payload.attemptIdentity.attemptId);
       if (!stored || !identityEqual(stored.assignment.attemptIdentity, command.payload.attemptIdentity)) {
-        await this.ackCancellation({
+        await this.ackCancellationUntil({
           cancellationId: command.payload.cancellationId,
           attemptIdentity: command.payload.attemptIdentity,
-          cancelState: "stopped",
+          cancelState: "failed",
+          errorCode: "ATTEMPT_IDENTITY_MISMATCH",
+        }, deadline).catch((error) => {
+          this.log("warn", `Runtime cancel identity failure ACK was not confirmed (${safeError(error)})`);
         });
         return;
       }
       const active = this.active.get(command.payload.attemptIdentity.attemptId);
-      await this.ackCancellation({
+      this.terminalAttempts.add(command.payload.attemptIdentity.attemptId);
+      if (active) active.canceled = true;
+      const initialRemaining = Math.max(1, deadline - this.dependencies.now());
+      const stoppingBudget = Math.max(1, Math.min(2_000, Math.floor(initialRemaining / 2)));
+      const stoppingAck = this.ackCancellationAttempt({
         cancellationId: command.payload.cancellationId,
         attemptIdentity: command.payload.attemptIdentity,
-        cancelState: active ? "stopping" : "stopped",
+        cancelState: "stopping",
+      }, stoppingBudget).catch((error) => {
+        this.log("warn", `Runtime cancel stopping ACK was not confirmed (${safeError(error)})`);
       });
-      if (!active) {
-        if (["received", "ack_sent", "confirmed"].includes(stored.state)) {
-          await this.requiredStore().revokeAttempt(command.payload.attemptIdentity.attemptId);
-          await this.requiredStore().deleteAssignment(command.payload.attemptIdentity.attemptId);
-        }
-        return;
+      if (active) {
+        active.controller.abort(new RuntimeAttemptError("RUN_CANCELED", "Run was canceled"));
       }
-      active.canceled = true;
-      active.controller.abort(new RuntimeAttemptError("RUN_CANCELED", "Run was canceled"));
-      const remaining = Math.max(0, Date.parse(command.payload.deadlineAt) - this.dependencies.now());
-      await settleOrTimeout(active.done, remaining);
-      await this.ackCancellation({
+      const handlerStopped = active
+        ? settledBeforeTimeout(active.done, Math.max(0, deadline - this.dependencies.now()))
+        : Promise.resolve(true);
+      await stoppingAck;
+      if (!await handlerStopped) {
+          await this.ackCancellationUntil({
+            cancellationId: command.payload.cancellationId,
+            attemptIdentity: command.payload.attemptIdentity,
+            cancelState: "failed",
+            errorCode: "CANCEL_DEADLINE_EXCEEDED",
+          }, deadline).catch((error) => {
+            this.log("warn", `Runtime cancel deadline failure ACK was not confirmed (${safeError(error)})`);
+          });
+          return;
+      }
+      const stoppedConfirmed = await this.ackCancellationUntil({
         cancellationId: command.payload.cancellationId,
         attemptIdentity: command.payload.attemptIdentity,
         cancelState: "stopped",
+      }, deadline).then(() => true, (error) => {
+        this.log("warn", `Runtime cancel stopped ACK was not confirmed (${safeError(error)})`);
+        return false;
       });
+      if (!stoppedConfirmed) return;
+      await this.clearCanceledAttempt(stored);
     } finally {
       this.cancellations.delete(cancellationKey);
     }
@@ -1443,8 +1607,42 @@ export class RuntimeWorker {
     }
   }
 
-  private ackCancellation(request: Parameters<BusinessClient["ackCancel"]>[0]): Promise<void> {
-    return this.retry((signal) => this.business().ackCancel(request, signal));
+  private async ackCancellationAttempt(
+    request: Parameters<BusinessClient["ackCancel"]>[0],
+    timeoutMs: number,
+  ): Promise<void> {
+    const timeout = AbortSignal.timeout(Math.max(1, timeoutMs));
+    const signal = combinedSignal(this.runtimeAbort.signal, timeout);
+    await Promise.race([
+      this.policyOperation(() => this.business().ackCancel(request, signal), signal),
+      abortPromise(signal),
+    ]);
+  }
+
+  private async ackCancellationUntil(
+    request: Parameters<BusinessClient["ackCancel"]>[0],
+    deadline: number,
+  ): Promise<void> {
+    let failures = 0;
+    while (true) {
+      const remaining = Math.max(1, deadline - this.dependencies.now());
+      try {
+        await this.ackCancellationAttempt(request, remaining);
+        return;
+      } catch (error) {
+        if (this.runtimeAbort.signal.aborted) throw abortError(this.runtimeAbort.signal);
+        if (isPermanentRuntimeError(error) || this.dependencies.now() >= deadline) throw error;
+        const base = Math.min(
+          this.config.retryMaximumMs,
+          this.config.retryMinimumMs * 2 ** Math.min(failures++, 20),
+        );
+        const delay = Math.min(
+          Math.max(1, deadline - this.dependencies.now()),
+          Math.max(1, Math.floor(base * (0.8 + Math.random() * 0.4))),
+        );
+        await sleep(delay, this.runtimeAbort.signal);
+      }
+    }
   }
 
   private async leaseLoop(): Promise<void> {
@@ -1477,7 +1675,12 @@ export class RuntimeWorker {
           if (renewed.pendingCommand) await this.handleCommand(renewed.pendingCommand);
         } catch (error) {
           if (this.active.get(attemptId) !== active) continue;
-          if (runtimeErrorCode(error) === "STALE_LEASE" || runtimeErrorCode(error) === "LEASE_EXPIRED") {
+          const code = runtimeErrorCode(error);
+          if (code === "RUN_CANCEL_REQUESTED") {
+            await this.clearCanceledAttempt(assignment);
+            continue;
+          }
+          if (["STALE_LEASE", "LEASE_EXPIRED", "RUN_ALREADY_TERMINAL"].includes(code)) {
             await this.clearRevokedAttempt(assignment);
             continue;
           }
@@ -1507,12 +1710,13 @@ export class RuntimeWorker {
         // Best effort: capacity zero is also represented by the session close.
       }
     }
-    const activeDone = Promise.allSettled([...this.active.values()].map((attempt) => attempt.done));
-    await settleOrTimeout(activeDone, this.config.shutdownTimeoutMs);
+    const executionsDone = Promise.allSettled([...this.executions]);
+    await settleOrTimeout(executionsDone, this.config.shutdownTimeoutMs);
     for (const active of this.active.values()) {
+      active.canceled = true;
       active.controller.abort(new RuntimeAttemptError("WORKER_SHUTDOWN", "Runtime Worker is shutting down"));
     }
-    await settleOrTimeout(activeDone, 2_000);
+    await settleOrTimeout(executionsDone, 2_000);
     if (closePullAttachment && this.transport && this.identityValue) {
       try {
         await this.transport.http.closeRuntimeSession({
@@ -2240,6 +2444,20 @@ function settleOrTimeout(promise: Promise<unknown>, milliseconds: number): Promi
       clearTimeout(timer);
       resolve();
     });
+  });
+}
+
+function settledBeforeTimeout(promise: Promise<unknown>, milliseconds: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(false), Math.max(0, milliseconds));
+    void promise.then(() => finish(true), () => finish(true));
   });
 }
 

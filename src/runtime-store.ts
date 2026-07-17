@@ -83,7 +83,7 @@ export interface RuntimeStoreSnapshot {
   recordsUsed: number;
 }
 
-/** Counts every durable record that must be cleared before a safe Worker exit. */
+/** Counts non-terminal durable work that must be cleared before a safe Worker exit. */
 export interface RuntimeSpoolStatus {
   assignments: number;
   events: number;
@@ -1000,7 +1000,12 @@ function recordCount(state: RuntimeStoreState): number {
 }
 
 function runtimeSpoolStatus(state: RuntimeStoreState): RuntimeSpoolStatus {
-  const assignments = Object.keys(state.assignments).length;
+  // Revoked Assignments are durable terminal tombstones. They carry no Event
+  // or Result work, are safe across process exit, and remain only so a
+  // redelivered cancellation can be acknowledged until Core confirms the
+  // terminal decision during Resume.
+  const assignments = Object.values(state.assignments)
+    .filter((assignment) => assignment.state !== "revoked").length;
   const events = Object.keys(state.events).length;
   const results = Object.keys(state.results).length;
   return {
