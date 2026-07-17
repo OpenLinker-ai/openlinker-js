@@ -1783,6 +1783,11 @@ export class RuntimeWorker {
   private reportFatal(error: Error): void {
     if (this.fatalReported) return;
     this.fatalReported = true;
+    // A fatal Runtime error is a terminal stop, not a transport-mode switch.
+    // Mark it before waking start() so sibling Pull loops exit when shutdown
+    // aborts their mode signal instead of polling again with that signal.
+    this.draining = true;
+    this.stopping = true;
     this.fatalSignal.resolve(error);
   }
 

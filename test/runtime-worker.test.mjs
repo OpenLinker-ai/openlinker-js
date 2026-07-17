@@ -1138,6 +1138,107 @@ test("RuntimeWorker stops forced Pull while claim and command polls are in fligh
   assert.equal(worker.transportState, "stopped");
 });
 
+test("RuntimeWorker stops Pull without polling churn after permanent authentication failure", async () => {
+  const revoke = deferred();
+  const claimStarted = deferred();
+  const commandStarted = deferred();
+  let claimCalls = 0;
+  let commandCalls = 0;
+  let sessionCloses = 0;
+  const client = fakeClient({
+    async heartbeatRuntimeSession() {
+      // Keep shutdown pending for several microtask turns. A sibling Pull loop
+      // must not repeatedly poll with an already-aborted mode signal meanwhile.
+      for (let index = 0; index < 50; index += 1) await Promise.resolve();
+      return ready();
+    },
+    async claimRuntimeRun() {
+      claimCalls += 1;
+      claimStarted.resolve();
+      await revoke.promise;
+      throw new OpenLinkerError("Agent Token is inactive", {
+        status: 401,
+        code: "UNAUTHORIZED",
+      });
+    },
+    async pollRuntimeCommands(_session, _wait, options) {
+      commandCalls += 1;
+      commandStarted.resolve();
+      await delay(60_000, options?.signal);
+      return { commands: [], databaseTime: new Date().toISOString() };
+    },
+    async closeRuntimeSession() {
+      sessionCloses += 1;
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await Promise.all([claimStarted.promise, commandStarted.promise]);
+  revoke.resolve();
+  await assert.rejects(running, (error) => {
+    assert.equal(error.code, "UNAUTHORIZED");
+    return true;
+  });
+
+  assert.equal(worker.transportState, "stopped");
+  assert.equal(claimCalls, 1);
+  assert.equal(commandCalls, 1, "a sibling Pull loop polled again during fatal shutdown");
+  assert.equal(sessionCloses, 1);
+});
+
+test("RuntimeWorker keeps retrying transient Pull failures", async () => {
+  let claimCalls = 0;
+  const recovered = deferred();
+  const client = fakeClient({
+    async claimRuntimeRun(_wait, _request, options) {
+      claimCalls += 1;
+      if (claimCalls < 3) throw new Error("temporary claim failure");
+      recovered.resolve();
+      await delay(60_000, options?.signal);
+      return undefined;
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await recovered.promise;
+  assert.equal(worker.transportState, "pull_active");
+  assert.equal(claimCalls, 3);
+  await worker.stop();
+  await running;
+});
+
 test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async () => {
   const handlerGate = deferred();
   const socketDone = deferred();
