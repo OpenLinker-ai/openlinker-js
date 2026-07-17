@@ -763,6 +763,146 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
   await running;
 });
 
+test("RuntimeWorker retries only WebSocket when discovered policy forbids Pull", async () => {
+  const socketDone = deferred();
+  let discoveryCalls = 0;
+  let dials = 0;
+  let pullCalls = 0;
+  const client = fakeClient({
+    async createRuntimeSession() {
+      pullCalls += 1;
+      throw new Error("attach-only Core must not receive a Pull Session create");
+    },
+    async claimRuntimeRun() {
+      pullCalls += 1;
+      throw new Error("attach-only Core must not receive a Pull claim");
+    },
+    async pollRuntimeCommands() {
+      pullCalls += 1;
+      throw new Error("attach-only Core must not receive a Pull command poll");
+    },
+  });
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: "https://runtime.example",
+        policy: {
+          allowedTransports: ["ws"],
+          defaultTransport: "auto",
+          retryMinimumMs: 1,
+          retryMaximumMs: 1,
+        },
+      };
+    },
+    connectTransport: async () => ({
+      http: client,
+      async dialWebSocket() {
+        dials += 1;
+        if (dials < 3) throw new Error("transient WebSocket attach failure");
+        return fakeDuplex(socketDone.promise);
+      },
+      async close() {},
+    }),
+  });
+
+  const running = worker.start();
+  await waitFor(() => dials === 3 && worker.transportState === "ws_active");
+  assert.equal(discoveryCalls, 1);
+  assert.equal(pullCalls, 0);
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
+test("RuntimeWorker recovers a 403 transport policy signal into WebSocket-only retry", async () => {
+  const socketDone = deferred();
+  let discoveryCalls = 0;
+  let connectCalls = 0;
+  let replacementDials = 0;
+  let pullCalls = 0;
+  const client = fakeClient({
+    async createRuntimeSession() {
+      pullCalls += 1;
+      throw new Error("policy recovery must not enter Pull");
+    },
+    async claimRuntimeRun() {
+      pullCalls += 1;
+      throw new Error("policy recovery must not enter Pull");
+    },
+    async pollRuntimeCommands() {
+      pullCalls += 1;
+      throw new Error("policy recovery must not enter Pull");
+    },
+  });
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: `https://runtime-${discoveryCalls}.example`,
+        policy: discoveryCalls === 1
+          ? { allowedTransports: ["ws", "pull"], defaultTransport: "auto" }
+          : {
+              allowedTransports: ["ws"],
+              defaultTransport: "auto",
+              retryMinimumMs: 1,
+              retryMaximumMs: 1,
+            },
+      };
+    },
+    connectTransport: async () => {
+      connectCalls += 1;
+      const connection = connectCalls;
+      return {
+        http: client,
+        async dialWebSocket() {
+          if (connection === 1) {
+            throw new OpenLinkerError("RUNTIME_TRANSPORT_FORBIDDEN", {
+              status: 403,
+              code: "FORBIDDEN",
+            });
+          }
+          replacementDials += 1;
+          if (replacementDials === 1) throw new Error("transient replacement WebSocket failure");
+          return fakeDuplex(socketDone.promise);
+        },
+        async close() {},
+      };
+    },
+  });
+
+  const running = worker.start();
+  await waitFor(() => replacementDials === 2 && worker.transportState === "ws_active");
+  assert.equal(discoveryCalls, 2);
+  assert.equal(connectCalls, 2);
+  assert.equal(pullCalls, 0);
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
 test("RuntimeWorker obeys discovered transport order and a fixed server default", async () => {
   for (const policy of [
     { allowedTransports: ["pull", "ws"], defaultTransport: "auto" },
