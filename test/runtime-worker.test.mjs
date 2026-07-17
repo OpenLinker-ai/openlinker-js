@@ -1743,6 +1743,573 @@ test("RuntimeWorker fences cancellation while assignment confirmation is in flig
   await running;
 });
 
+for (const transportMode of ["pull", "ws"]) {
+  for (const terminalCode of [
+    "RUN_CANCEL_REQUESTED",
+    "STALE_LEASE",
+    "LEASE_EXPIRED",
+    "RUN_ALREADY_TERMINAL",
+  ]) {
+    test(`RuntimeWorker ${transportMode} converges ${terminalCode} during assignment confirmation`, async () => {
+      const socketDone = deferred();
+      const ackEntered = deferred();
+      const ackRelease = deferred();
+      const drainRecheckEntered = deferred();
+      const drainRecheckRelease = deferred();
+      const store = new MemoryRuntimeStore();
+      let hello;
+      let claimed = false;
+      let ackCalls = 0;
+      let handlerCalls = 0;
+      const drainRequests = [];
+      const terminalError = () => transportMode === "ws"
+        ? new RuntimeWebSocketError("Attempt is already terminal", terminalCode, false)
+        : new OpenLinkerError("Attempt is already terminal", {
+          status: 409,
+          code: terminalCode,
+          details: { code: terminalCode, message: "attempt is already terminal" },
+        });
+      const client = fakeClient({
+        async createRuntimeSession(value) {
+          hello = value;
+          return ready();
+        },
+        async claimRuntimeRun(_wait, _request, options) {
+          if (!claimed) {
+            claimed = true;
+            return assignmentFor(hello);
+          }
+          await delay(5, options?.signal);
+          return undefined;
+        },
+        async ackRuntimeAssignment() {
+          ackCalls += 1;
+          ackEntered.resolve();
+          await ackRelease.promise;
+          throw terminalError();
+        },
+        async drainRuntimeSession(_runtimeSessionId, request) {
+          drainRequests.push(request);
+          if (drainRequests.length === 1) return { ...request, inflight: 1 };
+          drainRecheckEntered.resolve();
+          await drainRecheckRelease.promise;
+          return { ...request, inflight: 0 };
+        },
+      });
+      const transport = transportMode === "ws"
+        ? {
+          http: client,
+          async dialWebSocket(value, callbacks) {
+            hello = value;
+            const duplex = fakeDuplex(socketDone.promise);
+            duplex.ackAssignment = async () => {
+              ackCalls += 1;
+              ackEntered.resolve();
+              await ackRelease.promise;
+              throw terminalError();
+            };
+            duplex.requestDrain = async (request) => {
+              drainRequests.push(request);
+              if (drainRequests.length === 1) return { ...request, inflight: 1 };
+              drainRecheckEntered.resolve();
+              await drainRecheckRelease.promise;
+              return { ...request, inflight: 0 };
+            };
+            setTimeout(() => callbacks.onAssigned?.(assignmentFor(value)), 0);
+            return duplex;
+          },
+          async close() {},
+        }
+        : fakeTransport(client);
+      const worker = new RuntimeWorker({
+        runtimeURL: "https://runtime.example",
+        transport: transportMode,
+        nodeId: ids.node,
+        agentId: ids.agent,
+        agentToken: "ol_agent_private",
+        mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+        store,
+        allowUnsafeMemoryStore: true,
+        retryMinimumMs: 1,
+        retryMaximumMs: 1,
+        heartbeatIntervalMs: 10_000,
+        handler: async () => {
+          handlerCalls += 1;
+          return { output: { must_not_run: true } };
+        },
+      }, {
+        connectTransport: async () => transport,
+      });
+
+      const running = worker.start();
+      await ackEntered.promise;
+      assert.equal((await store.getAssignment(ids.attempt))?.state, "ack_sent");
+      const draining = worker.drain({ timeoutMs: 1_000 });
+      let drainSettled = false;
+      void draining.then(
+        () => { drainSettled = true; },
+        () => { drainSettled = true; },
+      );
+      await waitFor(() => drainRequests.length === 1);
+      assert.equal(drainRequests[0].inflight, 1, "assignment reservation was missing from drain evidence");
+      await delay(20);
+      assert.equal(drainSettled, false, "drain ignored the in-flight assignment confirmation");
+      ackRelease.resolve();
+      await drainRecheckEntered.promise;
+      assert.ok([undefined, "revoked"].includes(
+        (await store.getAssignment(ids.attempt))?.state,
+      ));
+      assert.equal((await store.spoolStatus()).empty, true);
+      assert.equal(handlerCalls, 0);
+      assert.equal(ackCalls, 1, "terminal assignment confirmation was retried");
+      assert.equal(drainSettled, false, "drain skipped the authoritative Core re-check");
+      drainRecheckRelease.resolve();
+      await draining;
+      socketDone.resolve();
+      await running;
+    });
+  }
+}
+
+for (const transportMode of ["pull", "ws"]) {
+  for (const terminalCode of [
+    "RUN_CANCEL_REQUESTED",
+    "STALE_LEASE",
+    "LEASE_EXPIRED",
+    "RUN_ALREADY_TERMINAL",
+  ]) {
+    test(`RuntimeWorker ${transportMode} converges ${terminalCode} while rejecting a draining offer`, async () => {
+      const socketDone = deferred();
+      const claimEntered = deferred();
+      const claimRelease = deferred();
+      const drainEntered = deferred();
+      const drainRelease = deferred();
+      const drainRecheckEntered = deferred();
+      const drainRecheckRelease = deferred();
+      const rejectEntered = deferred();
+      const rejectRelease = deferred();
+      const store = new MemoryRuntimeStore();
+      let hello;
+      let callbacks;
+      let drainCalls = 0;
+      let firstDrainRequest;
+      let rejectCalls = 0;
+      let handlerCalls = 0;
+      const terminalError = () => transportMode === "ws"
+        ? new RuntimeWebSocketError("Attempt is already terminal", terminalCode, false)
+        : new OpenLinkerError("Attempt is already terminal", {
+          status: 409,
+          code: terminalCode,
+          details: { code: terminalCode, message: "attempt is already terminal" },
+        });
+      const client = fakeClient({
+        async createRuntimeSession(value) {
+          hello = value;
+          return ready();
+        },
+        async claimRuntimeRun() {
+          claimEntered.resolve();
+          return claimRelease.promise;
+        },
+        async rejectRuntimeAssignment() {
+          rejectCalls += 1;
+          rejectEntered.resolve();
+          await rejectRelease.promise;
+          throw terminalError();
+        },
+        async drainRuntimeSession(_runtimeSessionId, request) {
+          drainCalls += 1;
+          firstDrainRequest ??= request;
+          if (drainCalls > 1) {
+            drainRecheckEntered.resolve();
+            await drainRecheckRelease.promise;
+            return { ...request, inflight: 0 };
+          }
+          drainEntered.resolve();
+          await drainRelease.promise;
+          return { ...request, inflight: 1 };
+        },
+      });
+      const transport = transportMode === "ws"
+        ? {
+          http: client,
+          async dialWebSocket(value, valueCallbacks) {
+            hello = value;
+            callbacks = valueCallbacks;
+            const duplex = fakeDuplex(socketDone.promise);
+            duplex.rejectAssignment = async () => {
+              rejectCalls += 1;
+              rejectEntered.resolve();
+              await rejectRelease.promise;
+              throw terminalError();
+            };
+            duplex.requestDrain = async (request) => {
+              drainCalls += 1;
+              firstDrainRequest ??= request;
+              if (drainCalls > 1) {
+                drainRecheckEntered.resolve();
+                await drainRecheckRelease.promise;
+                return { ...request, inflight: 0 };
+              }
+              drainEntered.resolve();
+              await drainRelease.promise;
+              return { ...request, inflight: 1 };
+            };
+            return duplex;
+          },
+          async close() {},
+        }
+        : fakeTransport(client);
+      const worker = new RuntimeWorker({
+        runtimeURL: "https://runtime.example",
+        transport: transportMode,
+        nodeId: ids.node,
+        agentId: ids.agent,
+        agentToken: "ol_agent_private",
+        mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+        store,
+        allowUnsafeMemoryStore: true,
+        retryMinimumMs: 1,
+        retryMaximumMs: 1,
+        heartbeatIntervalMs: 10_000,
+        handler: async () => {
+          handlerCalls += 1;
+          return { output: { must_not_run: true } };
+        },
+      }, {
+        connectTransport: async () => transport,
+      });
+
+      const running = worker.start();
+      if (transportMode === "pull") {
+        await claimEntered.promise;
+      } else {
+        await waitFor(() => callbacks !== undefined);
+      }
+      const draining = worker.drain({ timeoutMs: 1_000 });
+      let drainSettled = false;
+      void draining.then(
+        () => { drainSettled = true; },
+        () => { drainSettled = true; },
+      );
+      await drainEntered.promise;
+      assert.equal(firstDrainRequest.inflight, 0, "drain started with unexpected local work");
+      const assignment = assignmentFor(hello);
+      if (transportMode === "pull") {
+        claimRelease.resolve(assignment);
+      } else {
+        callbacks.onAssigned?.(assignment);
+      }
+      await rejectEntered.promise;
+      assert.equal((await store.getAssignment(ids.attempt))?.state, "reject_sent");
+      drainRelease.resolve();
+      await delay(20);
+      assert.equal(drainSettled, false, "drain ignored the in-flight assignment rejection");
+      rejectRelease.resolve();
+      await drainRecheckEntered.promise;
+      assert.equal(rejectCalls, 1, "terminal assignment rejection was retried");
+      assert.equal(handlerCalls, 0);
+      assert.ok([undefined, "revoked"].includes(
+        (await store.getAssignment(ids.attempt))?.state,
+      ));
+      assert.equal((await store.spoolStatus()).empty, true);
+      assert.equal(drainSettled, false, "drain skipped the authoritative Core re-check");
+      drainRecheckRelease.resolve();
+      await draining;
+      socketDone.resolve();
+      await running;
+    });
+  }
+}
+
+test("RuntimeWorker treats a terminal rejectWithoutStore with no local Assignment as benign", async () => {
+  const socketDone = deferred();
+  const rejectEntered = deferred();
+  const rejectRelease = deferred();
+  const store = new MemoryRuntimeStore();
+  const originalAcceptsNewRuns = store.acceptsNewRuns.bind(store);
+  let callbacks;
+  let hello;
+  let rejectCalls = 0;
+  let handlerCalls = 0;
+  store.acceptsNewRuns = () => originalAcceptsNewRuns() && false;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(value, valueCallbacks) {
+      hello = value;
+      callbacks = valueCallbacks;
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.rejectAssignment = async () => {
+        rejectCalls += 1;
+        rejectEntered.resolve();
+        await rejectRelease.promise;
+        throw new RuntimeWebSocketError(
+          "Run cancellation was already requested",
+          "RUN_CANCEL_REQUESTED",
+          false,
+        );
+      };
+      duplex.requestDrain = async (request) => ({ ...request, inflight: 0 });
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerCalls += 1;
+      return { output: { must_not_run: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "ws_active" && callbacks !== undefined);
+  callbacks.onAssigned?.(assignmentFor(hello));
+  await rejectEntered.promise;
+  const draining = worker.drain({ timeoutMs: 1_000 });
+  let drainSettled = false;
+  void draining.then(
+    () => { drainSettled = true; },
+    () => { drainSettled = true; },
+  );
+  await delay(20);
+  assert.equal(drainSettled, false, "drain ignored an in-flight rejectWithoutStore operation");
+  assert.equal(await store.getAssignment(ids.attempt), undefined);
+  assert.equal(handlerCalls, 0);
+  rejectRelease.resolve();
+  await draining;
+  socketDone.resolve();
+  await running;
+  assert.equal(rejectCalls, 1, "terminal rejectWithoutStore was retried");
+});
+
+test("RuntimeWorker fences a stored Attempt when a full File store rejects a duplicate offer", async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-full-duplicate-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const socketDone = deferred();
+  const handlerStarted = deferred();
+  const handlerAborted = deferred();
+  const store = new FileRuntimeStore(dataDir, {
+    maxBytes: 1_048_576,
+    reserveBytes: 0,
+    maxRecords: 1,
+  });
+  let callbacks;
+  let hello;
+  let ackCalls = 0;
+  let rejectCalls = 0;
+  let handlerCalls = 0;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(value, valueCallbacks) {
+      hello = value;
+      callbacks = valueCallbacks;
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.ackAssignment = async (identity) => {
+        ackCalls += 1;
+        return {
+          attemptIdentity: identity,
+          attemptNo: 1,
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      };
+      duplex.rejectAssignment = async () => {
+        rejectCalls += 1;
+        throw new RuntimeWebSocketError("Lease is stale", "STALE_LEASE", false);
+      };
+      duplex.requestDrain = async (request) => ({ ...request, inflight: 0 });
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    capacity: 1,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      handlerCalls += 1;
+      handlerStarted.resolve();
+      await new Promise((_, reject) => {
+        const abort = () => {
+          handlerAborted.resolve();
+          reject(run.signal.reason);
+        };
+        if (run.signal.aborted) abort();
+        else run.signal.addEventListener("abort", abort, { once: true });
+      });
+      return { output: { unreachable: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "ws_active" && callbacks !== undefined);
+  const assignment = assignmentFor(hello);
+  callbacks.onAssigned?.(assignment);
+  await handlerStarted.promise;
+  assert.equal(store.acceptsNewRuns(), false, "File store did not reach the intended record limit");
+  callbacks.onAssigned?.(assignment);
+  await handlerAborted.promise;
+  await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "revoked");
+  assert.equal(ackCalls, 1);
+  assert.equal(rejectCalls, 1, "terminal duplicate rejection was retried");
+  assert.equal(handlerCalls, 1, "duplicate offer re-entered the handler");
+  assert.equal((await store.spoolStatus()).empty, true);
+
+  await worker.drain({ timeoutMs: 1_000 });
+  socketDone.resolve();
+  await running;
+});
+
+for (const { persistedState, terminalCode } of [
+  { persistedState: "started", terminalCode: "RUN_CANCEL_REQUESTED" },
+  { persistedState: "finished", terminalCode: "RUN_ALREADY_TERMINAL" },
+]) {
+  test(`RuntimeWorker converges a terminal re-ACK for a duplicate ${persistedState} offer`, async () => {
+    const socketDone = deferred();
+    const store = new MemoryRuntimeStore();
+    let callbacks;
+    let hello;
+    let ackCalls = 0;
+    let handlerCalls = 0;
+    const transport = {
+      http: fakeClient(),
+      async dialWebSocket(value, valueCallbacks) {
+        hello = value;
+        callbacks = valueCallbacks;
+        const duplex = fakeDuplex(socketDone.promise);
+        duplex.ackAssignment = async () => {
+          ackCalls += 1;
+          throw new RuntimeWebSocketError("Attempt is already terminal", terminalCode, false);
+        };
+        duplex.requestDrain = async (request) => ({ ...request, inflight: 0 });
+        return duplex;
+      },
+      async close() {},
+    };
+    const worker = new RuntimeWorker({
+      runtimeURL: "https://runtime.example",
+      transport: "ws",
+      nodeId: ids.node,
+      agentId: ids.agent,
+      agentToken: "ol_agent_private",
+      mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+      store,
+      allowUnsafeMemoryStore: true,
+      retryMinimumMs: 1,
+      retryMaximumMs: 1,
+      heartbeatIntervalMs: 10_000,
+      handler: async () => {
+        handlerCalls += 1;
+        return { output: { must_not_run: true } };
+      },
+    }, {
+      connectTransport: async () => transport,
+    });
+
+    const running = worker.start();
+    await waitFor(() => worker.transportState === "ws_active" && callbacks !== undefined);
+    const assignment = assignmentFor(hello);
+    await store.saveAssignment(assignment);
+    await store.transitionAssignment(ids.attempt, "ack_sent");
+    await store.transitionAssignment(ids.attempt, "confirmed", {
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await store.transitionAssignment(ids.attempt, "started");
+    if (persistedState === "finished") {
+      await store.transitionAssignment(ids.attempt, "finished");
+    }
+    callbacks.onAssigned?.(assignment);
+    await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "revoked");
+    assert.equal(ackCalls, 1, "terminal duplicate re-ACK was retried");
+    assert.equal(handlerCalls, 0);
+    assert.equal((await store.spoolStatus()).empty, true);
+
+    await worker.drain({ timeoutMs: 1_000 });
+    socketDone.resolve();
+    await running;
+  });
+}
+
+test("RuntimeWorker retries a non-terminal 409 during assignment confirmation", async () => {
+  const socketDone = deferred();
+  const store = new MemoryRuntimeStore();
+  let ackCalls = 0;
+  let handlerCalls = 0;
+  const transport = {
+    http: fakeClient(),
+    async dialWebSocket(hello, callbacks) {
+      const duplex = fakeDuplex(socketDone.promise);
+      duplex.ackAssignment = async (identity) => {
+        ackCalls += 1;
+        if (ackCalls === 1) {
+          throw new OpenLinkerError("Assignment is not ready", {
+            status: 409,
+            code: "ASSIGNMENT_NOT_READY",
+            details: { code: "ASSIGNMENT_NOT_READY", message: "retry assignment confirmation" },
+          });
+        }
+        return {
+          attemptIdentity: identity,
+          attemptNo: 1,
+          leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      };
+      setTimeout(() => callbacks.onAssigned?.(assignmentFor(hello)), 0);
+      return duplex;
+    },
+    async close() {},
+  };
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "ws",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerCalls += 1;
+      return { output: { retried: true } };
+    },
+  }, {
+    connectTransport: async () => transport,
+  });
+
+  const running = worker.start();
+  await waitFor(() => handlerCalls === 1);
+  assert.equal(ackCalls, 2);
+  await waitFor(async () => (await store.snapshot()).assignments.length === 0);
+  await worker.stop();
+  socketDone.resolve();
+  await running;
+});
+
 test("RuntimeWorker rejects missing and wrong-fence cancel identities without aborting the owned Attempt", async () => {
   const socketDone = deferred();
   const handlerStarted = deferred();

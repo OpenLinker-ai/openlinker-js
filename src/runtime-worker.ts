@@ -359,6 +359,10 @@ interface BusinessClient {
   ): Promise<void>;
 }
 
+type AssignmentOperationOutcome<T> =
+  | { terminal: false; value: T }
+  | { terminal: true };
+
 const defaultDependencies: RuntimeWorkerDependencies = {
   discoverRuntimeConnection: (platformURL, signal) => discoverRuntimeConnection(platformURL, { signal }),
   discoverRuntimeURL: (platformURL, signal) => discoverRuntimeURL(platformURL, { signal }),
@@ -981,7 +985,10 @@ export class RuntimeWorker {
     }
     if (this.terminalAttempts.has(attemptId)) return;
     if (stored.state === "started" || stored.state === "finished") {
-      await this.retry((signal) => this.business().ackAssignment(assignment.attemptIdentity, signal));
+      await this.retryAssignmentOperation(
+        assignment.attemptIdentity,
+        (signal) => this.business().ackAssignment(assignment.attemptIdentity, signal),
+      );
       return;
     }
     if (stored.state !== "received" && stored.state !== "ack_sent" && stored.state !== "confirmed") return;
@@ -989,15 +996,19 @@ export class RuntimeWorker {
     const snapshot = this.capacitySnapshot();
     if (stored.state === "received" && (this.draining || !admitted)) {
       const reason = this.draining ? "NODE_DRAINING" : "NODE_AT_CAPACITY";
-      await store.transitionAssignment(assignment.attemptIdentity.attemptId, "reject_sent");
+      stored = await store.transitionAssignment(assignment.attemptIdentity.attemptId, "reject_sent");
       if (this.terminalAttempts.has(attemptId)) return;
-      await this.retry((signal) => this.business().rejectAssignment(
+      const rejected = await this.retryAssignmentOperation(
         assignment.attemptIdentity,
-        reason,
-        snapshot.capacity,
-        snapshot.inflight,
-        signal,
-      ));
+        (signal) => this.business().rejectAssignment(
+          assignment.attemptIdentity,
+          reason,
+          snapshot.capacity,
+          snapshot.inflight,
+          signal,
+        ),
+      );
+      if (rejected.terminal) return;
       if (this.terminalAttempts.has(attemptId)) return;
       await store.transitionAssignment(assignment.attemptIdentity.attemptId, "rejected");
       await store.deleteAssignment(assignment.attemptIdentity.attemptId);
@@ -1008,9 +1019,12 @@ export class RuntimeWorker {
       if (this.terminalAttempts.has(attemptId)) return;
     }
     if (stored.state === "ack_sent") {
-      const confirmed = await this.retry(
+      const outcome = await this.retryAssignmentOperation(
+        assignment.attemptIdentity,
         (signal) => this.business().ackAssignment(assignment.attemptIdentity, signal),
       );
+      if (outcome.terminal) return;
+      const confirmed = outcome.value;
       if (this.terminalAttempts.has(attemptId)) return;
       assertIdentityEqual(assignment.attemptIdentity, confirmed.attemptIdentity, "assignment confirmation");
       if (Date.parse(confirmed.leaseExpiresAt) <= this.dependencies.now()) {
@@ -1028,13 +1042,60 @@ export class RuntimeWorker {
     reason: "NODE_AT_CAPACITY" | "NODE_DRAINING",
   ): Promise<void> {
     const snapshot = this.capacitySnapshot();
-    await this.retry((signal) => this.business().rejectAssignment(
+    await this.retryAssignmentOperation(
       identity,
-      reason,
-      snapshot.capacity,
-      snapshot.inflight,
-      signal,
-    ));
+      (signal) => this.business().rejectAssignment(
+        identity,
+        reason,
+        snapshot.capacity,
+        snapshot.inflight,
+        signal,
+      ),
+    );
+  }
+
+  private async retryAssignmentOperation<T>(
+    identity: RuntimeAttemptIdentity,
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<AssignmentOperationOutcome<T>> {
+    let failures = 0;
+    while (true) {
+      if (this.terminalAttempts.has(identity.attemptId)) return { terminal: true };
+      const signal = combinedSignal(this.runtimeAbort.signal);
+      if (signal.aborted) throw abortError(signal);
+      try {
+        const value = await this.policyOperation(() => operation(signal), signal);
+        if (this.terminalAttempts.has(identity.attemptId)) return { terminal: true };
+        return { terminal: false, value };
+      } catch (error) {
+        if (await this.convergeAssignmentTerminalError(identity, error)) {
+          return { terminal: true };
+        }
+        if (this.terminalAttempts.has(identity.attemptId)) return { terminal: true };
+        if (signal.aborted) throw abortError(signal);
+        if (isPermanentRuntimeError(error)) throw error;
+        await this.backoff(failures++, signal);
+      }
+    }
+  }
+
+  private async convergeAssignmentTerminalError(
+    identity: RuntimeAttemptIdentity,
+    error: unknown,
+  ): Promise<boolean> {
+    const code = runtimeErrorCode(error);
+    if (!["RUN_CANCEL_REQUESTED", "STALE_LEASE", "LEASE_EXPIRED", "RUN_ALREADY_TERMINAL"].includes(code)) {
+      return false;
+    }
+    const current = await this.requiredStore().getAssignment(identity.attemptId);
+    if (!current) return true;
+    assertIdentityEqual(identity, current.assignment.attemptIdentity, "assignment terminal convergence");
+    if (code === "RUN_CANCEL_REQUESTED") {
+      await this.clearCanceledAttempt(current);
+    } else {
+      await this.clearRevokedAttempt(current);
+    }
+    return true;
   }
 
   private async startConfirmedAttempt(stored: RuntimeStoredAssignment): Promise<void> {
