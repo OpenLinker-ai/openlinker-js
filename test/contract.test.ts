@@ -24,8 +24,8 @@ test("Core client v1 contract maps to implemented SDK methods", async () => {
   assert.ok(Array.isArray(contract.endpoints));
   assert.ok(contract.endpoints.length > 0);
 
-  const forbiddenPrefixes = contract.rules.forbidden_path_prefixes;
-  const methods = new Set();
+  const forbiddenPrefixes = contract.rules.forbidden_path_prefixes as string[];
+  const methods = new Set<string>();
   for (const endpoint of contract.endpoints) {
     assert.equal(typeof endpoint.client_method, "string");
     assert.equal(typeof endpoint.http_method, "string");
@@ -38,16 +38,17 @@ test("Core client v1 contract maps to implemented SDK methods", async () => {
     methods.add(endpoint.client_method);
   }
 
+  const clientPrototype = OpenLinkerClient.prototype as unknown as Record<string, unknown>;
   for (const method of methods) {
     assert.equal(
-      typeof OpenLinkerClient.prototype[method],
+      typeof clientPrototype[method],
       "function",
       `OpenLinkerClient missing contract method ${method}`,
     );
   }
 
   const runCreationEndpoints = contract.endpoints.filter(
-    (endpoint) => endpoint.http_method === "POST" &&
+    (endpoint: { http_method: string; path: string }) => endpoint.http_method === "POST" &&
       (endpoint.path === "/api/v1/run" || endpoint.path === "/api/v1/runs"),
   );
   assert.equal(runCreationEndpoints.length, 2);
@@ -116,7 +117,9 @@ test("Runtime contract matches the exported handshake manifest", async () => {
   ]) {
     assert.ok(messageTypes.has(required), `missing message ${required}`);
   }
-  const drainMessage = contract.websocket.messages.find((message) => message.type === "runtime.drain");
+  const drainMessage = contract.websocket.messages.find(
+    (message: { type: string }) => message.type === "runtime.drain",
+  );
   assert.deepEqual(drainMessage, {
     type: "runtime.drain",
     direction: "bidirectional",

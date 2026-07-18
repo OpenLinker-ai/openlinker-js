@@ -118,10 +118,10 @@ test("Runtime discovery policy fixtures stay consistent with Core transport sema
 });
 
 test("Runtime discovery is credential-free, bounded, and returns a neutral HTTPS origin", async () => {
-  let request;
+  let request: { input: string; init: RequestInit } | undefined;
   const runtimeURL = await discoverRuntimeURL("https://openlinker.example", {
     fetch: async (input, init) => {
-      request = { input: String(input), init };
+      request = { input: String(input), init: init ?? {} };
       return new Response(JSON.stringify({
         base_urls: { runtime: "https://runtime.example" },
         runtime: { enabled: true, mtls_required: true },
@@ -133,6 +133,7 @@ test("Runtime discovery is credential-free, bounded, and returns a neutral HTTPS
   });
 
   assert.equal(runtimeURL, "https://runtime.example");
+  assert.ok(request);
   assert.equal(request.input, "https://openlinker.example/.well-known/openlinker.json");
   assert.equal(request.init.redirect, "error");
   const headers = new Headers(request.init.headers);

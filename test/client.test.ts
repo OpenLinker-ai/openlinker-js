@@ -19,14 +19,55 @@ import {
   verifyTaskCallbackHeaders,
   verifyTaskCallbackSignature,
 } from "../dist/index.js";
+import type {
+  A2AStreamEvent,
+  OpenLinkerClientOptions,
+  StreamRunEvent,
+} from "../dist/index.js";
+
+interface RecordedFetchCall {
+  url: string;
+  init: RequestInit;
+}
+
+interface TestRequestBody extends Record<string, unknown> {
+  id?: string | number | null;
+  method?: string;
+  message?: { role?: string };
+  params?: {
+    message?: {
+      kind?: string;
+      role?: string;
+      parts?: Array<Record<string, unknown>>;
+    };
+    configuration?: {
+      returnImmediately?: boolean;
+      blocking?: boolean;
+    };
+    status?: string;
+    pageSize?: number;
+    taskId?: string;
+    url?: string;
+    pushNotificationConfig?: unknown;
+    id?: string;
+  };
+  url?: string;
+}
+
+interface RecordedA2ACall {
+  url: string;
+  method?: string | undefined;
+  headers: Headers;
+  body: TestRequestBody | undefined;
+}
 
 test("listAgents builds Core API URL and authorization header", async () => {
-  const calls = [];
+  const calls: RecordedFetchCall[] = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
     userToken: "ol_user_test",
     fetch: async (url, init) => {
-      calls.push({ url: String(url), init });
+      calls.push({ url: String(url), init: init ?? {} });
       return jsonResponse({
         items: [],
         total: 0,
@@ -46,22 +87,25 @@ test("listAgents builds Core API URL and authorization header", async () => {
 
   assert.equal(response.page, 2);
   assert.equal(calls.length, 1);
+  const call = calls[0];
+  assert.ok(call);
   assert.equal(
-    calls[0].url,
+    call.url,
     "https://core.example.com/api/v1/agents?q=data&page=2&size=5&callable_only=true&tags=sql%2Cfinance",
   );
-  const headers = new Headers(calls[0].init.headers);
+  const headers = new Headers(call.init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_user_test");
   assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.4");
 });
 
 test("client rejects agent token and points callers to runtime entry", () => {
+  const invalidOptions = {
+    baseUrl: "https://core.example.com",
+    agentToken: "ol_agent_runtime",
+    fetch: async () => jsonResponse({}),
+  } as unknown as OpenLinkerClientOptions;
   assert.throws(
-    () => new OpenLinkerClient({
-      baseUrl: "https://core.example.com",
-      agentToken: "ol_agent_runtime",
-      fetch: async () => jsonResponse({}),
-    }),
+    () => new OpenLinkerClient(invalidOptions),
     /OpenLinkerRuntime/,
   );
 });
@@ -89,11 +133,11 @@ test("client rejects oversized API response bodies", async () => {
 });
 
 test("runAgent maps camelCase input to Core request body", async () => {
-  const calls = [];
+  const calls: RecordedFetchCall[] = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (url, init) => {
-      calls.push({ url: String(url), init });
+      calls.push({ url: String(url), init: init ?? {} });
       return jsonResponse({
         run_id: "run-1",
         status: "success",
@@ -111,9 +155,9 @@ test("runAgent maps camelCase input to Core request body", async () => {
     idempotencyKey: "logical-run-1",
     metadata: { trace_id: "trace-1" },
     a2aContext: {
-      contextId: "ctx-root",
-      taskId: "task-root",
-      traceId: "trace-1",
+      protocol_context_id: "ctx-root",
+      protocol_task_id: "task-root",
+      trace_id: "trace-1",
     },
     pushNotificationConfig: {
       url: "https://caller.example.com/a2a/events",
@@ -126,16 +170,18 @@ test("runAgent maps camelCase input to Core request body", async () => {
 
   assert.equal(response.run_id, "run-1");
   assert.equal(response.replayed, false);
-  assert.equal(calls[0].url, "https://core.example.com/api/v1/run");
-  assert.equal(new Headers(calls[0].init.headers).get("idempotency-key"), "logical-run-1");
-  assert.deepEqual(JSON.parse(calls[0].init.body), {
+  const call = calls[0];
+  assert.ok(call);
+  assert.equal(call.url, "https://core.example.com/api/v1/run");
+  assert.equal(new Headers(call.init.headers).get("idempotency-key"), "logical-run-1");
+  assert.deepEqual(parseRequestBody(call.init), {
     agent_id: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     metadata: { trace_id: "trace-1" },
     a2a_context: {
-      contextId: "ctx-root",
-      taskId: "task-root",
-      traceId: "trace-1",
+      protocol_context_id: "ctx-root",
+      protocol_task_id: "task-root",
+      trace_id: "trace-1",
     },
     task_callback: {
       url: "https://caller.example.com/a2a/events",
@@ -148,7 +194,7 @@ test("runAgent maps camelCase input to Core request body", async () => {
 });
 
 test("Run creation accepts 201, 200, and 202 idempotency responses", async () => {
-  const calls = [];
+  const calls: RecordedFetchCall[] = [];
   const responses = [
     {
       status: 201,
@@ -184,8 +230,9 @@ test("Run creation accepts 201, 200, and 202 idempotency responses", async () =>
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (url, init) => {
-      calls.push({ url: String(url), init });
+      calls.push({ url: String(url), init: init ?? {} });
       const response = responses[calls.length - 1];
+      assert.ok(response);
       return jsonResponse(response.body, {
         status: response.status,
         headers: { location: `/api/v1/runs/${response.body.run_id}` },
@@ -221,11 +268,11 @@ test("Run creation accepts 201, 200, and 202 idempotency responses", async () =>
 });
 
 test("Run creation generates a secure per-invocation idempotency key when omitted", async () => {
-  const keys = [];
+  const keys: Array<string | null> = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (_url, init) => {
-      keys.push(new Headers(init.headers).get("idempotency-key"));
+      keys.push(new Headers(init?.headers).get("idempotency-key"));
       return jsonResponse({
         run_id: `run-generated-${keys.length}`,
         status: "success",
@@ -243,9 +290,12 @@ test("Run creation generates a secure per-invocation idempotency key when omitte
   await client.runAgent(request);
   await client.startAgentRun(request);
 
-  assert.match(keys[0], /^[0-9a-f]{64}$/);
-  assert.match(keys[1], /^[0-9a-f]{64}$/);
-  assert.notEqual(keys[0], keys[1]);
+  const [firstKey, secondKey] = keys;
+  assert.ok(firstKey);
+  assert.ok(secondKey);
+  assert.match(firstKey, /^[0-9a-f]{64}$/);
+  assert.match(secondKey, /^[0-9a-f]{64}$/);
+  assert.notEqual(firstKey, secondKey);
 });
 
 test("Run creation rejects invalid idempotency keys without exposing the key", async () => {
@@ -272,7 +322,8 @@ test("Run creation rejects invalid idempotency keys without exposing the key", a
         input: { query: "hello" },
         idempotencyKey,
       }),
-      (error) => {
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
         assert.match(error.message, /1-255 printable ASCII/);
         if (idempotencyKey) {
           assert.ok(!error.message.includes(idempotencyKey));
@@ -285,7 +336,7 @@ test("Run creation rejects invalid idempotency keys without exposing the key", a
 });
 
 test("createWebhookRunCallback passes external callback URL and generated secret", async () => {
-  const calls = [];
+  const calls: RecordedFetchCall[] = [];
   const callback = createWebhookRunCallback({
     url: " https://caller.example.com/openlinker/events ",
     token: "caller-token",
@@ -295,7 +346,7 @@ test("createWebhookRunCallback passes external callback URL and generated secret
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (url, init) => {
-      calls.push({ url: String(url), init });
+      calls.push({ url: String(url), init: init ?? {} });
       return jsonResponse({
         run_id: "run-webhook",
         status: "running",
@@ -315,6 +366,7 @@ test("createWebhookRunCallback passes external callback URL and generated secret
   });
 
   assert.equal(callback.url, "https://caller.example.com/openlinker/events");
+  assert.ok(callback.secret);
   assert.match(callback.secret, /^[0-9a-f]{64}$/);
 
   await client.startAgentRun({
@@ -323,8 +375,10 @@ test("createWebhookRunCallback passes external callback URL and generated secret
     callback,
   });
 
-  assert.equal(calls[0].url, "https://core.example.com/api/v1/runs");
-  assert.deepEqual(JSON.parse(calls[0].init.body), {
+  const call = calls[0];
+  assert.ok(call);
+  assert.equal(call.url, "https://core.example.com/api/v1/runs");
+  assert.deepEqual(parseRequestBody(call.init), {
     agent_id: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     task_callback: {
@@ -365,7 +419,7 @@ test("task callback signature helpers verify external webhook payloads", async (
 });
 
 test("runAgentWithCallbacks uses platform run stream without external callback URL", async () => {
-  const calls = [];
+  const calls: RecordedFetchCall[] = [];
   const stream = new ReadableStream({
     start(controller) {
       controller.enqueue(new TextEncoder().encode([
@@ -385,7 +439,7 @@ test("runAgentWithCallbacks uses platform run stream without external callback U
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (url, init) => {
-      calls.push({ url: String(url), init });
+      calls.push({ url: String(url), init: init ?? {} });
       if (String(url) === "https://core.example.com/api/v1/runs") {
         return jsonResponse({
           run_id: "run-platform",
@@ -413,31 +467,39 @@ test("runAgentWithCallbacks uses platform run stream without external callback U
     },
   });
 
-  const events = [];
-  const terminal = [];
+  const events: StreamRunEvent[] = [];
+  const terminal: StreamRunEvent[] = [];
   const response = await client.runAgentWithCallbacks({
     agentId: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
     callback: {
       mode: "platform",
       eventTypes: ["run.message.delta"],
-      onEvent: (event) => events.push(event),
-      onTerminal: (event) => terminal.push(event),
+      onEvent: (event) => {
+        events.push(event as StreamRunEvent);
+      },
+      onTerminal: (event) => {
+        terminal.push(event as StreamRunEvent);
+      },
     },
   });
 
   assert.equal(response.status, "success");
-  assert.equal(calls[0].url, "https://core.example.com/api/v1/runs");
-  assert.deepEqual(JSON.parse(calls[0].init.body), {
+  const [startCall, streamCall, resultCall] = calls;
+  assert.ok(startCall);
+  assert.ok(streamCall);
+  assert.ok(resultCall);
+  assert.equal(startCall.url, "https://core.example.com/api/v1/runs");
+  assert.deepEqual(parseRequestBody(startCall.init), {
     agent_id: "00000000-0000-0000-0000-000000000001",
     input: { query: "hello" },
   });
-  assert.equal(calls[1].url, "https://core.example.com/api/v1/runs/run-platform/stream");
-  assert.equal(calls[2].url, "https://core.example.com/api/v1/runs/run-platform");
+  assert.equal(streamCall.url, "https://core.example.com/api/v1/runs/run-platform/stream");
+  assert.equal(resultCall.url, "https://core.example.com/api/v1/runs/run-platform");
   assert.equal(events.length, 1);
-  assert.equal(events[0].event, "run.message.delta");
+  assert.equal(events[0]?.event, "run.message.delta");
   assert.equal(terminal.length, 1);
-  assert.equal(terminal[0].event, "run.completed");
+  assert.equal(terminal[0]?.event, "run.completed");
 });
 
 test("runAgentWithCallbacks preserves replay across callback wait", async () => {
@@ -465,9 +527,10 @@ test("runAgentWithCallbacks preserves replay across callback wait", async () => 
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (url) => {
-      const path = new URL(url).pathname;
+      const path = new URL(String(url)).pathname;
       if (path === "/api/v1/runs") {
         const scenario = scenarios[startIndex++];
+        assert.ok(scenario);
         return jsonResponse({
           run_id: scenario.runId,
           status: "running",
@@ -524,17 +587,18 @@ test("runAgentWithCallbacks preserves replay across callback wait", async () => 
 });
 
 test("endpoint helpers encode paths, queries, and async headers", async () => {
-  const calls = [];
+  const calls: RecordedA2ACall[] = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1/",
     userToken: async () => "ol_user_async",
     headers: async () => ({ "x-default": "base" }),
     fetch: async (url, init) => {
+      const request = init ?? {};
       calls.push({
         url: String(url),
-        method: init.method,
-        headers: new Headers(init.headers),
-        body: init.body ? JSON.parse(init.body) : undefined,
+        method: request.method,
+        headers: new Headers(request.headers),
+        body: parseOptionalRequestBody(request),
       });
       return jsonResponse({
         run_id: "run-helper",
@@ -571,15 +635,15 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
     "https://core.example.com/api/v1/runs/run%20helper/artifacts",
     "https://core.example.com/api/v1/runs/run%20helper/messages",
   ]);
-  assert.deepEqual(calls[2].body, {
+  assert.deepEqual(calls[2]?.body, {
     agent_id: "agent-1",
     input: "hello",
     metadata: { trace_id: "trace-helper" },
   });
-  assert.equal(calls[0].headers.get("authorization"), "Bearer ol_user_async");
-  assert.equal(calls[2].headers.get("authorization"), "Bearer ol_override");
-  assert.equal(calls[2].headers.get("x-default"), "override");
-  assert.equal(calls[2].headers.get("content-type"), "application/json");
+  assert.equal(calls[0]?.headers.get("authorization"), "Bearer ol_user_async");
+  assert.equal(calls[2]?.headers.get("authorization"), "Bearer ol_override");
+  assert.equal(calls[2]?.headers.get("x-default"), "override");
+  assert.equal(calls[2]?.headers.get("content-type"), "application/json");
 });
 
 test("listRunEvents returns items and durable page metadata", async () => {
@@ -612,7 +676,7 @@ test("listRunEvents returns items and durable page metadata", async () => {
   const page = await client.listRunEvents("run-page", { afterSequence: 2 });
 
   assert.deepEqual(page, responseBody);
-  assert.equal(page.items[0].sequence, 6);
+  assert.equal(page.items[0]?.sequence, 6);
   assert.equal(page.meta.retention_gap, true);
   assert.equal("events" in page, false);
 });
@@ -678,6 +742,7 @@ test("fallback Core errors and 204 responses preserve retry metadata", async () 
       assert.equal(error.message, "Service Unavailable");
       assert.equal(error.requestId, "corr-1");
       assert.equal(error.responseBody, "temporarily unavailable");
+      assert.ok(error.retryAfterMs !== undefined);
       assert.ok(error.retryAfterMs > 0 && error.retryAfterMs <= 10_000);
       return true;
     },
@@ -701,7 +766,7 @@ test("streamRunEvents parses run SSE events", async () => {
     baseUrl: "https://core.example.com",
     fetch: async (url, init) => {
       assert.equal(String(url), "https://core.example.com/api/v1/runs/run-1/stream?after_sequence=6");
-      assert.equal(new Headers(init.headers).get("accept"), "text/event-stream");
+      assert.equal(new Headers(init?.headers).get("accept"), "text/event-stream");
       return new Response(stream, {
         status: 200,
         headers: { "content-type": "text/event-stream" },
@@ -709,12 +774,16 @@ test("streamRunEvents parses run SSE events", async () => {
     },
   });
 
-  const events = [];
-  const terminal = [];
+  const events: StreamRunEvent[] = [];
+  const terminal: StreamRunEvent[] = [];
   let closed = false;
   await client.streamRunEvents("run-1", {
-    onEvent: (event) => events.push(event),
-    onTerminal: (event) => terminal.push(event),
+    onEvent: (event) => {
+      events.push(event);
+    },
+    onTerminal: (event) => {
+      terminal.push(event);
+    },
     onClose: () => {
       closed = true;
     },
@@ -722,9 +791,12 @@ test("streamRunEvents parses run SSE events", async () => {
 
   assert.equal(events.length, 1);
   assert.equal(terminal.length, 1);
-  assert.equal(events[0].id, "7");
-  assert.equal(events[0].event, "run.completed");
-  assert.deepEqual(events[0].data.payload, { ok: true });
+  const firstEvent = events[0];
+  assert.ok(firstEvent);
+  assert.equal(firstEvent.id, "7");
+  assert.equal(firstEvent.event, "run.completed");
+  assert.ok(firstEvent.data && typeof firstEvent.data === "object");
+  assert.deepEqual((firstEvent.data as { payload?: unknown }).payload, { ok: true });
   assert.equal(closed, true);
 });
 
@@ -755,16 +827,18 @@ test("streamRunEvents handles comments, plain text, buffered lines, and missing 
     },
   });
 
-  const events = [];
+  const events: StreamRunEvent[] = [];
   await client.streamRunEvents("run-plain", {
-    onEvent: (event) => events.push(event),
+    onEvent: (event) => {
+      events.push(event);
+    },
   });
 
   assert.equal(events.length, 2);
-  assert.equal(events[0].event, "run.message.delta");
-  assert.equal(events[0].data, "plain text");
-  assert.equal(events[1].event, "message");
-  assert.deepEqual(events[1].data, { ok: true });
+  assert.equal(events[0]?.event, "run.message.delta");
+  assert.equal(events[0]?.data, "plain text");
+  assert.equal(events[1]?.event, "message");
+  assert.deepEqual(events[1]?.data, { ok: true });
   await assert.rejects(
     () => client.streamRunEvents("missing-body"),
     /does not expose a body/,
@@ -772,13 +846,13 @@ test("streamRunEvents handles comments, plain text, buffered lines, and missing 
 });
 
 test("A2A JSON-RPC client covers task and push notification methods", async () => {
-  const calls = [];
+  const calls: Array<RecordedA2ACall & { body: TestRequestBody }> = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
     userToken: "ol_public",
     fetch: async (url, init) => {
-      const body = JSON.parse(init.body);
-      const headers = new Headers(init.headers);
+      const body = parseRequestBody(init);
+      const headers = new Headers(init?.headers);
       calls.push({ url: String(url), headers, body });
       if (body.method === "SendMessage" || body.method === "GetTask" || body.method === "CancelTask") {
         if (body.method === "SendMessage") {
@@ -861,42 +935,51 @@ test("A2A JSON-RPC client covers task and push notification methods", async () =
   assert.equal(a2aTaskStateRunStatus(task.status.state), "success");
   assert.equal(extractA2AText(task), "done");
   assert.equal(calls.length, 8);
-  assert.equal(calls[0].url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone");
-  assert.equal(calls[0].headers.get("authorization"), "Bearer ol_public");
-  assert.equal(calls[0].headers.get("a2a-version"), "1.0");
-  assert.equal(calls[0].body.method, "SendMessage");
-  assert.equal(calls[0].body.params.message.kind, undefined);
-  assert.equal(calls[0].body.params.message.role, "ROLE_USER");
-  assert.deepEqual(calls[0].body.params.message.parts[0], { text: "hello" });
-  assert.equal(calls[0].body.params.configuration.returnImmediately, false);
-  assert.equal(calls[0].body.params.configuration.blocking, undefined);
-  assert.equal(calls[2].body.params.status, "completed");
-  assert.equal(calls[2].body.params.pageSize, 5);
-  assert.equal(calls[4].body.params.taskId, "task-a2a");
-  assert.equal(calls[4].body.params.url, "https://caller.example/a2a/events");
-  assert.equal(calls[4].body.params.pushNotificationConfig, undefined);
-  assert.equal(calls[6].body.params.taskId, "task-a2a");
-  assert.equal(calls[6].body.params.id, undefined);
+  const sendCall = calls[0];
+  const listCall = calls[2];
+  const setPushCall = calls[4];
+  const listPushCall = calls[6];
+  assert.ok(sendCall);
+  assert.ok(listCall);
+  assert.ok(setPushCall);
+  assert.ok(listPushCall);
+  assert.equal(sendCall.url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone");
+  assert.equal(sendCall.headers.get("authorization"), "Bearer ol_public");
+  assert.equal(sendCall.headers.get("a2a-version"), "1.0");
+  assert.equal(sendCall.body.method, "SendMessage");
+  assert.equal(sendCall.body.params?.message?.kind, undefined);
+  assert.equal(sendCall.body.params?.message?.role, "ROLE_USER");
+  assert.deepEqual(sendCall.body.params?.message?.parts?.[0], { text: "hello" });
+  assert.equal(sendCall.body.params?.configuration?.returnImmediately, false);
+  assert.equal(sendCall.body.params?.configuration?.blocking, undefined);
+  assert.equal(listCall.body.params?.status, "completed");
+  assert.equal(listCall.body.params?.pageSize, 5);
+  assert.equal(setPushCall.body.params?.taskId, "task-a2a");
+  assert.equal(setPushCall.body.params?.url, "https://caller.example/a2a/events");
+  assert.equal(setPushCall.body.params?.pushNotificationConfig, undefined);
+  assert.equal(listPushCall.body.params?.taskId, "task-a2a");
+  assert.equal(listPushCall.body.params?.id, undefined);
 });
 
 test("A2A HTTP+JSON client covers REST task and push methods", async () => {
-  const calls = [];
+  const calls: RecordedA2ACall[] = [];
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com/api/v1",
     userToken: "ol_public",
     fetch: async (url, init) => {
-      const headers = new Headers(init.headers);
-      const body = init.body ? JSON.parse(init.body) : undefined;
+      const request = init ?? {};
+      const headers = new Headers(request.headers);
+      const body = parseOptionalRequestBody(request);
       const parsed = new URL(String(url));
-      calls.push({ url: String(url), method: init.method, headers, body });
+      calls.push({ url: String(url), method: request.method, headers, body });
       assert.equal(headers.get("authorization"), "Bearer ol_public");
       assert.equal(headers.get("a2a-version"), "1.0");
-      if (init.method === "POST" && parsed.pathname.endsWith("/message:send")) {
+      if (request.method === "POST" && parsed.pathname.endsWith("/message:send")) {
         assert.equal(headers.get("content-type"), "application/a2a+json");
-        assert.equal(body.message.role, "ROLE_USER");
+        assert.equal(body?.message?.role, "ROLE_USER");
         return a2aJSONResponse({ task: { id: "task-rest", status: { state: "TASK_STATE_COMPLETED" } } });
       }
-      if (init.method === "POST" && parsed.pathname.endsWith("/message:stream")) {
+      if (request.method === "POST" && parsed.pathname.endsWith("/message:stream")) {
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode([
@@ -910,19 +993,19 @@ test("A2A HTTP+JSON client covers REST task and push methods", async () => {
         });
         return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
       }
-      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest")) {
+      if (request.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest")) {
         assert.equal(parsed.searchParams.get("historyLength"), "2");
         return a2aJSONResponse({ id: "task-rest", status: { state: "TASK_STATE_COMPLETED" } });
       }
-      if (init.method === "GET" && parsed.pathname.endsWith("/tasks")) {
+      if (request.method === "GET" && parsed.pathname.endsWith("/tasks")) {
         assert.equal(parsed.searchParams.get("contextId"), "ctx-rest");
         assert.equal(parsed.searchParams.get("includeArtifacts"), "true");
         return a2aJSONResponse({ tasks: [{ id: "task-rest", status: { state: "completed" } }] });
       }
-      if (init.method === "POST" && parsed.pathname.endsWith("/tasks/task-rest:cancel")) {
+      if (request.method === "POST" && parsed.pathname.endsWith("/tasks/task-rest:cancel")) {
         return a2aJSONResponse({ id: "task-rest", status: { state: "TASK_STATE_CANCELED" } });
       }
-      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/subscribe")) {
+      if (request.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/subscribe")) {
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode([
@@ -936,38 +1019,42 @@ test("A2A HTTP+JSON client covers REST task and push methods", async () => {
         });
         return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
       }
-      if (init.method === "POST" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs")) {
-        return a2aJSONResponse({ taskId: "task-rest", id: "cfg-1", url: body.url });
+      if (request.method === "POST" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs")) {
+        return a2aJSONResponse({ taskId: "task-rest", id: "cfg-1", url: body?.url });
       }
-      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs/cfg-1")) {
+      if (request.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs/cfg-1")) {
         return a2aJSONResponse({ taskId: "task-rest", id: "cfg-1" });
       }
-      if (init.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs")) {
+      if (request.method === "GET" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs")) {
         return a2aJSONResponse({ configs: [{ taskId: "task-rest", id: "cfg-1" }] });
       }
-      if (init.method === "DELETE" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs/cfg-1")) {
+      if (request.method === "DELETE" && parsed.pathname.endsWith("/tasks/task-rest/pushNotificationConfigs/cfg-1")) {
         return new Response(null, { status: 204 });
       }
-      if (init.method === "GET" && parsed.pathname.endsWith("/extendedAgentCard")) {
+      if (request.method === "GET" && parsed.pathname.endsWith("/extendedAgentCard")) {
         return a2aJSONResponse({ name: "REST Agent", description: "", url: "", version: "v1", provider: {}, capabilities: {}, default_input_modes: [], default_output_modes: [], skills: [], authentication: {}, openlinker: {} });
       }
-      throw new Error(`unexpected REST request ${init.method} ${parsed.pathname}`);
+      throw new Error(`unexpected REST request ${request.method} ${parsed.pathname}`);
     },
   });
 
   const send = await client.a2aSendMessageHTTP("agent/one", newA2ATextMessageParams("msg-rest", "hello"));
-  assert.equal(send.task.id, "task-rest");
-  const streamEvents = [];
+  assert.equal(send.task?.id, "task-rest");
+  const streamEvents: A2AStreamEvent[] = [];
   await client.a2aStreamMessageHTTP("agent/one", newA2ATextMessageParams("msg-stream", "hello"), {
-    onEvent: (event) => streamEvents.push(event),
+    onEvent: (event) => {
+      streamEvents.push(event);
+    },
   });
   assert.equal(streamEvents.length, 1);
   await client.a2aGetTaskHTTP("agent/one", { id: "task-rest", historyLength: 2 });
   await client.a2aListTasksHTTP("agent/one", { contextId: "ctx-rest", includeArtifacts: true });
   await client.a2aCancelTaskHTTP("agent/one", { id: "task-rest" });
-  const subscribeEvents = [];
+  const subscribeEvents: A2AStreamEvent[] = [];
   await client.a2aResubscribeTaskHTTP("agent/one", { id: "task-rest" }, {
-    onEvent: (event) => subscribeEvents.push(event),
+    onEvent: (event) => {
+      subscribeEvents.push(event);
+    },
   });
   assert.equal(subscribeEvents.length, 1);
   const push = { id: "task-rest", pushNotificationConfigId: "cfg-1", pushNotificationConfig: { url: "https://caller.example/a2a/events" } };
@@ -978,14 +1065,14 @@ test("A2A HTTP+JSON client covers REST task and push methods", async () => {
   const card = await client.a2aGetExtendedAgentCardHTTP("agent/one");
   assert.equal(card.name, "REST Agent");
   assert.equal(calls.length, 11);
-  assert.equal(calls[0].url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone/message:send");
+  assert.equal(calls[0]?.url, "https://core.example.com/api/v1/a2a/agents/agent%2Fone/message:send");
 });
 
 test("A2A send message response supports direct message payloads", async () => {
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (_url, init) => {
-      const body = JSON.parse(init.body);
+      const body = parseRequestBody(init);
       return jsonResponse({
         jsonrpc: "2.0",
         id: body.id,
@@ -1003,11 +1090,11 @@ test("A2A send message response supports direct message payloads", async () => {
 });
 
 test("A2A legacy dialect keeps slash methods and legacy message parts", async () => {
-  let received;
+  let received: TestRequestBody | undefined;
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",
     fetch: async (_url, init) => {
-      received = JSON.parse(init.body);
+      received = parseRequestBody(init);
       return jsonResponse({
         jsonrpc: "2.0",
         id: received.id,
@@ -1022,11 +1109,12 @@ test("A2A legacy dialect keeps slash methods and legacy message parts", async ()
     { a2aDialect: "legacy" },
   );
 
+  assert.ok(received);
   assert.equal(received.method, "message/send");
-  assert.equal(received.params.message.kind, "message");
-  assert.deepEqual(received.params.message.parts[0], { text: "legacy", kind: "text" });
-  assert.equal(received.params.configuration.blocking, true);
-  assert.equal(received.params.configuration.returnImmediately, undefined);
+  assert.equal(received.params?.message?.kind, "message");
+  assert.deepEqual(received.params?.message?.parts?.[0], { text: "legacy", kind: "text" });
+  assert.equal(received.params?.configuration?.blocking, true);
+  assert.equal(received.params?.configuration?.returnImmediately, undefined);
 });
 
 test("A2A stream and JSON-RPC errors are parsed", async () => {
@@ -1035,7 +1123,7 @@ test("A2A stream and JSON-RPC errors are parsed", async () => {
     baseUrl: "https://core.example.com",
     fetch: async (_url, init) => {
       requestCount += 1;
-      const body = JSON.parse(init.body);
+      const body = parseRequestBody(init);
       if (requestCount === 1) {
         const stream = new ReadableStream({
           start(controller) {
@@ -1061,12 +1149,16 @@ test("A2A stream and JSON-RPC errors are parsed", async () => {
       });
     },
   });
-  const events = [];
+  const events: A2AStreamEvent[] = [];
   await client.a2aStreamMessage("agent-one", newA2ATextMessageParams("msg-1", "hello"), {
-    onEvent: (event) => events.push(event),
+    onEvent: (event) => {
+      events.push(event);
+    },
   });
   assert.equal(events.length, 1);
-  assert.equal(normalizeA2ATaskState(events[0].result.statusUpdate.status.state), "working");
+  const event = events[0];
+  assert.ok(event?.result?.statusUpdate);
+  assert.equal(normalizeA2ATaskState(event.result.statusUpdate.status.state), "working");
   await assert.rejects(
     () => client.a2aGetTask("agent-one", { id: "task-bad" }),
     (error) => {
@@ -1084,7 +1176,22 @@ test("A2A stream and JSON-RPC errors are parsed", async () => {
   assert.equal(a2aTaskStateRunStatus("TASK_STATE_REJECTED"), "failed");
 });
 
-function jsonResponse(body, init = {}) {
+function parseRequestBody(init: RequestInit | undefined): TestRequestBody {
+  const body = init?.body;
+  if (typeof body !== "string") {
+    assert.fail("expected a JSON string request body");
+  }
+  return JSON.parse(body) as TestRequestBody;
+}
+
+function parseOptionalRequestBody(init: RequestInit): TestRequestBody | undefined {
+  if (init.body === undefined || init.body === null) {
+    return undefined;
+  }
+  return parseRequestBody(init);
+}
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   return new Response(JSON.stringify(body), {
@@ -1093,7 +1200,7 @@ function jsonResponse(body, init = {}) {
   });
 }
 
-function a2aJSONResponse(body, init = {}) {
+function a2aJSONResponse(body: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/a2a+json");
   return new Response(JSON.stringify(body), {

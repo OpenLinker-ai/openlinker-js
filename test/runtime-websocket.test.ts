@@ -6,6 +6,39 @@ import {
   RuntimeRequiredFeatures,
   RuntimeWebSocketSession,
 } from "../dist/runtime.js";
+import type {
+  RuntimeHelloPayload,
+  RuntimePendingCommand,
+  RuntimeRunAssignedPayload,
+  RuntimeWebSocketLike,
+  RuntimeWebSocketSessionOptions,
+} from "../dist/runtime.js";
+
+interface WireIdentity {
+  run_id: string;
+  attempt_id: string;
+  lease_id: string;
+  fencing_token: number;
+  node_id: string;
+  agent_id: string;
+  worker_id: string;
+  runtime_session_id: string;
+}
+
+interface WireEnvelope {
+  protocol_version: number;
+  runtime_contract_id: string;
+  message_id: string;
+  reply_to_message_id?: string;
+  type: string;
+  sent_at: string;
+  payload: unknown;
+}
+
+interface EnvelopeOptions {
+  messageId?: string;
+  replyTo?: string;
+}
 
 const ids = {
   node: "11111111-1111-4111-8111-111111111111",
@@ -24,7 +57,7 @@ const ids = {
 const now = "2026-07-12T00:00:00Z";
 const later = "2026-07-12T00:01:00Z";
 
-function hello() {
+function hello(): RuntimeHelloPayload {
   return {
     nodeId: ids.node,
     agentId: ids.agent,
@@ -38,7 +71,7 @@ function hello() {
   };
 }
 
-function identity(overrides = {}) {
+function identity(overrides: Partial<WireIdentity> = {}): WireIdentity {
   return {
     run_id: ids.run,
     attempt_id: ids.attempt,
@@ -52,7 +85,11 @@ function identity(overrides = {}) {
   };
 }
 
-function envelope(type, payload, { messageId = crypto.randomUUID(), replyTo } = {}) {
+function envelope(
+  type: string,
+  payload: unknown,
+  { messageId = crypto.randomUUID(), replyTo }: EnvelopeOptions = {},
+): WireEnvelope {
   return {
     protocol_version: 2,
     runtime_contract_id: "openlinker.runtime.v2",
@@ -64,29 +101,29 @@ function envelope(type, payload, { messageId = crypto.randomUUID(), replyTo } = 
   };
 }
 
-class FakeSocket {
+class FakeSocket implements RuntimeWebSocketLike {
   readyState = 1;
-  onmessage = null;
-  onclose = null;
-  onerror = null;
-  sent = [];
-  closes = [];
-  onSend = () => {};
+  onmessage: RuntimeWebSocketLike["onmessage"] = null;
+  onclose: RuntimeWebSocketLike["onclose"] = null;
+  onerror: RuntimeWebSocketLike["onerror"] = null;
+  sent: WireEnvelope[] = [];
+  closes: Array<{ code: number; reason: string }> = [];
+  onSend: (message: WireEnvelope) => void = () => {};
 
-  send(text) {
-    const message = JSON.parse(text);
+  send(text: string): void {
+    const message = JSON.parse(text) as WireEnvelope;
     this.sent.push(message);
     this.onSend(message);
   }
 
-  close(code = 1000, reason = "") {
+  close(code = 1000, reason = ""): void {
     this.closes.push({ code, reason });
     this.readyState = 3;
-    this.onclose?.({ code, reason, wasClean: code === 1000 });
+    this.onclose?.({ code, reason, wasClean: code === 1000 } as CloseEvent);
   }
 
-  receive(message) {
-    this.onmessage?.({ data: JSON.stringify(message) });
+  receive(message: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent);
   }
 }
 
@@ -101,7 +138,10 @@ function readyPayload() {
   };
 }
 
-async function startSession(socket, options = {}) {
+async function startSession(
+  socket: FakeSocket,
+  options: RuntimeWebSocketSessionOptions = {},
+): Promise<RuntimeWebSocketSession> {
   socket.onSend = (message) => {
     if (message.type === "runtime.hello") {
       socket.receive(envelope("runtime.ready", readyPayload(), { replyTo: message.message_id }));
@@ -116,7 +156,7 @@ async function startSession(socket, options = {}) {
 
 test("Runtime WebSocket waits for correlated assignment confirmation before execution", async () => {
   const socket = new FakeSocket();
-  let assigned;
+  let assigned: RuntimeRunAssignedPayload | undefined;
   const session = await startSession(socket, {
     onAssigned(value) {
       assigned = value;
@@ -136,7 +176,9 @@ test("Runtime WebSocket waits for correlated assignment confirmation before exec
     agent_invocation_token: "ol_invoke_v2_payload_signature",
   }, { messageId: assignmentMessageId }));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(assigned.attemptIdentity.attemptId, ids.attempt);
+  const receivedAssignment = assigned;
+  assert.ok(receivedAssignment);
+  assert.equal(receivedAssignment.attemptIdentity.attemptId, ids.attempt);
 
   socket.onSend = (message) => {
     if (message.type !== "run.assignment.ack") return;
@@ -148,7 +190,9 @@ test("Runtime WebSocket waits for correlated assignment confirmation before exec
     }, { replyTo: message.message_id }));
   };
 
-  const confirmed = await session.ackAssignment({ attemptIdentity: assigned.attemptIdentity });
+  const confirmed = await session.ackAssignment({
+    attemptIdentity: receivedAssignment.attemptIdentity,
+  });
   assert.equal(confirmed.attemptNo, 1);
   assert.equal(confirmed.attemptIdentity.fencingToken, 1);
 });
@@ -243,13 +287,13 @@ test("Runtime WebSocket correlates Event/Result ACKs and reorders multi-Resume d
       { attemptIdentity: second, lastAckedClientEventSeq: 0, pendingClientEventRanges: [{ start: 1, end: 1 }] },
     ],
   });
-  assert.equal(decisions[0].attemptIdentity.runId, ids.run);
-  assert.equal(decisions[1].attemptIdentity.runId, second.runId);
+  assert.equal(decisions[0]?.attemptIdentity.runId, ids.run);
+  assert.equal(decisions[1]?.attemptIdentity.runId, second.runId);
 });
 
 test("Runtime WebSocket delivers cancellation with exact reply correlation", async () => {
   const socket = new FakeSocket();
-  let command;
+  let command: RuntimePendingCommand | undefined;
   const session = await startSession(socket, {
     onCommand(value) {
       command = value;
@@ -263,14 +307,17 @@ test("Runtime WebSocket delivers cancellation with exact reply correlation", asy
     deadline_at: later,
   }, { messageId: cancelMessageId }));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(command.type, "run.cancel");
+  const receivedCommand = command;
+  assert.ok(receivedCommand);
+  assert.equal(receivedCommand.type, "run.cancel");
 
   session.ackCancel({
     cancellationId: ids.cancellation,
-    attemptIdentity: command.payload.attemptIdentity,
+    attemptIdentity: receivedCommand.payload.attemptIdentity,
     cancelState: "stopping",
   });
   const sent = socket.sent.at(-1);
+  assert.ok(sent);
   assert.equal(sent.type, "run.cancel.ack");
   assert.equal(sent.reply_to_message_id, cancelMessageId);
 });
@@ -340,5 +387,5 @@ test("Runtime WebSocket rejects pending requests on close and closes malformed p
   await startSession(malformedSocket);
   malformedSocket.receive({ unexpected: true });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(malformedSocket.closes.at(-1).code, 1002);
+  assert.equal(malformedSocket.closes.at(-1)?.code, 1002);
 });

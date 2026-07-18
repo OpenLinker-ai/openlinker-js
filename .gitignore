@@ -6,6 +6,8 @@
 # Dependencies and test output
 node_modules/
 dist/
+.test-dist/
+.example-dist/
 coverage/
 
 # Editor / OS
