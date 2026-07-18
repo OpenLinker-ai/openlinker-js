@@ -120,6 +120,131 @@ export interface AgentCardResponse {
   signature?: JsonObject;
 }
 
+export interface CreateAgentRequest {
+  slug: string;
+  name: string;
+  description?: string;
+  endpointUrl?: string;
+  endpointAuthHeader?: string;
+  pricePerCallCents?: number;
+  tags?: string[];
+  skillIds?: string[];
+  visibility?: string;
+  connectionMode?: ConnectionMode | string;
+  mcpToolName?: string;
+}
+
+export interface UpdateAgentRequest {
+  name: string;
+  description?: string;
+  endpointUrl?: string;
+  endpointAuthHeader?: string;
+  clearEndpointAuthHeader?: boolean;
+  pricePerCallCents?: number;
+  tags?: string[];
+  visibility?: string;
+  connectionMode?: ConnectionMode | string;
+  mcpToolName?: string;
+}
+
+export interface ListMyAgentsParams {
+  query?: string;
+  status?: string;
+  visibility?: string;
+  certificationStatus?: string;
+  skillIds?: string[];
+  sortBy?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AgentResponse {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  endpoint_url: string;
+  price_per_call_cents: number;
+  tags: string[];
+  skill_ids?: string[];
+  status: string;
+  lifecycle_status: string;
+  visibility: string;
+  certification_status: string;
+  connection_mode: ConnectionMode | string;
+  mcp_tool_name?: string;
+  availability?: Availability;
+  readiness?: Readiness;
+  created_at: string;
+}
+
+export interface AgentListResponse {
+  items: AgentResponse[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CreateAgentTokenRequest {
+  name: string;
+  agentId?: string;
+  scopes?: string[];
+  expiresInMinutes?: number;
+}
+
+export interface ListAgentTokensParams {
+  agentId?: string;
+  limit?: number;
+  offset?: number;
+  sortBy?: string;
+  sortDir?: string;
+}
+
+export interface AgentTokenResponse {
+  id: string;
+  agent_id?: string;
+  name: string;
+  prefix: string;
+  status: string;
+  scopes: string[];
+  expires_at?: string;
+  redeemed_at?: string;
+  revoked_at?: string;
+  last_used_at?: string;
+  created_at: string;
+  plaintext_token?: string;
+}
+
+export interface AgentTokenListResponse {
+  items: AgentTokenResponse[];
+  total: number;
+  limit: number;
+  offset: number;
+  sort_by: string;
+  sort_dir: string;
+  has_more: boolean;
+}
+
+export interface RegisterAgentViaTokenRequest {
+  slug?: string;
+  name: string;
+  description?: string;
+  endpointUrl?: string;
+  endpointAuthHeader?: string;
+  pricePerCallCents?: number;
+  tags?: string[];
+  abilityTags?: string[];
+  skillIds?: string[];
+  visibility?: string;
+  connectionMode?: ConnectionMode | string;
+  mcpToolName?: string;
+}
+
+export interface RegisterAgentViaTokenResponse {
+  agent: AgentResponse;
+  agent_token: AgentTokenResponse;
+}
+
 export interface RunAgentRequest {
   agentId: string;
   input: JsonValue;
@@ -270,6 +395,41 @@ export interface RunEventPageMeta {
 export interface ListRunEventsResponse {
   items: RunEventResponse[];
   meta: RunEventPageMeta;
+}
+
+export interface RunSkillRef {
+  id: string;
+  name: string;
+}
+
+export interface RunChildResponse {
+  child_run_id: string;
+  parent_run_id: string;
+  caller_agent_id: string;
+  caller_agent_slug: string;
+  caller_agent_name: string;
+  caller_agent_tags: string[];
+  caller_skills: RunSkillRef[];
+  target_agent_id: string;
+  target_agent_slug: string;
+  target_agent_name: string;
+  target_agent_tags: string[];
+  target_skills: RunSkillRef[];
+  reason: string;
+  status: string;
+  cost_cents: number;
+  duration_ms?: number;
+  started_at: string;
+  finished_at?: string;
+  source: string;
+  billing_mode: string;
+  a2a_context?: RunA2AContext;
+  children?: RunChildResponse[];
+}
+
+export interface ListRunChildrenResponse {
+  parent_run_id: string;
+  items: RunChildResponse[];
 }
 
 export interface RunArtifactResponse {

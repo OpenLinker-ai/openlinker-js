@@ -7,3 +7,4 @@ export * from "./runtime-client.js";
 export * from "./runtime-store.js";
 export * from "./runtime-node-transport.js";
 export * from "./runtime-worker.js";
+export * from "./registration.js";
