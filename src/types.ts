@@ -200,14 +200,36 @@ export interface TaskCallbackSubscription {
 
 export interface RunResponse {
   run_id: string;
+  agent_id?: string;
+  agent_slug?: string;
+  agent_name?: string;
+  agent_connection_mode?: "direct_http" | "mcp_server" | "runtime" | string;
   status: RunStatus | string;
-  replayed: boolean;
+  input?: JsonValue;
   output?: JsonValue;
   error_code?: string;
   error_message?: string;
   cost_cents: number;
   duration_ms: number;
+  started_at: string;
+  finished_at?: string;
   source?: string;
+  runtime_contract_id: string;
+  runtime_transport?: "websocket" | "long_poll" | string;
+  runtime_transport_reason?: string;
+  runtime_transport_changed_at?: string;
+  dispatch_state: string;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at?: string;
+  latest_attempt_id?: string;
+  active_attempt_id?: string;
+  cancel_state?: string;
+  cancel_requested_at?: string;
+  cancel_acknowledged_at?: string;
+  cancel_reason?: string;
+  dead_lettered_at?: string;
+  replay_of_run_id?: string;
   parent_run_id?: string;
   caller_agent_id?: string;
   billing_mode?: string;
@@ -216,6 +238,7 @@ export interface RunResponse {
   requirement_evidence?: JsonValue;
   evidence_summary?: JsonValue;
   next_action?: JsonValue;
+  replayed: boolean;
 }
 
 export interface RunEventResponse {

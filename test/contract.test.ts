@@ -55,7 +55,9 @@ test("Core client v1 contract maps to implemented SDK methods", async () => {
   for (const endpoint of runCreationEndpoints) {
     assert.deepEqual(endpoint.required_headers, ["Idempotency-Key"]);
     assert.deepEqual(endpoint.success_statuses, [200, 201, 202]);
-    assert.ok(endpoint.response_fields.includes("replayed"));
+    for (const field of ["agent_connection_mode", "runtime_transport", "dispatch_state", "attempt_count", "started_at", "replayed"]) {
+      assert.ok(endpoint.response_fields.includes(field), `${endpoint.path} missing ${field}`);
+    }
   }
 });
 

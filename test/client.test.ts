@@ -145,6 +145,21 @@ test("runAgent maps camelCase input to Core request body", async () => {
         output: { ok: true },
         cost_cents: 0,
         duration_ms: 12,
+        agent_id: "00000000-0000-0000-0000-000000000001",
+        agent_slug: "runtime-agent",
+        agent_name: "Runtime Agent",
+        agent_connection_mode: "runtime",
+        started_at: "2026-07-18T00:00:00Z",
+        finished_at: "2026-07-18T00:00:01Z",
+        source: "api",
+        runtime_contract_id: "openlinker.runtime.v2",
+        runtime_transport: "websocket",
+        runtime_transport_reason: "recovery",
+        runtime_transport_changed_at: "2026-07-18T00:00:00Z",
+        dispatch_state: "terminal",
+        attempt_count: 1,
+        max_attempts: 3,
+        latest_attempt_id: "attempt-1",
       }, { status: 201 });
     },
   });
@@ -170,6 +185,11 @@ test("runAgent maps camelCase input to Core request body", async () => {
 
   assert.equal(response.run_id, "run-1");
   assert.equal(response.replayed, false);
+  assert.equal(response.agent_connection_mode, "runtime");
+  assert.equal(response.runtime_transport, "websocket");
+  assert.equal(response.runtime_transport_reason, "recovery");
+  assert.equal(response.dispatch_state, "terminal");
+  assert.equal(response.attempt_count, 1);
   const call = calls[0];
   assert.ok(call);
   assert.equal(call.url, "https://core.example.com/api/v1/run");
