@@ -703,6 +703,34 @@ test("listRunEvents returns items and durable page metadata", async () => {
   assert.equal("events" in page, false);
 });
 
+test("listRunChildren returns the parent and nested delegation tree", async () => {
+  const responseBody = {
+    parent_run_id: "parent-run",
+    items: [{
+      child_run_id: "child-run",
+      status: "success",
+      children: [{
+        child_run_id: "grandchild-run",
+        status: "running",
+      }],
+    }],
+  };
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com/api/v1",
+    userToken: "ol_user_test",
+    fetch: async () => jsonResponse(responseBody),
+  });
+
+  const children = await client.listRunChildren("parent-run");
+
+  assert.deepEqual(children, responseBody);
+  const child = children.items[0];
+  assert.ok(child);
+  const grandchild = child.children?.[0];
+  assert.ok(grandchild);
+  assert.equal(grandchild.child_run_id, "grandchild-run");
+});
+
 test("standard Core errors become OpenLinkerError", async () => {
   const client = new OpenLinkerClient({
     baseUrl: "https://core.example.com",

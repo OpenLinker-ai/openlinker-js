@@ -275,9 +275,11 @@ export interface ListRunEventsResponse {
 export interface RunChildResponse {
   child_run_id: string;
   status: string;
+  children?: RunChildResponse[];
 }
 
 export interface ListRunChildrenResponse {
+  parent_run_id: string;
   items: RunChildResponse[];
 }
 
