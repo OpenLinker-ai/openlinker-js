@@ -62,7 +62,7 @@
   "devDependencies": {
     "@types/node": "^20.19.43",
     "@types/ws": "^8.18.1",
-    "typescript": "^5.0.0"
+    "typescript": "^7.0.2"
   },
   "publishConfig": {
     "access": "public"
