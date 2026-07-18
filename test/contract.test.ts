@@ -61,6 +61,20 @@ test("Core client v1 contract maps to implemented SDK methods", async () => {
   }
 });
 
+test("Core registration v1 contract maps to implemented SDK methods", async () => {
+  const contract = JSON.parse(
+    await readFile(new URL("../contracts/core-registration.v1.json", import.meta.url), "utf8"),
+  );
+  assert.equal(contract.scope, "core-registration");
+  assert.equal(contract.endpoints.length, 9);
+  const clientPrototype = OpenLinkerClient.prototype as unknown as Record<string, unknown>;
+  for (const endpoint of contract.endpoints) {
+    assert.equal(typeof clientPrototype[endpoint.client_method], "function");
+    assert.ok(endpoint.path.startsWith("/api/v1/"));
+    assert.ok(["user_token", "agent_token"].includes(endpoint.auth));
+  }
+});
+
 test("Runtime contract matches the exported handshake manifest", async () => {
   const contractsDir = new URL("../contracts/", import.meta.url);
   const files = await readdir(contractsDir);

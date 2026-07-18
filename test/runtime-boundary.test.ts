@@ -9,9 +9,11 @@ test("package root stays browser-safe while the server Runtime entry is complete
   assert.equal("RuntimeWorker" in RootSDK, false);
   assert.equal("FileRuntimeStore" in RootSDK, false);
   assert.equal("NodeRuntimeTransport" in RootSDK, false);
+  assert.equal("ensureAgent" in RootSDK, false);
   assert.equal(typeof RuntimeSDK.RuntimeWorker, "function");
   assert.equal(typeof RuntimeSDK.FileRuntimeStore, "function");
   assert.equal(typeof RuntimeSDK.NodeRuntimeTransport, "function");
+  assert.equal(typeof RuntimeSDK.ensureAgent, "function");
 
   const [rootJavaScript, rootTypes, publicTypes] = await Promise.all([
     readFile(new URL("../dist/index.js", import.meta.url), "utf8"),

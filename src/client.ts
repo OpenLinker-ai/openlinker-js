@@ -14,21 +14,33 @@ import type {
   A2ATaskPushConfigParams,
   A2ATaskPushNotificationConfig,
   A2ATaskQueryParams,
+  AgentListResponse,
   AgentCardResponse,
   AgentDetailResponse,
+  AgentResponse,
+  AgentTokenListResponse,
+  AgentTokenResponse,
+  CreateAgentRequest,
+  CreateAgentTokenRequest,
   JsonObject,
   JsonValue,
   ListAgentsParams,
+  ListAgentTokensParams,
   ListItemsResponse,
+  ListMyAgentsParams,
+  ListRunChildrenResponse,
   ListRunEventsParams,
   ListRunEventsResponse,
   MarketListResponse,
   PlatformRunCallbackConfig,
+  RegisterAgentViaTokenRequest,
+  RegisterAgentViaTokenResponse,
   RunAgentRequest,
   RunArtifactResponse,
   RunMessageResponse,
   RunResponse,
   TaskCallbackConfig,
+  UpdateAgentRequest,
 } from "./types.js";
 
 export type FetchLike = (
@@ -202,6 +214,120 @@ export class OpenLinkerClient {
     );
   }
 
+  async createAgent(
+    request: CreateAgentRequest,
+    options: RequestOptions = {},
+  ): Promise<AgentResponse> {
+    return this.request("POST", "/creator/agents", toCreateAgentBody(request), options);
+  }
+
+  async listMyAgents(
+    params: ListMyAgentsParams = {},
+    options: RequestOptions = {},
+  ): Promise<AgentListResponse> {
+    const query = new URLSearchParams();
+    appendQuery(query, "q", params.query);
+    appendQuery(query, "status", params.status);
+    appendQuery(query, "visibility", params.visibility);
+    appendQuery(query, "certification_status", params.certificationStatus);
+    if (params.skillIds?.length) query.set("skill_ids", params.skillIds.join(","));
+    appendQuery(query, "sort_by", params.sortBy);
+    appendQuery(query, "limit", params.limit);
+    appendQuery(query, "offset", params.offset);
+    return this.request("GET", "/creator/agents", undefined, options, query);
+  }
+
+  async getMyAgent(
+    agentId: string,
+    options: RequestOptions = {},
+  ): Promise<AgentResponse> {
+    return this.request(
+      "GET",
+      `/creator/agents/${encodeURIComponent(agentId)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async getMyAgentBySlug(
+    slug: string,
+    options: RequestOptions = {},
+  ): Promise<AgentResponse> {
+    return this.request(
+      "GET",
+      `/creator/agents/by-slug/${encodeURIComponent(slug)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async updateAgent(
+    agentId: string,
+    request: UpdateAgentRequest,
+    options: RequestOptions = {},
+  ): Promise<AgentResponse> {
+    return this.request(
+      "PATCH",
+      `/creator/agents/${encodeURIComponent(agentId)}`,
+      toUpdateAgentBody(request),
+      options,
+    );
+  }
+
+  async createAgentToken(
+    request: CreateAgentTokenRequest,
+    options: RequestOptions = {},
+  ): Promise<AgentTokenResponse> {
+    return this.request(
+      "POST",
+      "/creator/agent-tokens",
+      toCreateAgentTokenBody(request),
+      options,
+    );
+  }
+
+  async listAgentTokens(
+    params: ListAgentTokensParams = {},
+    options: RequestOptions = {},
+  ): Promise<AgentTokenListResponse> {
+    const query = new URLSearchParams();
+    appendQuery(query, "agent_id", params.agentId);
+    appendQuery(query, "limit", params.limit);
+    appendQuery(query, "offset", params.offset);
+    appendQuery(query, "sort_by", params.sortBy);
+    appendQuery(query, "sort_dir", params.sortDir);
+    return this.request("GET", "/creator/agent-tokens", undefined, options, query);
+  }
+
+  async revokeAgentToken(
+    tokenId: string,
+    options: RequestOptions = {},
+  ): Promise<void> {
+    await this.request<void>(
+      "DELETE",
+      `/creator/agent-tokens/${encodeURIComponent(tokenId)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async registerAgentViaToken(
+    agentToken: string,
+    request: RegisterAgentViaTokenRequest,
+    options: RequestOptions = {},
+  ): Promise<RegisterAgentViaTokenResponse> {
+    const token = agentToken.trim();
+    if (!token) throw new TypeError("agentToken is required for registration");
+    const headers = new Headers(options.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    return this.request(
+      "POST",
+      "/agent-registration/agents",
+      toRegisterAgentViaTokenBody(request),
+      { ...options, headers },
+    );
+  }
+
   async runAgent(
     request: RunAgentRequest,
     options: RequestOptions = {},
@@ -278,6 +404,18 @@ export class OpenLinkerClient {
       undefined,
       options,
       query,
+    );
+  }
+
+  async listRunChildren(
+    runId: string,
+    options: RequestOptions = {},
+  ): Promise<ListRunChildrenResponse> {
+    return this.request(
+      "GET",
+      `/runs/${encodeURIComponent(runId)}/children`,
+      undefined,
+      options,
     );
   }
 
@@ -1501,6 +1639,97 @@ export function extractA2AText(value: unknown): string {
   const parts: string[] = [];
   collectA2AText(value, parts);
   return parts.join("\n");
+}
+
+function toCreateAgentBody(request: CreateAgentRequest): JsonObject {
+  return {
+    slug: request.slug,
+    name: request.name,
+    ...(request.description !== undefined ? { description: request.description } : {}),
+    ...(request.endpointUrl !== undefined ? { endpoint_url: request.endpointUrl } : {}),
+    ...(request.endpointAuthHeader !== undefined
+      ? { endpoint_auth_header: request.endpointAuthHeader }
+      : {}),
+    ...(request.pricePerCallCents !== undefined
+      ? { price_per_call_cents: request.pricePerCallCents }
+      : {}),
+    ...(request.tags !== undefined ? { tags: request.tags } : {}),
+    ...(request.skillIds !== undefined ? { skill_ids: request.skillIds } : {}),
+    ...(request.visibility !== undefined ? { visibility: request.visibility } : {}),
+    ...(request.connectionMode !== undefined
+      ? { connection_mode: request.connectionMode }
+      : {}),
+    ...(request.mcpToolName !== undefined ? { mcp_tool_name: request.mcpToolName } : {}),
+  };
+}
+
+function toUpdateAgentBody(request: UpdateAgentRequest): JsonObject {
+  return {
+    name: request.name,
+    ...(request.description !== undefined ? { description: request.description } : {}),
+    ...(request.endpointUrl !== undefined ? { endpoint_url: request.endpointUrl } : {}),
+    ...(request.endpointAuthHeader !== undefined
+      ? { endpoint_auth_header: request.endpointAuthHeader }
+      : {}),
+    ...(request.clearEndpointAuthHeader !== undefined
+      ? { clear_endpoint_auth_header: request.clearEndpointAuthHeader }
+      : {}),
+    ...(request.pricePerCallCents !== undefined
+      ? { price_per_call_cents: request.pricePerCallCents }
+      : {}),
+    ...(request.tags !== undefined ? { tags: request.tags } : {}),
+    ...(request.visibility !== undefined ? { visibility: request.visibility } : {}),
+    ...(request.connectionMode !== undefined
+      ? { connection_mode: request.connectionMode }
+      : {}),
+    ...(request.mcpToolName !== undefined ? { mcp_tool_name: request.mcpToolName } : {}),
+  };
+}
+
+function toCreateAgentTokenBody(request: CreateAgentTokenRequest): JsonObject {
+  return {
+    name: request.name,
+    ...(request.agentId !== undefined ? { agent_id: request.agentId } : {}),
+    ...(request.scopes !== undefined ? { scopes: request.scopes } : {}),
+    ...(request.expiresInMinutes !== undefined
+      ? { expires_in_minutes: request.expiresInMinutes }
+      : {}),
+  };
+}
+
+function toRegisterAgentViaTokenBody(request: RegisterAgentViaTokenRequest): JsonObject {
+  return {
+    ...(request.slug !== undefined ? { slug: request.slug } : {}),
+    name: request.name,
+    ...(request.description !== undefined ? { description: request.description } : {}),
+    ...(request.endpointUrl !== undefined ? { endpoint_url: request.endpointUrl } : {}),
+    ...(request.endpointAuthHeader !== undefined
+      ? { endpoint_auth_header: request.endpointAuthHeader }
+      : {}),
+    ...(request.pricePerCallCents !== undefined
+      ? { price_per_call_cents: request.pricePerCallCents }
+      : {}),
+    ...(request.tags !== undefined ? { tags: request.tags } : {}),
+    ...(request.abilityTags !== undefined ? { ability_tags: request.abilityTags } : {}),
+    ...(request.skillIds !== undefined ? { skill_ids: request.skillIds } : {}),
+    visibility: request.visibility || "private",
+    connection_mode: normalizeRegistrationConnectionMode(request.connectionMode),
+    ...(request.mcpToolName !== undefined ? { mcp_tool_name: request.mcpToolName } : {}),
+  };
+}
+
+function normalizeRegistrationConnectionMode(value: string | undefined): string {
+  const normalized = value?.trim() ?? "";
+  switch (normalized.toLowerCase()) {
+    case "":
+    case "runtime":
+    case "runtime_ws":
+    case "runtime_pull":
+    case "agent_node":
+      return "runtime";
+    default:
+      return normalized;
+  }
 }
 
 function toRunRequestBody(request: RunAgentRequest): {

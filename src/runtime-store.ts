@@ -1,13 +1,11 @@
 import { constants as fsConstants } from "node:fs";
 import {
-  chmod,
+  lstat,
   mkdir,
   open,
   readdir,
-  readFile,
   rename,
   rm,
-  stat,
   statfs,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -36,6 +34,8 @@ const lockFileName = ".runtime-worker.lock";
 const defaultMaxBytes = 512 * 1024 * 1024;
 const defaultMaxRecords = 10_000;
 const defaultReserveBytes = 16 * 1024 * 1024;
+const noFollowFlag = fsConstants.O_NOFOLLOW ?? 0;
+const directoryFlag = fsConstants.O_DIRECTORY ?? 0;
 
 export type RuntimeAssignmentState =
   | "received"
@@ -496,8 +496,7 @@ export class FileRuntimeStore implements RuntimeStore {
     }
     this.key = keyExists ? await loadPrivateKey(keyPath) : await createPrivateKey(keyPath);
     if (stateExists) {
-      await assertPrivateFile(statePath, "Runtime store state");
-      const encrypted = await readFile(statePath);
+      const encrypted = await readPrivateFile(statePath, "Runtime store state");
       this.bytesUsed = encrypted.byteLength;
       this.state = decryptState(this.key, encrypted);
       try {
@@ -1105,8 +1104,10 @@ async function atomicWriteDurable(path: string, value: Buffer): Promise<void> {
       await file.close();
     }
     await rename(temporary, path);
-    await chmod(path, 0o600);
-    const directoryHandle = await open(directory, fsConstants.O_RDONLY);
+    const directoryHandle = await open(
+      directory,
+      fsConstants.O_RDONLY | directoryFlag | noFollowFlag,
+    );
     try {
       await directoryHandle.sync();
     } finally {
@@ -1120,9 +1121,31 @@ async function atomicWriteDurable(path: string, value: Buffer): Promise<void> {
 
 async function ensurePrivateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
-  const details = await stat(path);
-  if (!details.isDirectory() || (details.mode & 0o077) !== 0) {
-    throw new RuntimeStoreError("Runtime data directory must have mode 0700", "PERMISSIONS");
+  const entry = await lstat(path);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new RuntimeStoreError(
+      "Runtime data directory must be a private directory, not a symbolic link",
+      "PERMISSIONS",
+    );
+  }
+  let handle;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | directoryFlag | noFollowFlag);
+    const details = await handle.stat();
+    if (!details.isDirectory() || (details.mode & 0o077) !== 0) {
+      throw new RuntimeStoreError("Runtime data directory must have mode 0700", "PERMISSIONS");
+    }
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new RuntimeStoreError(
+        "Runtime data directory must not be a symbolic link",
+        "PERMISSIONS",
+        { cause },
+      );
+    }
+    throw cause;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -1164,21 +1187,35 @@ async function releaseProcessLock(
 }
 
 async function loadPrivateKey(path: string): Promise<Buffer> {
-  const details = await stat(path);
-  if (!details.isFile() || (details.mode & 0o077) !== 0) {
-    throw new RuntimeStoreError("Runtime store key must have mode 0600", "PERMISSIONS");
-  }
-  const key = await readFile(path);
+  const key = await readPrivateFile(path, "Runtime store key");
   if (key.byteLength !== keyBytes) {
     throw new RuntimeStoreError("Runtime store key is corrupt", "CORRUPT");
   }
   return Buffer.from(key);
 }
 
-async function assertPrivateFile(path: string, label: string): Promise<void> {
-  const details = await stat(path);
-  if (!details.isFile() || (details.mode & 0o077) !== 0) {
-    throw new RuntimeStoreError(`${label} must have mode 0600`, "PERMISSIONS");
+async function readPrivateFile(path: string, label: string): Promise<Buffer> {
+  const entry = await lstat(path);
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new RuntimeStoreError(`${label} must be a regular file, not a symbolic link`, "PERMISSIONS");
+  }
+  let handle;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | noFollowFlag);
+    const details = await handle.stat();
+    if (!details.isFile() || (details.mode & 0o077) !== 0) {
+      throw new RuntimeStoreError(`${label} must have mode 0600`, "PERMISSIONS");
+    }
+    return await handle.readFile();
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new RuntimeStoreError(`${label} must not be a symbolic link`, "PERMISSIONS", {
+        cause,
+      });
+    }
+    throw cause;
+  } finally {
+    await handle?.close();
   }
 }
 
@@ -1191,7 +1228,10 @@ async function createPrivateKey(path: string): Promise<Buffer> {
   } finally {
     await handle.close();
   }
-  const directoryHandle = await open(dirname(path), fsConstants.O_RDONLY);
+  const directoryHandle = await open(
+    dirname(path),
+    fsConstants.O_RDONLY | directoryFlag | noFollowFlag,
+  );
   try {
     await directoryHandle.sync();
   } finally {
@@ -1202,7 +1242,7 @@ async function createPrivateKey(path: string): Promise<Buffer> {
 
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await stat(path);
+    await lstat(path);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;

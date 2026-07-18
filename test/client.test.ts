@@ -643,6 +643,7 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
   });
   await client.getRun("run helper");
   await client.listRunEvents("run helper", { afterSequence: 2, limit: 10 });
+  await client.listRunChildren("run helper");
   await client.listRunArtifacts("run helper");
   await client.listRunMessages("run helper");
 
@@ -652,6 +653,7 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
     "https://core.example.com/api/v1/runs",
     "https://core.example.com/api/v1/runs/run%20helper",
     "https://core.example.com/api/v1/runs/run%20helper/events?after_sequence=2&limit=10",
+    "https://core.example.com/api/v1/runs/run%20helper/children",
     "https://core.example.com/api/v1/runs/run%20helper/artifacts",
     "https://core.example.com/api/v1/runs/run%20helper/messages",
   ]);
@@ -664,6 +666,165 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
   assert.equal(calls[2]?.headers.get("authorization"), "Bearer ol_override");
   assert.equal(calls[2]?.headers.get("x-default"), "override");
   assert.equal(calls[2]?.headers.get("content-type"), "application/json");
+});
+
+test("listRunChildren returns the complete recursive Core DTO", async () => {
+  const responseBody = {
+    parent_run_id: "run-parent",
+    items: [{
+      child_run_id: "run-child",
+      parent_run_id: "run-parent",
+      caller_agent_id: "agent-caller",
+      caller_agent_slug: "caller",
+      caller_agent_name: "Caller",
+      caller_agent_tags: ["orchestrator"],
+      caller_skills: [{ id: "skill-plan", name: "Planning" }],
+      target_agent_id: "agent-target",
+      target_agent_slug: "target",
+      target_agent_name: "Target",
+      target_agent_tags: ["research"],
+      target_skills: [{ id: "skill-research", name: "Research" }],
+      reason: "delegate research",
+      status: "success",
+      cost_cents: 4,
+      duration_ms: 12,
+      started_at: "2026-07-18T00:00:00Z",
+      finished_at: "2026-07-18T00:00:01Z",
+      source: "api",
+      billing_mode: "caller",
+      a2a_context: { trace_id: "trace-1" },
+      children: [],
+    }],
+  };
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    fetch: async () => jsonResponse(responseBody),
+  });
+
+  const response = await client.listRunChildren("run-parent");
+
+  assert.deepEqual(response, responseBody);
+  assert.equal(response.items[0]?.target_skills[0]?.name, "Research");
+});
+
+test("creator registration methods map to Core routes without changing auth", async () => {
+  const calls: RecordedA2ACall[] = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    userToken: "ol_user_creator",
+    fetch: async (url, init) => {
+      const request = init ?? {};
+      calls.push({
+        url: String(url),
+        method: request.method,
+        headers: new Headers(request.headers),
+        body: parseOptionalRequestBody(request),
+      });
+      if (request.method === "DELETE") return new Response(null, { status: 204 });
+      if (String(url).includes("agent-tokens")) {
+        return jsonResponse({
+          id: "token-1",
+          name: "Runtime token",
+          prefix: "ol_agent_demo",
+          status: "active_runtime",
+          scopes: [],
+          created_at: "2026-07-18T00:00:00Z",
+          items: [],
+          total: 0,
+          limit: 0,
+          offset: 0,
+          sort_by: "",
+          sort_dir: "",
+          has_more: false,
+        });
+      }
+      return jsonResponse({
+        id: "agent-1",
+        slug: "demo",
+        name: "Demo",
+        description: "",
+        endpoint_url: "",
+        price_per_call_cents: 0,
+        tags: [],
+        status: "active",
+        lifecycle_status: "active",
+        visibility: "private",
+        certification_status: "uncertified",
+        connection_mode: "runtime",
+        created_at: "2026-07-18T00:00:00Z",
+        items: [],
+        total: 0,
+        limit: 0,
+        offset: 0,
+      });
+    },
+  });
+
+  await client.createAgent({ slug: "demo", name: "Demo", connectionMode: "runtime" });
+  await client.listMyAgents({ query: "demo", skillIds: ["skill-1"], limit: 10 });
+  await client.getMyAgent("agent/1");
+  await client.getMyAgentBySlug("demo/agent");
+  await client.updateAgent("agent/1", { name: "Updated", clearEndpointAuthHeader: true });
+  await client.createAgentToken({ name: "Runtime token", agentId: "agent-1" });
+  await client.listAgentTokens({ agentId: "agent-1", sortDir: "desc" });
+  await client.revokeAgentToken("token/1");
+
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.url}`), [
+    "POST https://core.example.com/api/v1/creator/agents",
+    "GET https://core.example.com/api/v1/creator/agents?q=demo&skill_ids=skill-1&limit=10",
+    "GET https://core.example.com/api/v1/creator/agents/agent%2F1",
+    "GET https://core.example.com/api/v1/creator/agents/by-slug/demo%2Fagent",
+    "PATCH https://core.example.com/api/v1/creator/agents/agent%2F1",
+    "POST https://core.example.com/api/v1/creator/agent-tokens",
+    "GET https://core.example.com/api/v1/creator/agent-tokens?agent_id=agent-1&sort_dir=desc",
+    "DELETE https://core.example.com/api/v1/creator/agent-tokens/token%2F1",
+  ]);
+  assert.ok(calls.every((call) => call.headers.get("authorization") === "Bearer ol_user_creator"));
+  assert.deepEqual(calls[0]?.body, {
+    slug: "demo",
+    name: "Demo",
+    connection_mode: "runtime",
+  });
+  assert.deepEqual(calls[4]?.body, {
+    name: "Updated",
+    clear_endpoint_auth_header: true,
+  });
+});
+
+test("registerAgentViaToken overrides user auth and applies private runtime defaults", async () => {
+  const calls: RecordedA2ACall[] = [];
+  const client = new OpenLinkerClient({
+    baseUrl: "https://core.example.com",
+    userToken: "ol_user_creator",
+    fetch: async (url, init) => {
+      const request = init ?? {};
+      calls.push({
+        url: String(url),
+        method: request.method,
+        headers: new Headers(request.headers),
+        body: parseOptionalRequestBody(request),
+      });
+      return jsonResponse({
+        agent: { id: "agent-1", slug: "demo", name: "Demo" },
+        agent_token: { id: "token-1", prefix: "ol_agent_demo", status: "active_runtime" },
+      });
+    },
+  });
+
+  const response = await client.registerAgentViaToken(" ol_agent_pending ", {
+    name: "Demo",
+    tags: ["runtime"],
+  });
+
+  assert.equal(response.agent.id, "agent-1");
+  assert.equal(calls[0]?.url, "https://core.example.com/api/v1/agent-registration/agents");
+  assert.equal(calls[0]?.headers.get("authorization"), "Bearer ol_agent_pending");
+  assert.deepEqual(calls[0]?.body, {
+    name: "Demo",
+    tags: ["runtime"],
+    visibility: "private",
+    connection_mode: "runtime",
+  });
 });
 
 test("listRunEvents returns items and durable page metadata", async () => {

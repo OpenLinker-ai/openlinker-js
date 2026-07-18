@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -165,6 +165,31 @@ test("FileRuntimeStore holds an exclusive process lock and fails closed on corru
   });
 });
 
+test("FileRuntimeStore rejects symbolic links for private storage paths", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openlinker-js-symlink-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const targetDir = join(root, "target");
+  const linkedDir = join(root, "linked-store");
+  await mkdir(targetDir, { mode: 0o700 });
+  await symlink(targetDir, linkedDir, "dir");
+  await assertPermissionsFailure(new FileRuntimeStore(linkedDir).open());
+
+  for (const fileName of ["runtime-store.key", "runtime-store.enc"]) {
+    const dataDir = join(root, fileName.replaceAll(".", "-"));
+    const seed = new FileRuntimeStore(dataDir);
+    await seed.open();
+    await seed.close();
+
+    const privatePath = join(dataDir, fileName);
+    const outsidePath = join(root, `${fileName}.outside`);
+    await writeFile(outsidePath, await readFile(privatePath), { mode: 0o600 });
+    await rm(privatePath);
+    await symlink(outsidePath, privatePath);
+    await assertPermissionsFailure(new FileRuntimeStore(dataDir).open());
+  }
+});
+
 test("FileRuntimeStore reports capacity before acknowledging oversized durable work", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-capacity-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
@@ -186,6 +211,14 @@ test("FileRuntimeStore reports capacity before acknowledging oversized durable w
   assert.equal((await store.snapshot()).assignments.length, 0);
   await store.close();
 });
+
+async function assertPermissionsFailure(operation: Promise<void>): Promise<void> {
+  await assert.rejects(operation, (error) => {
+    assert.ok(error instanceof RuntimeStoreError);
+    assert.equal(error.code, "PERMISSIONS");
+    return true;
+  });
+}
 
 function assigned(
   identity: RuntimeWorkerIdentity,
