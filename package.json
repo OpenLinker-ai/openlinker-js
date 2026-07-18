@@ -52,10 +52,12 @@
     "package.json"
   ],
   "scripts": {
-    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
+    "clean": "node --input-type=module --eval \"import { rmSync } from 'node:fs'; for (const path of ['dist', '.test-dist', '.example-dist']) rmSync(path, { recursive: true, force: true });\"",
     "build": "npm run clean && tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build:test": "tsc -p tsconfig.test.json",
+    "build:examples": "tsc -p tsconfig.examples.json",
+    "test": "npm run build && npm run build:test && node --test .test-dist/*.test.js",
+    "typecheck": "npm run build && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.examples.json --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

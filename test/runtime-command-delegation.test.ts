@@ -11,6 +11,12 @@ import {
   RuntimeRequiredFeatures,
   buildRuntimeInvocationProof,
 } from "../dist/runtime.js";
+import type {
+  FetchLike,
+  RuntimeAttemptIdentity,
+  RuntimeHelloPayload,
+} from "../dist/runtime.js";
+import type { JsonValue } from "../dist/index.js";
 
 const ids = Object.freeze({
   node: "11111111-1111-4111-8111-111111111111",
@@ -90,6 +96,8 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
       [RuntimeAttachmentHeader]: "default-must-not-leak",
     },
     fetch: async (input, init) => {
+      assert.ok(init);
+      assert.ok(init.body instanceof ArrayBuffer);
       const url = new URL(String(input));
       const headers = new Headers(init.headers);
       const body = new Uint8Array(init.body);
@@ -104,11 +112,15 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
       assert.equal(headers.get("content-type"), "application/json");
       assert.equal(text, expectedBody);
       assert.equal(stringifyCalls, 1, "delegated body must be stringified exactly once");
+      const idempotencyKey = headers.get("idempotency-key");
+      const context = headers.get("openlinker-invocation-context");
+      assert.ok(idempotencyKey);
+      assert.ok(context);
       const expectedProof = await buildRuntimeInvocationProof(invocation.token, {
-        method: init.method,
+        method: init.method ?? "",
         path: url.pathname,
-        idempotencyKey: headers.get("idempotency-key"),
-        context: headers.get("openlinker-invocation-context"),
+        idempotencyKey,
+        context,
         body,
       });
       assert.equal(headers.get("openlinker-invocation-proof"), expectedProof);
@@ -122,7 +134,7 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
 
   const summary = await runtime.callRuntimeAgent(invocation, {
     targetAgentId: ids.target,
-    input: { q: "hello", nonce: changing },
+    input: { q: "hello", nonce: changing as unknown as JsonValue },
     metadata: { trace: "sdk" },
     reason: "need data",
   }, {
@@ -141,10 +153,11 @@ test("callRuntimeAgent signs and sends one exact UTF-8 body", async () => {
 });
 
 test("Runtime commands and cancel ACK are session-bound and strictly typed", async () => {
-  const calls = [];
+  const calls: string[] = [];
   const runtime = runtimeWithFetch(async (input, init) => {
+    const request = init ?? {};
     const url = new URL(String(input));
-    const headers = new Headers(init.headers);
+    const headers = new Headers(request.headers);
     if (url.pathname === "/api/v1/agent-runtime/sessions") {
       assert.equal(headers.get(RuntimeAttachmentHeader), null);
       return jsonResponse(wireReady());
@@ -153,7 +166,7 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
     assert.equal(headers.get("authorization"), "Bearer ol_agent_v2");
     assert.equal(headers.get(RuntimeAttachmentHeader), ids.attachment);
     if (url.pathname === "/api/v1/agent-runtime/commands") {
-      assert.equal(init.method, "GET");
+      assert.equal(request.method, "GET");
       assert.equal(url.searchParams.get("runtime_session_id"), ids.session);
       assert.equal(url.searchParams.get("wait"), "17");
       assert.equal(headers.has("content-type"), false);
@@ -191,8 +204,12 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
       });
     }
     assert.equal(url.pathname, `/api/v1/agent-runtime/runs/${ids.run}/cancel-ack`);
-    assert.equal(init.method, "POST");
-    const body = JSON.parse(init.body);
+    assert.equal(request.method, "POST");
+    const requestBody = request.body;
+    if (typeof requestBody !== "string") {
+      assert.fail("Runtime cancel ACK body must be a JSON string");
+    }
+    const body = JSON.parse(requestBody);
     assert.deepEqual(body, {
       cancellation_id: ids.cancellation,
       attempt_identity: wireIdentity(),
@@ -211,9 +228,16 @@ test("Runtime commands and cancel ACK are session-bound and strictly typed", asy
   const commands = await runtime.pollRuntimeCommands(ids.session, 17);
   assert.equal(commands.databaseTime, now);
   assert.equal(commands.commands.length, 3);
-  assert.equal(commands.commands[0].payload.cancellationId, ids.cancellation);
-  assert.equal(commands.commands[1].payload.capacity, 0);
-  assert.equal(commands.commands[2].payload.runStatus, "canceled");
+  const [cancelCommand, drainCommand, revokedCommand] = commands.commands;
+  assert.ok(cancelCommand);
+  assert.ok(drainCommand);
+  assert.ok(revokedCommand);
+  assert.equal(cancelCommand.type, RuntimeMessageTypes.runCancel);
+  assert.equal(drainCommand.type, RuntimeMessageTypes.drain);
+  assert.equal(revokedCommand.type, RuntimeMessageTypes.leaseRevoked);
+  assert.equal(cancelCommand.payload.cancellationId, ids.cancellation);
+  assert.equal(drainCommand.payload.capacity, 0);
+  assert.equal(revokedCommand.payload.runStatus, "canceled");
 
   const state = await runtime.ackRuntimeCancel({
     cancellationId: ids.cancellation,
@@ -278,7 +302,9 @@ test("commands and cancel ACK reject malformed unions, UUIDs, and state mismatch
       return jsonResponse(wireReady());
     }
     calls++;
-    return responses.shift();
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
   });
 
   await runtime.createRuntimeSession(runtimeHello());
@@ -328,7 +354,9 @@ test("delegated calls reject invalid authority, statuses, summaries, and strict 
   ];
   const runtime = runtimeWithFetch(async () => {
     calls++;
-    return responses.shift();
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
   }, {
     authorization: "Bearer ordinary-agent-token-must-not-win",
   });
@@ -368,7 +396,7 @@ test("delegated call rejects an oversized request before transport", async () =>
   assert.equal(calls, 0);
 });
 
-function runtimeWithFetch(fetch, headers = undefined) {
+function runtimeWithFetch(fetch: FetchLike, headers?: HeadersInit): OpenLinkerRuntime {
   return new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_v2",
@@ -377,7 +405,7 @@ function runtimeWithFetch(fetch, headers = undefined) {
   });
 }
 
-function runtimeHello() {
+function runtimeHello(): RuntimeHelloPayload {
   return {
     nodeId: ids.node,
     agentId: ids.agent,
@@ -402,7 +430,7 @@ function wireReady() {
   };
 }
 
-function runtimeIdentity() {
+function runtimeIdentity(): RuntimeAttemptIdentity {
   return {
     runId: ids.run,
     attemptId: ids.attempt,
@@ -428,7 +456,7 @@ function wireIdentity() {
   };
 }
 
-function jsonResponse(value, init = {}) {
+function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   return new Response(JSON.stringify(value), { ...init, headers });

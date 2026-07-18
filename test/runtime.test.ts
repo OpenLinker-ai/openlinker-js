@@ -14,6 +14,26 @@ import {
   RuntimeResumeActions,
   RuntimeResumeDecisions,
 } from "../dist/runtime.js";
+import type {
+  FetchLike,
+  RuntimeAttemptIdentity,
+  RuntimeHelloPayload,
+  RuntimeRunEventPayload,
+} from "../dist/runtime.js";
+
+interface RuntimeRequestBody extends Record<string, unknown> {
+  attempt_identity?: unknown;
+  client_event_id?: unknown;
+  client_event_seq?: unknown;
+  result_id?: unknown;
+  attempts?: Array<{ attempt_identity: unknown }>;
+}
+
+interface RuntimeFetchCall {
+  url: URL;
+  init: RequestInit;
+  body: RuntimeRequestBody;
+}
 
 const ids = Object.freeze({
   node: "11111111-1111-4111-8111-111111111111",
@@ -40,19 +60,24 @@ test("Runtime types and constants are server-only", () => {
 });
 
 test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
-  const calls = [];
+  const calls: RuntimeFetchCall[] = [];
   let claimCalls = 0;
   const runtime = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com/api/v1",
     agentToken: async () => "ol_agent_v2",
     fetch: async (input, init) => {
+      const request = init ?? {};
       const url = new URL(String(input));
-      const body = init.body === undefined ? undefined : JSON.parse(init.body);
-      calls.push({ url, init, body });
-      const headers = new Headers(init.headers);
+      const requestBody = request.body;
+      if (typeof requestBody !== "string") {
+        assert.fail("Runtime request body must be a JSON string");
+      }
+      const body = JSON.parse(requestBody) as RuntimeRequestBody;
+      calls.push({ url, init: request, body });
+      const headers = new Headers(request.headers);
       assert.equal(headers.get("authorization"), "Bearer ol_agent_v2");
       assert.equal(headers.get("content-type"), "application/json");
-      assert.equal(init.method, "POST");
+      assert.equal(request.method, "POST");
       assert.equal(
         headers.get(RuntimeAttachmentHeader),
         url.pathname === "/api/v1/agent-runtime/sessions" ? null : ids.attachment,
@@ -119,7 +144,7 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
           });
         case "/api/v1/agent-runtime/runs/resume":
           return jsonResponse({
-            decisions: body.attempts.map((attempt) => ({
+            decisions: body.attempts?.map((attempt) => ({
               attempt_identity: attempt.attempt_identity,
               decision: "continue_execution",
               lease_expires_at: later,
@@ -211,8 +236,10 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
       pendingClientEventRanges: [],
     }],
   });
-  assert.equal(resumed.decisions[0].decision, RuntimeResumeDecisions.continueExecution);
-  assert.deepEqual(resumed.decisions[0].allowedActions, [
+  const resumeDecision = resumed.decisions[0];
+  assert.ok(resumeDecision);
+  assert.equal(resumeDecision.decision, RuntimeResumeDecisions.continueExecution);
+  assert.deepEqual(resumeDecision.allowedActions, [
     RuntimeResumeActions.continueExecution,
     RuntimeResumeActions.uploadEvents,
     RuntimeResumeActions.uploadResult,
@@ -242,7 +269,9 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
   assert.equal(runtime.runtimeAttachmentId, undefined);
 
   assert.equal(calls.length, 12);
-  assert.deepEqual(calls[0].body, {
+  const firstCall = calls[0];
+  assert.ok(firstCall);
+  assert.deepEqual(firstCall.body, {
     node_id: ids.node,
     agent_id: ids.agent,
     worker_id: "worker-a",
@@ -253,12 +282,14 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
     features: [...RuntimeRequiredFeatures],
     contract_digest: RuntimeContractDigest,
   });
-  assert.deepEqual(calls[1].body, calls[0].body);
+  assert.deepEqual(calls[1]?.body, firstCall.body);
   const eventCall = calls.find((call) => call.url.pathname.endsWith("/events"));
+  assert.ok(eventCall);
   assert.equal(eventCall.body.client_event_id, ids.event);
   const resultCall = calls.find((call) => call.url.pathname.endsWith("/result"));
+  assert.ok(resultCall);
   assert.equal(resultCall.body.result_id, ids.result);
-  assert.deepEqual(calls.at(-1).body, {
+  assert.deepEqual(calls.at(-1)?.body, {
     node_id: ids.node,
     agent_id: ids.agent,
     worker_id: "worker-a",
@@ -294,22 +325,22 @@ test("Runtime owns Pull attachment headers and rejects a stale generation respon
   const nextAttachment = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   let createCalls = 0;
   let claimCalls = 0;
-  let releaseStaleClaim;
-  let markStaleClaimStarted;
-  const staleClaimGate = new Promise((resolve) => {
+  let releaseStaleClaim: (() => void) | undefined;
+  let markStaleClaimStarted: (() => void) | undefined;
+  const staleClaimGate = new Promise<void>((resolve) => {
     releaseStaleClaim = resolve;
   });
-  const staleClaimStarted = new Promise((resolve) => {
+  const staleClaimStarted = new Promise<void>((resolve) => {
     markStaleClaimStarted = resolve;
   });
-  const seen = [];
+  const seen: Array<{ path: string; attachment: string | null }> = [];
   const runtime = new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_v2",
     headers: { [RuntimeAttachmentHeader]: "constructor-spoof" },
     fetch: async (input, init) => {
       const url = new URL(String(input));
-      const attachment = new Headers(init.headers).get(RuntimeAttachmentHeader);
+      const attachment = new Headers(init?.headers).get(RuntimeAttachmentHeader);
       seen.push({ path: url.pathname, attachment });
       if (url.pathname === "/api/v1/agent-runtime/sessions") {
         createCalls += 1;
@@ -320,6 +351,7 @@ test("Runtime owns Pull attachment headers and rejects a stale generation respon
       claimCalls += 1;
       if (claimCalls === 1) {
         assert.equal(attachment, ids.attachment);
+        assert.ok(markStaleClaimStarted);
         markStaleClaimStarted();
         await staleClaimGate;
         return jsonResponse(wireAssignment());
@@ -344,6 +376,7 @@ test("Runtime owns Pull attachment headers and rejects a stale generation respon
   await staleClaimStarted;
   await runtime.createRuntimeSession(runtimeHello());
   assert.equal(runtime.runtimeAttachmentId, nextAttachment);
+  assert.ok(releaseStaleClaim);
   releaseStaleClaim();
   await assert.rejects(staleClaim, /response belongs to a stale attachment/);
   assert.equal(
@@ -357,7 +390,7 @@ test("Runtime heartbeat cannot silently replace the Pull attachment", async () =
   const unexpectedAttachment = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const runtime = runtimeWithFetch(async (input, init) => {
     const url = new URL(String(input));
-    const attachment = new Headers(init.headers).get(RuntimeAttachmentHeader);
+    const attachment = new Headers(init?.headers).get(RuntimeAttachmentHeader);
     if (url.pathname === "/api/v1/agent-runtime/sessions") {
       assert.equal(attachment, null);
       return jsonResponse(wireReady());
@@ -385,12 +418,12 @@ test("Runtime heartbeat cannot silently replace the Pull attachment", async () =
 test("Runtime suppresses a stale attachment error response after reattach", async () => {
   const nextAttachment = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   let createCalls = 0;
-  let releaseClaim;
-  let markClaimStarted;
-  const claimGate = new Promise((resolve) => {
+  let releaseClaim: (() => void) | undefined;
+  let markClaimStarted: (() => void) | undefined;
+  const claimGate = new Promise<void>((resolve) => {
     releaseClaim = resolve;
   });
-  const claimStarted = new Promise((resolve) => {
+  const claimStarted = new Promise<void>((resolve) => {
     markClaimStarted = resolve;
   });
   const runtime = runtimeWithFetch(async (input) => {
@@ -399,6 +432,7 @@ test("Runtime suppresses a stale attachment error response after reattach", asyn
       createCalls += 1;
       return jsonResponse(wireReady(createCalls === 1 ? ids.attachment : nextAttachment));
     }
+    assert.ok(markClaimStarted);
     markClaimStarted();
     await claimGate;
     return jsonResponse({
@@ -417,9 +451,11 @@ test("Runtime suppresses a stale attachment error response after reattach", asyn
   );
   await claimStarted;
   await runtime.createRuntimeSession(runtimeHello());
+  assert.ok(releaseClaim);
   releaseClaim();
-  await assert.rejects(staleClaim, (error) => {
+  await assert.rejects(staleClaim, (error: unknown) => {
     assert.equal(error instanceof OpenLinkerError, false);
+    assert.ok(error instanceof Error);
     assert.match(error.message, /response belongs to a stale attachment/);
     return true;
   });
@@ -472,15 +508,16 @@ test("Runtime validates stable identities, contract, capacity, and request shape
     }),
     /canonical lowercase UUID/,
   );
-  await assert.rejects(
-    () => runtime.appendRuntimeEvent({
+  const eventWithUnexpectedField = {
       attemptIdentity: runtimeIdentity(),
       clientEventId: ids.event,
       clientEventSeq: 1,
       eventType: "run.progress",
       payload: {},
       unexpected: true,
-    }),
+    } as unknown as RuntimeRunEventPayload;
+  await assert.rejects(
+    () => runtime.appendRuntimeEvent(eventWithUnexpectedField),
     /unknown field unexpected/,
   );
   await assert.rejects(
@@ -519,7 +556,11 @@ test("Runtime rejects unknown, oversized, and identity-mismatched responses", as
       lease_expires_at: later,
     }),
   ];
-  const runtime = runtimeWithFetch(async () => responses.shift());
+  const runtime = runtimeWithFetch(async () => {
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
 
   await assert.rejects(() => runtime.createRuntimeSession(runtimeHello()), /unknown field unexpected/);
   await runtime.createRuntimeSession(runtimeHello());
@@ -537,7 +578,7 @@ test("Runtime rejects unknown, oversized, and identity-mismatched responses", as
 test("Runtime parses strict error envelopes with the existing runtime auth", async () => {
   const runtime = runtimeWithFetch(async (input, init) => {
     const url = new URL(String(input));
-    const headers = new Headers(init.headers);
+    const headers = new Headers(init?.headers);
     assert.equal(headers.get("authorization"), "Bearer ol_agent_v2");
     if (url.pathname === "/api/v1/agent-runtime/sessions") {
       assert.equal(headers.get(RuntimeAttachmentHeader), null);
@@ -563,13 +604,17 @@ test("Runtime parses strict error envelopes with the existing runtime auth", asy
       assert.equal(error.status, 409);
       assert.equal(error.code, "STALE_LEASE");
       assert.equal(error.requestId, "req-runtime");
-      assert.equal(error.details.currentRunStatus, "running");
+      assert.ok(error.details && typeof error.details === "object");
+      assert.equal(
+        (error.details as { currentRunStatus?: unknown }).currentRunStatus,
+        "running",
+      );
       return true;
     },
   );
 });
 
-function runtimeWithFetch(fetch) {
+function runtimeWithFetch(fetch: FetchLike): OpenLinkerRuntime {
   return new OpenLinkerRuntime({
     baseUrl: "https://core.example.com",
     agentToken: "ol_agent_v2",
@@ -577,7 +622,7 @@ function runtimeWithFetch(fetch) {
   });
 }
 
-function runtimeHello() {
+function runtimeHello(): RuntimeHelloPayload {
   return {
     nodeId: ids.node,
     agentId: ids.agent,
@@ -591,7 +636,7 @@ function runtimeHello() {
   };
 }
 
-function runtimeIdentity() {
+function runtimeIdentity(): RuntimeAttemptIdentity {
   return {
     runId: ids.run,
     attemptId: ids.attempt,
@@ -631,7 +676,7 @@ function wireAssignment() {
   };
 }
 
-function wireReady(attachmentId = ids.attachment) {
+function wireReady(attachmentId: string = ids.attachment) {
   return {
     core_instance_id: ids.core,
     attachment_id: attachmentId,
@@ -642,7 +687,7 @@ function wireReady(attachmentId = ids.attachment) {
   };
 }
 
-function jsonResponse(value, init = {}) {
+function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
   return new Response(JSON.stringify(value), { ...init, headers });

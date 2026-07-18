@@ -1,12 +1,13 @@
 import { RuntimeWorker } from "../dist/runtime.js";
+import type { RuntimeTransportMode } from "../dist/runtime.js";
 
-function required(name) {
+function required(name: string): string {
   const value = String(process.env[name] ?? "").trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
 
-function positiveInteger(name, fallback) {
+function positiveInteger(name: string, fallback: number): number {
   const raw = String(process.env[name] ?? "").trim();
   if (!raw) return fallback;
   const value = Number.parseInt(raw, 10);
@@ -25,7 +26,7 @@ const worker = new RuntimeWorker({
   nodeVersion: "openlinker-js/runtime-worker",
   agentId: required("OPENLINKER_AGENT_ID"),
   agentToken: required("OPENLINKER_AGENT_TOKEN"),
-  transport,
+  transport: transport as RuntimeTransportMode,
   capacity: 1,
   dataDir: required("OPENLINKER_RUNTIME_DATA_DIR"),
   mtls: {

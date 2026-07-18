@@ -13,6 +13,40 @@ import {
   RuntimeWebSocketError,
   RuntimeWorker,
 } from "../dist/runtime.js";
+import type {
+  RuntimeAttemptIdentity,
+  RuntimeDiscoveryConnection,
+  RuntimeDrainPayload,
+  RuntimeFallbackReason,
+  RuntimeHelloPayload,
+  RuntimePendingCommand,
+  RuntimeReadyPayload,
+  RuntimeRunAssignedPayload,
+  RuntimeRunCancellationState,
+  RuntimeWorkerClient,
+  RuntimeWorkerDuplex,
+  RuntimeWorkerTransport,
+} from "../dist/runtime.js";
+
+type DeferredResolve<T> = [T] extends [void]
+  ? () => void
+  : (value: T | PromiseLike<T>) => void;
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: DeferredResolve<T>;
+}
+
+type RuntimeWorkerCallbacks = Parameters<RuntimeWorkerTransport["dialWebSocket"]>[1];
+type RuntimeCancelAckRequest = Parameters<RuntimeWorkerDuplex["ackCancel"]>[0];
+
+async function sendCommand(
+  callbacks: RuntimeWorkerCallbacks,
+  command: RuntimePendingCommand,
+): Promise<void> {
+  assert.ok(callbacks.onCommand);
+  await callbacks.onCommand(command);
+}
 
 const ids = {
   node: "11111111-1111-4111-8111-111111111111",
@@ -30,12 +64,12 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
   const ackGate = deferred();
   const secondAckEntered = deferred();
   const finalAcked = deferred();
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   let ackCalls = 0;
   let handlerCalls = 0;
-  const eventIds = [];
-  const resultIds = [];
+  const eventIds: string[] = [];
+  const resultIds: string[] = [];
 
   const client = fakeClient({
     async createRuntimeSession(value) {
@@ -118,7 +152,7 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
       return { output: { answer: 42 } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
     randomUUID: () => ids.result,
   });
 
@@ -126,6 +160,7 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
   await secondAckEntered.promise;
   assert.equal(handlerCalls, 0, "handler ran before assignment confirmation");
   const durable = await store.getAssignment(ids.attempt);
+  assert.ok(durable);
   assert.equal(durable.state, "ack_sent", "assignment ACK was not durably journaled first");
 
   ackGate.resolve();
@@ -145,7 +180,7 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
 test("RuntimeWorker renews a finished Attempt until its durable spool is ACKed", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-finished-lease-"));
   const store = new FileRuntimeStore(dataDir);
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   let handlerCalls = 0;
   let renewCalls = 0;
@@ -212,7 +247,7 @@ test("RuntimeWorker renews a finished Attempt until its durable spool is ACKed",
       return { output: { complete: true } };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
     randomUUID: () => ids.result,
   });
 
@@ -241,7 +276,7 @@ test("RuntimeWorker renews a finished Attempt until its durable spool is ACKed",
 test("RuntimeWorker shutdown retains a finished spool without waiting for Core ACK", async (t) => {
   const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-finished-shutdown-"));
   const store = new FileRuntimeStore(dataDir);
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   const client = fakeClient({
     async createRuntimeSession(value) {
@@ -276,7 +311,7 @@ test("RuntimeWorker shutdown retains a finished spool without waiting for Core A
       return { output: { complete: true } };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
     randomUUID: () => ids.result,
   });
 
@@ -291,7 +326,7 @@ test("RuntimeWorker shutdown retains a finished spool without waiting for Core A
   });
   await waitFor(() => worker.transportState === "pull_active");
   await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "finished");
-  let shutdownTimer;
+  let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     worker.stop(),
     new Promise((_, reject) => {
@@ -308,7 +343,7 @@ test("RuntimeWorker shutdown retains a finished spool without waiting for Core A
   try {
     const snapshot = await reopened.snapshot();
     assert.equal(snapshot.assignments.length, 1);
-    assert.equal(snapshot.assignments[0].state, "finished");
+    assert.equal(snapshot.assignments[0]?.state, "finished");
     assert.equal(snapshot.events.length, 1);
     assert.equal(snapshot.results.length, 1);
   } finally {
@@ -326,11 +361,11 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
   const resultAckGate = deferred();
   const serverDrainStarted = deferred();
   const serverDrainAckGate = deferred();
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   let drainSettled = false;
   let drainedRuntimeSessionId;
-  let serverDrainRequest;
+  let serverDrainRequest!: RuntimeDrainPayload;
   let serverDrainCalls = 0;
   const client = fakeClient({
     async createRuntimeSession(value) {
@@ -397,7 +432,7 @@ test("RuntimeWorker drain waits for the active handler and durable spool ACK bef
       return { output: { complete: true } };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
     randomUUID: () => ids.result,
   });
 
@@ -436,7 +471,7 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
   const dataDir = await mkdtemp(join(tmpdir(), "openlinker-js-drain-timeout-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const store = new FileRuntimeStore(dataDir);
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   const client = fakeClient({
     async createRuntimeSession(value) {
@@ -472,7 +507,7 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
       return { output: { complete: true } };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
     randomUUID: () => ids.result,
   });
 
@@ -496,8 +531,8 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
 
   const reopened = new FileRuntimeStore(dataDir);
   await reopened.open();
-  let retainedEventId;
-  let retainedResultId;
+  let retainedEventId!: string;
+  let retainedResultId!: string;
   try {
     assert.deepEqual(await reopened.spoolStatus(), {
       assignments: 1,
@@ -506,14 +541,18 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
       empty: false,
     });
     const snapshot = await reopened.snapshot();
-    retainedEventId = snapshot.events[0].clientEventId;
-    retainedResultId = snapshot.results[0].payload.resultId;
+    const retainedEvent = snapshot.events[0];
+    const retainedResult = snapshot.results[0];
+    assert.ok(retainedEvent);
+    assert.ok(retainedResult);
+    retainedEventId = retainedEvent.clientEventId;
+    retainedResultId = retainedResult.payload.resultId;
   } finally {
     await reopened.close();
   }
 
-  const replayedEventIds = [];
-  const replayedResultIds = [];
+  const replayedEventIds: string[] = [];
+  const replayedResultIds: string[] = [];
   let recoveryHandlerCalls = 0;
   const recoveryClient = fakeClient({
     async appendRuntimeEvent(event) {
@@ -552,7 +591,7 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
       return { output: {} };
     },
   }, {
-    connectTransport: async () => fakeTransport(recoveryClient),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(recoveryClient),
   });
 
   const recoveryRunning = recovery.start();
@@ -563,21 +602,23 @@ test("RuntimeWorker drain times out explicitly and preserves the unacknowledged 
   assert.deepEqual(replayedEventIds, [retainedEventId]);
   assert.deepEqual(replayedResultIds, [retainedResultId]);
   assert.equal(recoveryHandlerCalls, 0, "recovery re-entered an already finished handler");
+  assert.ok(recovery.identity);
+  assert.ok(firstIdentity);
   assert.equal(recovery.identity.workerId, firstIdentity.workerId);
   assert.equal(recovery.identity.sessionEpoch, firstIdentity.sessionEpoch + 1);
 });
 
 test("RuntimeWorker client drain rejects a WebSocket offer delivered after the committed ACK", async () => {
   const drainRequested = deferred();
-  const drainAck = deferred();
-  const offerRejected = deferred();
+  const drainAck = deferred<RuntimeDrainPayload>();
+  const offerRejected = deferred<"NODE_AT_CAPACITY" | "NODE_DRAINING">();
   const socketDone = deferred();
-  let callbacks;
-  let hello;
-  let request;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let hello!: RuntimeHelloPayload;
+  let request!: RuntimeDrainPayload;
   let serverDrainCalls = 0;
   let drainSettled = false;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(value, handlers) {
       hello = value;
@@ -613,7 +654,7 @@ test("RuntimeWorker client drain rejects a WebSocket offer delivered after the c
       assert.fail("a post-drain offer must never enter the handler");
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
     randomUUID: () => ids.result,
   });
 
@@ -635,6 +676,7 @@ test("RuntimeWorker client drain rejects a WebSocket offer delivered after the c
   // Resolve the server ACK first, then synchronously deliver a raced offer
   // before the drain continuation can inspect the local queues.
   drainAck.resolve({ ...request, reasonCode: "FIRST_WRITER_REASON", inflight: 1 });
+  assert.ok(callbacks.onAssigned);
   callbacks.onAssigned(assignmentFor(hello));
   assert.equal(await offerRejected.promise, "NODE_DRAINING");
   await draining;
@@ -688,7 +730,7 @@ test("RuntimeWorker refuses to re-enter a handler after a persisted started boun
       return { output: {} };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   await assert.rejects(
@@ -745,7 +787,7 @@ test("RuntimeWorker deletes a revoked tombstone only after Core confirms it duri
       assert.fail("a revoked tombstone must never re-enter the handler");
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   const running = worker.start();
@@ -773,8 +815,8 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
   const secondClosed = deferred();
   let dials = 0;
   let pullSessions = 0;
-  const dialReasons = [];
-  const pullReasons = [];
+  const dialReasons: Array<RuntimeFallbackReason | undefined> = [];
+  const pullReasons: Array<string | null> = [];
   const client = fakeClient({
     async createRuntimeSession(_hello, options) {
       pullSessions += 1;
@@ -782,7 +824,7 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
       return ready();
     },
   });
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: client,
     async dialWebSocket(_hello, _callbacks, _signal, fallbackReason) {
       dials += 1;
@@ -804,7 +846,7 @@ test("RuntimeWorker auto transport falls back to pull and probes WebSocket again
     heartbeatIntervalMs: 10_000,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
@@ -864,7 +906,7 @@ test("RuntimeWorker retries only WebSocket when discovered policy forbids Pull",
         },
       };
     },
-    connectTransport: async () => ({
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
       http: client,
       async dialWebSocket() {
         dials += 1;
@@ -930,7 +972,7 @@ test("RuntimeWorker recovers a 403 transport policy signal into WebSocket-only r
             },
       };
     },
-    connectTransport: async () => {
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => {
       connectCalls += 1;
       const connection = connectCalls;
       return {
@@ -962,10 +1004,11 @@ test("RuntimeWorker recovers a 403 transport policy signal into WebSocket-only r
 });
 
 test("RuntimeWorker obeys discovered transport order and a fixed server default", async () => {
-  for (const policy of [
+  const policies: RuntimeDiscoveryConnection["policy"][] = [
     { allowedTransports: ["pull", "ws"], defaultTransport: "auto" },
     { allowedTransports: ["ws", "pull"], defaultTransport: "pull" },
-  ]) {
+  ];
+  for (const policy of policies) {
     let dials = 0;
     const client = fakeClient();
     const worker = new RuntimeWorker({
@@ -984,7 +1027,7 @@ test("RuntimeWorker obeys discovered transport order and a fixed server default"
         runtimeURL: "https://runtime.example",
         policy,
       }),
-      connectTransport: async () => ({
+      connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
         http: client,
         async dialWebSocket() {
           dials += 1;
@@ -1027,7 +1070,7 @@ test("RuntimeWorker applies discovered probe timing over a local preference", as
         websocketProbeTimeoutMs: 500,
       },
     }),
-    connectTransport: async () => ({
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
       http: client,
       async dialWebSocket() {
         dials += 1;
@@ -1049,7 +1092,7 @@ test("RuntimeWorker drops a late Pull assignment after WebSocket reattach", asyn
   const socketDone = deferred();
   const claimStarted = deferred();
   const releaseClaim = deferred();
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let dials = 0;
   let handlerCalls = 0;
   const client = fakeClient({
@@ -1079,7 +1122,7 @@ test("RuntimeWorker drops a late Pull assignment after WebSocket reattach", asyn
       return { output: {} };
     },
   }, {
-    connectTransport: async () => ({
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
       http: client,
       async dialWebSocket() {
         dials += 1;
@@ -1131,7 +1174,7 @@ test("RuntimeWorker keeps HTTP Pull lifecycle calls out of an active WebSocket a
     heartbeatIntervalMs: 250,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => ({
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
       http: client,
       async dialWebSocket() { return fakeDuplex(socketDone.promise); },
       async close() {},
@@ -1182,7 +1225,7 @@ test("RuntimeWorker stops forced Pull while claim and command polls are in fligh
     heartbeatIntervalMs: 250,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   const running = worker.start();
@@ -1243,13 +1286,14 @@ test("RuntimeWorker stops Pull without polling churn after permanent authenticat
     heartbeatIntervalMs: 10_000,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   const running = worker.start();
   await Promise.all([claimStarted.promise, commandStarted.promise]);
   revoke.resolve();
-  await assert.rejects(running, (error) => {
+  await assert.rejects(running, (error: unknown) => {
+    assert.ok(error instanceof OpenLinkerError);
     assert.equal(error.code, "UNAUTHORIZED");
     return true;
   });
@@ -1286,7 +1330,7 @@ test("RuntimeWorker keeps retrying transient Pull failures", async () => {
     heartbeatIntervalMs: 10_000,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   const running = worker.start();
@@ -1303,7 +1347,7 @@ test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async
   const rejected = [];
   let handlerCalls = 0;
   const client = fakeClient();
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: client,
     async dialWebSocket(hello, callbacks) {
       const duplex = fakeDuplex(socketDone.promise);
@@ -1340,7 +1384,7 @@ test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async
       return { output: { accepted: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
@@ -1357,12 +1401,12 @@ test("RuntimeWorker reserves capacity across concurrent WebSocket offers", async
 test("RuntimeWorker cancels only the matching Attempt and drain rejects new offers", async () => {
   const socketDone = deferred();
   const handlerStarted = deferred();
-  const drainRejected = deferred();
-  const cancelStates = [];
+  const drainRejected = deferred<"NODE_AT_CAPACITY" | "NODE_DRAINING">();
+  const cancelStates: RuntimeRunCancellationState["cancelState"][] = [];
   const store = new MemoryRuntimeStore();
-  let callbacks;
-  let firstAssignment;
-  const transport = {
+  let callbacks!: RuntimeWorkerCallbacks;
+  let firstAssignment!: RuntimeRunAssignedPayload;
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
@@ -1403,13 +1447,13 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
       return { output: {} };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
     randomUUID: () => ids.result,
   });
 
   const running = worker.start();
   await handlerStarted.promise;
-  const cancelCommand = {
+  const cancelCommand: RuntimePendingCommand = {
     type: "run.cancel",
     payload: {
       cancellationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -1418,7 +1462,7 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
       deadlineAt: new Date(Date.now() + 5_000).toISOString(),
     },
   };
-  await callbacks.onCommand(cancelCommand);
+  await sendCommand(callbacks, cancelCommand);
   assert.deepEqual(cancelStates, ["stopping", "stopped"]);
   assert.deepEqual(await store.spoolStatus(), {
     assignments: 0,
@@ -1428,11 +1472,11 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
   });
   assert.equal((await store.getAssignment(ids.attempt))?.state, "revoked");
 
-  await callbacks.onCommand(cancelCommand);
+  await sendCommand(callbacks, cancelCommand);
   assert.deepEqual(cancelStates, ["stopping", "stopped", "stopping", "stopped"]);
   await waitFor(async () => await store.getAssignment(ids.attempt) === undefined);
 
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "runtime.drain",
     payload: {
       deadlineAt: new Date(Date.now() + 5_000).toISOString(),
@@ -1459,12 +1503,12 @@ test("RuntimeWorker cancels only the matching Attempt and drain rejects new offe
 test("RuntimeWorker aborts the handler while a stopping ACK is bounded by the cancel deadline", async () => {
   const socketDone = deferred();
   const handlerStarted = deferred();
-  const handlerAborted = deferred();
+  const handlerAborted = deferred<number>();
   const stuckStoppingAck = deferred();
-  const cancelAcks = [];
-  let callbacks;
-  let assignment;
-  const transport = {
+  const cancelAcks: RuntimeRunCancellationState["cancelState"][] = [];
+  let callbacks!: RuntimeWorkerCallbacks;
+  let assignment!: RuntimeRunAssignedPayload;
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
@@ -1502,13 +1546,13 @@ test("RuntimeWorker aborts the handler while a stopping ACK is bounded by the ca
       return { output: { unreachable: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
   await handlerStarted.promise;
   const deadline = Date.now() + 120;
-  const canceled = callbacks.onCommand({
+  const canceled = sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
@@ -1535,8 +1579,8 @@ test("RuntimeWorker fences Result persistence when cancel arrives after the fina
   const originalSaveResult = store.saveResult.bind(store);
   let blockNextFinalRead = false;
   let saveResultCalls = 0;
-  let callbacks;
-  let assignment;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let assignment!: RuntimeRunAssignedPayload;
   store.getAssignment = async (attemptId) => {
     const current = await originalGetAssignment(attemptId);
     if (blockNextFinalRead && attemptId === ids.attempt) {
@@ -1550,7 +1594,7 @@ test("RuntimeWorker fences Result persistence when cancel arrives after the fina
     saveResultCalls += 1;
     return originalSaveResult(payload);
   };
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
@@ -1579,12 +1623,12 @@ test("RuntimeWorker fences Result persistence when cancel arrives after the fina
       return { output: { too_late: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
   await finalReadEntered.promise;
-  const canceled = callbacks.onCommand({
+  const canceled = sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -1593,7 +1637,7 @@ test("RuntimeWorker fences Result persistence when cancel arrives after the fina
       deadlineAt: new Date(Date.now() + 1_000).toISOString(),
     },
   });
-  await waitFor(() => assignment && callbacks);
+  await waitFor(() => Boolean(assignment && callbacks));
   finalReadRelease.resolve();
   await canceled;
   assert.equal(saveResultCalls, 0);
@@ -1611,8 +1655,8 @@ test("RuntimeWorker fences cancellation between durable confirmation and handler
   const confirmedRelease = deferred();
   const store = new MemoryRuntimeStore();
   const originalTransition = store.transitionAssignment.bind(store);
-  let callbacks;
-  let assignment;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let assignment!: RuntimeRunAssignedPayload;
   let handlerCalls = 0;
   store.transitionAssignment = async (attemptId, next, options) => {
     const current = await originalTransition(attemptId, next, options);
@@ -1622,7 +1666,7 @@ test("RuntimeWorker fences cancellation between durable confirmation and handler
     }
     return current;
   };
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
@@ -1648,12 +1692,12 @@ test("RuntimeWorker fences cancellation between durable confirmation and handler
       return { output: { must_not_run: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
   await confirmedPersisted.promise;
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "abababab-abab-4bab-8bab-abababababab",
@@ -1679,10 +1723,10 @@ test("RuntimeWorker fences cancellation while assignment confirmation is in flig
   const confirmationEntered = deferred();
   const confirmationRelease = deferred();
   const store = new MemoryRuntimeStore();
-  let callbacks;
-  let assignment;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let assignment!: RuntimeRunAssignedPayload;
   let handlerCalls = 0;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
@@ -1717,12 +1761,12 @@ test("RuntimeWorker fences cancellation while assignment confirmation is in flig
       return { output: { must_not_run: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
   await confirmationEntered.promise;
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "acacacac-acac-4cac-8cac-acacacacacac",
@@ -1743,7 +1787,7 @@ test("RuntimeWorker fences cancellation while assignment confirmation is in flig
   await running;
 });
 
-for (const transportMode of ["pull", "ws"]) {
+for (const transportMode of ["pull", "ws"] as const) {
   for (const terminalCode of [
     "RUN_CANCEL_REQUESTED",
     "STALE_LEASE",
@@ -1757,11 +1801,11 @@ for (const transportMode of ["pull", "ws"]) {
       const drainRecheckEntered = deferred();
       const drainRecheckRelease = deferred();
       const store = new MemoryRuntimeStore();
-      let hello;
+      let hello!: RuntimeHelloPayload;
       let claimed = false;
       let ackCalls = 0;
       let handlerCalls = 0;
-      const drainRequests = [];
+      const drainRequests: RuntimeDrainPayload[] = [];
       const terminalError = () => transportMode === "ws"
         ? new RuntimeWebSocketError("Attempt is already terminal", terminalCode, false)
         : new OpenLinkerError("Attempt is already terminal", {
@@ -1796,7 +1840,7 @@ for (const transportMode of ["pull", "ws"]) {
           return { ...request, inflight: 0 };
         },
       });
-      const transport = transportMode === "ws"
+      const transport: RuntimeWorkerTransport = transportMode === "ws"
         ? {
           http: client,
           async dialWebSocket(value, callbacks) {
@@ -1838,7 +1882,7 @@ for (const transportMode of ["pull", "ws"]) {
           return { output: { must_not_run: true } };
         },
       }, {
-        connectTransport: async () => transport,
+        connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
       });
 
       const running = worker.start();
@@ -1851,7 +1895,7 @@ for (const transportMode of ["pull", "ws"]) {
         () => { drainSettled = true; },
       );
       await waitFor(() => drainRequests.length === 1);
-      assert.equal(drainRequests[0].inflight, 1, "assignment reservation was missing from drain evidence");
+      assert.equal(drainRequests[0]?.inflight, 1, "assignment reservation was missing from drain evidence");
       await delay(20);
       assert.equal(drainSettled, false, "drain ignored the in-flight assignment confirmation");
       ackRelease.resolve();
@@ -1871,7 +1915,7 @@ for (const transportMode of ["pull", "ws"]) {
   }
 }
 
-for (const transportMode of ["pull", "ws"]) {
+for (const transportMode of ["pull", "ws"] as const) {
   for (const terminalCode of [
     "RUN_CANCEL_REQUESTED",
     "STALE_LEASE",
@@ -1881,7 +1925,7 @@ for (const transportMode of ["pull", "ws"]) {
     test(`RuntimeWorker ${transportMode} converges ${terminalCode} while rejecting a draining offer`, async () => {
       const socketDone = deferred();
       const claimEntered = deferred();
-      const claimRelease = deferred();
+      const claimRelease = deferred<RuntimeRunAssignedPayload | undefined>();
       const drainEntered = deferred();
       const drainRelease = deferred();
       const drainRecheckEntered = deferred();
@@ -1889,10 +1933,10 @@ for (const transportMode of ["pull", "ws"]) {
       const rejectEntered = deferred();
       const rejectRelease = deferred();
       const store = new MemoryRuntimeStore();
-      let hello;
-      let callbacks;
+      let hello!: RuntimeHelloPayload;
+      let callbacks!: RuntimeWorkerCallbacks;
       let drainCalls = 0;
-      let firstDrainRequest;
+      let firstDrainRequest!: RuntimeDrainPayload;
       let rejectCalls = 0;
       let handlerCalls = 0;
       const terminalError = () => transportMode === "ws"
@@ -1930,7 +1974,7 @@ for (const transportMode of ["pull", "ws"]) {
           return { ...request, inflight: 1 };
         },
       });
-      const transport = transportMode === "ws"
+      const transport: RuntimeWorkerTransport = transportMode === "ws"
         ? {
           http: client,
           async dialWebSocket(value, valueCallbacks) {
@@ -1977,7 +2021,7 @@ for (const transportMode of ["pull", "ws"]) {
           return { output: { must_not_run: true } };
         },
       }, {
-        connectTransport: async () => transport,
+        connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
       });
 
       const running = worker.start();
@@ -2028,12 +2072,12 @@ test("RuntimeWorker treats a terminal rejectWithoutStore with no local Assignmen
   const rejectRelease = deferred();
   const store = new MemoryRuntimeStore();
   const originalAcceptsNewRuns = store.acceptsNewRuns.bind(store);
-  let callbacks;
-  let hello;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let hello!: RuntimeHelloPayload;
   let rejectCalls = 0;
   let handlerCalls = 0;
   store.acceptsNewRuns = () => originalAcceptsNewRuns() && false;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(value, valueCallbacks) {
       hello = value;
@@ -2071,7 +2115,7 @@ test("RuntimeWorker treats a terminal rejectWithoutStore with no local Assignmen
       return { output: { must_not_run: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
@@ -2106,12 +2150,12 @@ test("RuntimeWorker fences a stored Attempt when a full File store rejects a dup
     reserveBytes: 0,
     maxRecords: 1,
   });
-  let callbacks;
-  let hello;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let hello!: RuntimeHelloPayload;
   let ackCalls = 0;
   let rejectCalls = 0;
   let handlerCalls = 0;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(value, valueCallbacks) {
       hello = value;
@@ -2160,7 +2204,7 @@ test("RuntimeWorker fences a stored Attempt when a full File store rejects a dup
       return { output: { unreachable: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
@@ -2189,11 +2233,11 @@ for (const { persistedState, terminalCode } of [
   test(`RuntimeWorker converges a terminal re-ACK for a duplicate ${persistedState} offer`, async () => {
     const socketDone = deferred();
     const store = new MemoryRuntimeStore();
-    let callbacks;
-    let hello;
+    let callbacks!: RuntimeWorkerCallbacks;
+    let hello!: RuntimeHelloPayload;
     let ackCalls = 0;
     let handlerCalls = 0;
-    const transport = {
+    const transport: RuntimeWorkerTransport = {
       http: fakeClient(),
       async dialWebSocket(value, valueCallbacks) {
         hello = value;
@@ -2225,7 +2269,7 @@ for (const { persistedState, terminalCode } of [
         return { output: { must_not_run: true } };
       },
     }, {
-      connectTransport: async () => transport,
+      connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
     });
 
     const running = worker.start();
@@ -2257,7 +2301,7 @@ test("RuntimeWorker retries a non-terminal 409 during assignment confirmation", 
   const store = new MemoryRuntimeStore();
   let ackCalls = 0;
   let handlerCalls = 0;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, callbacks) {
       const duplex = fakeDuplex(socketDone.promise);
@@ -2298,7 +2342,7 @@ test("RuntimeWorker retries a non-terminal 409 during assignment confirmation", 
       return { output: { retried: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
@@ -2314,18 +2358,20 @@ test("RuntimeWorker rejects missing and wrong-fence cancel identities without ab
   const socketDone = deferred();
   const handlerStarted = deferred();
   const handlerRelease = deferred();
-  const cancelAcks = [];
+  const cancelAcks: RuntimeCancelAckRequest[] = [];
   const store = new MemoryRuntimeStore();
-  let callbacks;
-  let assignment;
+  let callbacks!: RuntimeWorkerCallbacks;
+  let assignment!: RuntimeRunAssignedPayload;
   let handlerAborted = false;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
       assignment = assignmentFor(hello);
       const duplex = fakeDuplex(socketDone.promise);
-      duplex.ackCancel = async (request) => cancelAcks.push(request);
+      duplex.ackCancel = async (request) => {
+        cancelAcks.push(request);
+      };
       setTimeout(() => value.onAssigned?.(assignment), 0);
       return duplex;
     },
@@ -2348,13 +2394,13 @@ test("RuntimeWorker rejects missing and wrong-fence cancel identities without ab
       return { output: { completed: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
   await handlerStarted.promise;
   const deadlineAt = new Date(Date.now() + 1_000).toISOString();
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
@@ -2363,7 +2409,7 @@ test("RuntimeWorker rejects missing and wrong-fence cancel identities without ab
       deadlineAt,
     },
   });
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
@@ -2397,20 +2443,25 @@ test("RuntimeWorker reports cancel deadline failure without claiming the handler
   const socketDone = deferred();
   const handlerStarted = deferred();
   const handlerRelease = deferred();
-  const cancelAcks = [];
+  const cancelAcks: Array<{
+    state: RuntimeRunCancellationState["cancelState"];
+    errorCode: string | undefined;
+  }> = [];
   const store = new MemoryRuntimeStore();
-  let callbacks;
-  let assignment;
-  const transport = {
+  let callbacks!: RuntimeWorkerCallbacks;
+  let assignment!: RuntimeRunAssignedPayload;
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, value) {
       callbacks = value;
       assignment = assignmentFor(hello);
       const duplex = fakeDuplex(socketDone.promise);
-      duplex.ackCancel = async (request) => cancelAcks.push({
-        state: request.cancelState,
-        errorCode: request.errorCode,
-      });
+      duplex.ackCancel = async (request) => {
+        cancelAcks.push({
+          state: request.cancelState,
+          errorCode: request.errorCode,
+        });
+      };
       setTimeout(() => value.onAssigned?.(assignment), 0);
       return duplex;
     },
@@ -2432,12 +2483,12 @@ test("RuntimeWorker reports cancel deadline failure without claiming the handler
       return { output: { ignored_cancel: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
   await handlerStarted.promise;
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "run.cancel",
     payload: {
       cancellationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -2454,7 +2505,7 @@ test("RuntimeWorker reports cancel deadline failure without claiming the handler
 
   handlerRelease.resolve();
   await waitFor(async () => (await store.getAssignment(ids.attempt))?.state === "started");
-  await callbacks.onCommand({
+  await sendCommand(callbacks, {
     type: "run.lease.revoked",
     payload: {
       attemptIdentity: assignment.attemptIdentity,
@@ -2468,11 +2519,11 @@ test("RuntimeWorker reports cancel deadline failure without claiming the handler
   await running;
 });
 
-for (const transportMode of ["pull", "ws"]) {
+for (const transportMode of ["pull", "ws"] as const) {
   test(`RuntimeWorker ${transportMode} absorbs RUN_CANCEL_REQUESTED as one Attempt terminal`, async () => {
     const store = new MemoryRuntimeStore();
     const socketDone = deferred();
-    let hello;
+    let hello!: RuntimeHelloPayload;
     let claimed = false;
     let resultCalls = 0;
     const cancelError = () => transportMode === "ws"
@@ -2500,7 +2551,7 @@ for (const transportMode of ["pull", "ws"]) {
         throw cancelError();
       },
     });
-    const transport = transportMode === "ws"
+    const transport: RuntimeWorkerTransport = transportMode === "ws"
       ? {
         http: client,
         async dialWebSocket(value, callbacks) {
@@ -2530,7 +2581,7 @@ for (const transportMode of ["pull", "ws"]) {
       heartbeatIntervalMs: 10_000,
       handler: async () => ({ output: { late: true } }),
     }, {
-      connectTransport: async () => transport,
+      connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
       randomUUID: () => ids.result,
     });
 
@@ -2547,7 +2598,7 @@ for (const transportMode of ["pull", "ws"]) {
 
 test("RuntimeWorker absorbs a terminal error while uploading a durable Event", async () => {
   const store = new MemoryRuntimeStore();
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   let eventCalls = 0;
   const client = fakeClient({
@@ -2589,7 +2640,7 @@ test("RuntimeWorker absorbs a terminal error while uploading a durable Event", a
       return { output: { late: true } };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   const running = worker.start();
@@ -2603,7 +2654,7 @@ test("RuntimeWorker absorbs a terminal error while uploading a durable Event", a
 
 test("RuntimeWorker absorbs a terminal error while replaying EVENTS_MISSING", async () => {
   const store = new MemoryRuntimeStore();
-  let hello;
+  let hello!: RuntimeHelloPayload;
   let claimed = false;
   let eventCalls = 0;
   let resultCalls = 0;
@@ -2666,7 +2717,7 @@ test("RuntimeWorker absorbs a terminal error while replaying EVENTS_MISSING", as
       return { output: { late: true } };
     },
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
   const running = worker.start();
@@ -2679,12 +2730,12 @@ test("RuntimeWorker absorbs a terminal error while replaying EVENTS_MISSING", as
   await running;
 });
 
-for (const transportMode of ["pull", "ws"]) {
+for (const transportMode of ["pull", "ws"] as const) {
   test(`RuntimeWorker ${transportMode} absorbs RUN_CANCEL_REQUESTED during lease renewal`, async () => {
     const store = new MemoryRuntimeStore();
     const socketDone = deferred();
     const handlerStarted = deferred();
-    let hello;
+    let hello!: RuntimeHelloPayload;
     let claimed = false;
     let renewCalls = 0;
     const cancelError = () => transportMode === "ws"
@@ -2712,7 +2763,7 @@ for (const transportMode of ["pull", "ws"]) {
         throw cancelError();
       },
     });
-    const transport = transportMode === "ws"
+    const transport: RuntimeWorkerTransport = transportMode === "ws"
       ? {
         http: client,
         async dialWebSocket(value, callbacks) {
@@ -2750,7 +2801,7 @@ for (const transportMode of ["pull", "ws"]) {
         return { output: { unreachable: true } };
       },
     }, {
-      connectTransport: async () => transport,
+      connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
     });
 
     const running = worker.start();
@@ -2771,11 +2822,11 @@ test("RuntimeWorker continues renewing other Attempts when a canceled handler ig
   const targetRelease = deferred();
   const otherRelease = deferred();
   const store = new MemoryRuntimeStore();
-  let targetAssignment;
-  let otherAssignment;
+  let targetAssignment!: RuntimeRunAssignedPayload;
+  let otherAssignment!: RuntimeRunAssignedPayload;
   let targetRenewCalls = 0;
   let otherRenewCalls = 0;
-  const transport = {
+  const transport: RuntimeWorkerTransport = {
     http: fakeClient(),
     async dialWebSocket(hello, callbacks) {
       targetAssignment = assignmentFor(hello);
@@ -2830,7 +2881,7 @@ test("RuntimeWorker continues renewing other Attempts when a canceled handler ig
       return { output: { other: true } };
     },
   }, {
-    connectTransport: async () => transport,
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
   });
 
   const running = worker.start();
@@ -2849,7 +2900,7 @@ test("RuntimeWorker continues renewing other Attempts when a canceled handler ig
   await running;
 });
 
-for (const mode of ["pull", "ws", "auto"]) {
+for (const mode of ["pull", "ws", "auto"] as const) {
   test(`RuntimeWorker ${mode} retries Session conflict only until Ready`, async () => {
     const socketDone = deferred();
     let sessionCreates = 0;
@@ -2861,7 +2912,7 @@ for (const mode of ["pull", "ws", "auto"]) {
         return ready();
       },
     });
-    const transport = {
+    const transport: RuntimeWorkerTransport = {
       http: client,
       async dialWebSocket() {
         socketDials += 1;
@@ -2891,7 +2942,7 @@ for (const mode of ["pull", "ws", "auto"]) {
       heartbeatIntervalMs: 10_000,
       handler: async () => ({ output: {} }),
     }, {
-      connectTransport: async () => transport,
+      connectTransport: async (): Promise<RuntimeWorkerTransport> => transport,
     });
 
     const running = worker.start();
@@ -2929,10 +2980,11 @@ test("RuntimeWorker treats Session conflict after Ready as a permanent business 
     heartbeatIntervalMs: 10_000,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => fakeTransport(client),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
   });
 
-  await assert.rejects(worker.start(), (error) => {
+  await assert.rejects(worker.start(), (error: unknown) => {
+    assert.ok(error instanceof OpenLinkerError);
     assert.equal(error.code, "RUNTIME_SESSION_CONFLICT");
     return true;
   });
@@ -2959,7 +3011,7 @@ test("RuntimeWorker auto mode still falls back to Pull for a non-conflict WebSoc
     heartbeatIntervalMs: 10_000,
     handler: async () => ({ output: {} }),
   }, {
-    connectTransport: async () => ({
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
       http: client,
       async dialWebSocket() { throw new Error("WebSocket route unavailable"); },
       async close() {},
@@ -2981,7 +3033,7 @@ test("RuntimeWorker coalesces concurrent policy signals into one canonical redis
   let replacementCalls = 0;
   let discoveryCalls = 0;
   let connectCalls = 0;
-  const attachmentReasons = [];
+  const attachmentReasons: string[] = [];
   const signal = () => new OpenLinkerError("RUNTIME_POLICY_CHANGED", {
     status: 403,
     code: "FORBIDDEN",
@@ -2994,7 +3046,9 @@ test("RuntimeWorker coalesces concurrent policy signals into one canonical redis
   };
   const initial = fakeClient({
     async createRuntimeSession(_hello, options) {
-      attachmentReasons.push(new Headers(options?.headers).get("openlinker-runtime-fallback-reason"));
+      const reason = new Headers(options?.headers).get("openlinker-runtime-fallback-reason");
+      assert.ok(reason);
+      attachmentReasons.push(reason);
       return ready();
     },
     claimRuntimeRun: failTogether,
@@ -3002,7 +3056,9 @@ test("RuntimeWorker coalesces concurrent policy signals into one canonical redis
   });
   const replacement = fakeClient({
     async createRuntimeSession(_hello, options) {
-      attachmentReasons.push(new Headers(options?.headers).get("openlinker-runtime-fallback-reason"));
+      const reason = new Headers(options?.headers).get("openlinker-runtime-fallback-reason");
+      assert.ok(reason);
+      attachmentReasons.push(reason);
       return ready();
     },
     async claimRuntimeRun(_wait, _request, options) {
@@ -3035,7 +3091,7 @@ test("RuntimeWorker coalesces concurrent policy signals into one canonical redis
         policy: { allowedTransports: ["pull"], defaultTransport: "auto" },
       };
     },
-    connectTransport: async () => fakeTransport(connectCalls++ === 0 ? initial : replacement),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(connectCalls++ === 0 ? initial : replacement),
   });
 
   const running = worker.start();
@@ -3080,11 +3136,12 @@ test("RuntimeWorker returns a second policy signal without another rediscovery",
         policy: { allowedTransports: ["pull"], defaultTransport: "auto" },
       };
     },
-    connectTransport: async () => fakeTransport(connectCalls++ === 0 ? initial : replacement),
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(connectCalls++ === 0 ? initial : replacement),
   });
 
-  let terminalError;
-  await assert.rejects(worker.start(), (error) => {
+  let terminalError: Error | undefined;
+  await assert.rejects(worker.start(), (error: unknown) => {
+    assert.ok(error instanceof Error);
     terminalError = error;
     assert.equal(error.name, "RuntimePolicyRecoveryError");
     assert.equal(
@@ -3096,7 +3153,12 @@ test("RuntimeWorker returns a second policy signal without another rediscovery",
   assert.equal(discoveryCalls, 2);
   assert.equal(connectCalls, 2);
   let laterOperationCalls = 0;
-  await assert.rejects(worker.policyOperation(async () => {
+  const policyOperation = (
+    worker as unknown as {
+      policyOperation<T>(operation: () => Promise<T>): Promise<T>;
+    }
+  ).policyOperation.bind(worker);
+  await assert.rejects(policyOperation(async () => {
     laterOperationCalls += 1;
   }), (error) => error === terminalError);
   assert.equal(laterOperationCalls, 0, "terminal policy failure allowed another transport call");
@@ -3120,7 +3182,7 @@ test("RuntimeWorker policy recovery fails closed without canonical discovery or 
       allowUnsafeMemoryStore: true,
       heartbeatIntervalMs: 10_000,
       handler: async () => ({ output: {} }),
-    }, { connectTransport: async () => fakeTransport(client) });
+    }, { connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client) });
     await assert.rejects(worker.start(), /canonical rediscovery requires platformURL/);
   });
 
@@ -3153,7 +3215,7 @@ test("RuntimeWorker policy recovery fails closed without canonical discovery or 
             : { allowedTransports: ["ws"], defaultTransport: "auto" },
         };
       },
-      connectTransport: async () => {
+      connectTransport: async (): Promise<RuntimeWorkerTransport> => {
         connectCalls += 1;
         return fakeTransport(initial);
       },
@@ -3167,8 +3229,12 @@ test("RuntimeWorker policy recovery fails closed without canonical discovery or 
 test("RuntimeWorker rediscovers once on an established WebSocket 1008 policy close", async () => {
   let discoveryCalls = 0;
   let connectCalls = 0;
-  const sockets = [];
-  const reasons = [];
+  const sockets: Array<{
+    callbacks: RuntimeWorkerCallbacks;
+    done: Deferred<void>;
+    duplex: RuntimeWorkerDuplex;
+  }> = [];
+  const reasons: Array<RuntimeFallbackReason | undefined> = [];
   const worker = new RuntimeWorker({
     platformURL: "https://openlinker.example",
     transport: "auto",
@@ -3188,7 +3254,7 @@ test("RuntimeWorker rediscovers once on an established WebSocket 1008 policy clo
         policy: { allowedTransports: ["ws"], defaultTransport: "auto" },
       };
     },
-    connectTransport: async () => {
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => {
       connectCalls += 1;
       return {
         http: fakeClient(),
@@ -3206,8 +3272,11 @@ test("RuntimeWorker rediscovers once on an established WebSocket 1008 policy clo
 
   const running = worker.start();
   await waitFor(() => sockets.length === 1 && worker.transportState === "ws_active");
-  sockets[0].callbacks.onClose({ code: 1008, reason: "RUNTIME_POLICY_CHANGED", clean: true });
-  sockets[0].done.resolve();
+  const firstSocket = sockets[0];
+  assert.ok(firstSocket);
+  assert.ok(firstSocket.callbacks.onClose);
+  firstSocket.callbacks.onClose({ code: 1008, reason: "RUNTIME_POLICY_CHANGED", clean: true });
+  firstSocket.done.resolve();
   await waitFor(() => sockets.length === 2 && worker.transportState === "ws_active");
   assert.equal(discoveryCalls, 2);
   assert.equal(connectCalls, 2);
@@ -3238,13 +3307,14 @@ test("RuntimeWorker retains a WebSocket policy close delivered before dial settl
         policy: { allowedTransports: ["ws"], defaultTransport: "auto" },
       };
     },
-    connectTransport: async () => ({
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
       http: fakeClient(),
       async dialWebSocket(_hello, callbacks) {
         dialCalls += 1;
         const done = deferred();
         const duplex = fakeDuplex(done.promise);
         if (dialCalls === 1) {
+          assert.ok(callbacks.onClose);
           callbacks.onClose({ code: 1008, reason: "RUNTIME_POLICY_CHANGED", clean: true });
           done.resolve();
         }
@@ -3261,7 +3331,7 @@ test("RuntimeWorker retains a WebSocket policy close delivered before dial settl
   await running;
 });
 
-function fakeTransport(http) {
+function fakeTransport(http: RuntimeWorkerClient): RuntimeWorkerTransport {
   return {
     http,
     async dialWebSocket() {
@@ -3271,7 +3341,7 @@ function fakeTransport(http) {
   };
 }
 
-function fakeDuplex(done) {
+function fakeDuplex(done: Promise<void>): RuntimeWorkerDuplex {
   return {
     ready: ready(),
     done,
@@ -3325,8 +3395,10 @@ function fakeDuplex(done) {
   };
 }
 
-function fakeClient(overrides = {}) {
-  const base = {
+function fakeClient(
+  overrides: Partial<RuntimeWorkerClient> = {},
+): RuntimeWorkerClient {
+  const base: RuntimeWorkerClient = {
     async createRuntimeSession() { return ready(); },
     async heartbeatRuntimeSession() { return ready(); },
     async drainRuntimeSession(_runtimeSessionId, request) { return request; },
@@ -3406,7 +3478,7 @@ function fakeClient(overrides = {}) {
   return Object.assign(base, overrides);
 }
 
-function ready() {
+function ready(): RuntimeReadyPayload {
   return {
     coreInstanceId: ids.core,
     attachmentId: ids.attachment,
@@ -3425,7 +3497,10 @@ function sessionConflict() {
   });
 }
 
-function assignmentFor(hello, identityOverrides = {}) {
+function assignmentFor(
+  hello: Pick<RuntimeHelloPayload, "workerId" | "runtimeSessionId">,
+  identityOverrides: Partial<RuntimeAttemptIdentity> = {},
+): RuntimeRunAssignedPayload {
   const now = Date.now();
   return {
     attemptIdentity: {
@@ -3450,27 +3525,32 @@ function assignmentFor(hello, identityOverrides = {}) {
   };
 }
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((accept) => {
-    resolve = accept;
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: DeferredResolve<T>;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept as unknown as DeferredResolve<T>;
   });
   return { promise, resolve };
 }
 
-function delay(milliseconds, signal) {
-  return new Promise((resolve, reject) => {
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, milliseconds);
     const abort = () => {
       clearTimeout(timer);
-      reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
+      reject(signal?.reason instanceof Error
+        ? signal.reason
+        : new DOMException("Aborted", "AbortError"));
     };
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
   });
 }
 
-async function waitFor(predicate, timeoutMs = 2_000) {
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 2_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;

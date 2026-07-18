@@ -8,6 +8,12 @@ import {
   FileRuntimeStore,
   RuntimeStoreError,
 } from "../dist/runtime.js";
+import type {
+  RuntimeRunAssignedPayload,
+  RuntimeRunResultPayload,
+  RuntimeWorkerIdentity,
+} from "../dist/runtime.js";
+import type { JsonObject } from "../dist/index.js";
 
 const ids = {
   node: "11111111-1111-4111-8111-111111111111",
@@ -33,7 +39,7 @@ test("FileRuntimeStore encrypts durable work and advances stable Session identit
     results: 0,
     empty: false,
   });
-  assert.equal((await store.getAssignment(ids.attempt)).state, "received");
+  assert.equal((await store.getAssignment(ids.attempt))?.state, "received");
   await store.transitionAssignment(ids.attempt, "ack_sent");
   await store.transitionAssignment(ids.attempt, "confirmed", {
     leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -50,7 +56,7 @@ test("FileRuntimeStore encrypts durable work and advances stable Session identit
   await store.ackEvent(ids.attempt, event.clientEventId, event.clientEventSeq);
   assert.equal((await store.listPendingEvents(ids.attempt)).length, 0);
 
-  const result = {
+  const result: RuntimeRunResultPayload = {
     attemptIdentity: assignment.attemptIdentity,
     resultId: ids.result,
     durationMs: 20,
@@ -147,7 +153,9 @@ test("FileRuntimeStore holds an exclusive process lock and fails closed on corru
 
   const statePath = join(dataDir, "runtime-store.enc");
   const bytes = await readFile(statePath);
-  bytes[bytes.length - 1] ^= 0xff;
+  const finalByteIndex = bytes.length - 1;
+  assert.ok(finalByteIndex >= 0);
+  bytes[finalByteIndex] = (bytes[finalByteIndex] ?? 0) ^ 0xff;
   await writeFile(statePath, bytes, { mode: 0o600 });
   const corrupt = new FileRuntimeStore(dataDir);
   await assert.rejects(corrupt.open(), (error) => {
@@ -179,7 +187,10 @@ test("FileRuntimeStore reports capacity before acknowledging oversized durable w
   await store.close();
 });
 
-function assigned(identity, input) {
+function assigned(
+  identity: RuntimeWorkerIdentity,
+  input: JsonObject,
+): RuntimeRunAssignedPayload {
   const now = Date.now();
   return {
     attemptIdentity: {
