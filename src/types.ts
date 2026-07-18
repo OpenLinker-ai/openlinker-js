@@ -272,6 +272,15 @@ export interface ListRunEventsResponse {
   meta: RunEventPageMeta;
 }
 
+export interface RunChildResponse {
+  child_run_id: string;
+  status: string;
+}
+
+export interface ListRunChildrenResponse {
+  items: RunChildResponse[];
+}
+
 export interface RunArtifactResponse {
   id: string;
   run_id: string;

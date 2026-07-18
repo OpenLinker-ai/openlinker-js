@@ -20,6 +20,7 @@ import type {
   JsonValue,
   ListAgentsParams,
   ListItemsResponse,
+  ListRunChildrenResponse,
   ListRunEventsParams,
   ListRunEventsResponse,
   MarketListResponse,
@@ -278,6 +279,18 @@ export class OpenLinkerClient {
       undefined,
       options,
       query,
+    );
+  }
+
+  async listRunChildren(
+    runId: string,
+    options: RequestOptions = {},
+  ): Promise<ListRunChildrenResponse> {
+    return this.request(
+      "GET",
+      `/runs/${encodeURIComponent(runId)}/children`,
+      undefined,
+      options,
     );
   }
 

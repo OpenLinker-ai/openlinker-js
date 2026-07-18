@@ -643,6 +643,7 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
   });
   await client.getRun("run helper");
   await client.listRunEvents("run helper", { afterSequence: 2, limit: 10 });
+  await client.listRunChildren("run helper");
   await client.listRunArtifacts("run helper");
   await client.listRunMessages("run helper");
 
@@ -652,6 +653,7 @@ test("endpoint helpers encode paths, queries, and async headers", async () => {
     "https://core.example.com/api/v1/runs",
     "https://core.example.com/api/v1/runs/run%20helper",
     "https://core.example.com/api/v1/runs/run%20helper/events?after_sequence=2&limit=10",
+    "https://core.example.com/api/v1/runs/run%20helper/children",
     "https://core.example.com/api/v1/runs/run%20helper/artifacts",
     "https://core.example.com/api/v1/runs/run%20helper/messages",
   ]);
