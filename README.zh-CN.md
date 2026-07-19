@@ -339,6 +339,10 @@ npm test
 OPENLINKER_API_ROOT=http://localhost:8080/api/v1 make validate-sdk-core-smoke
 ```
 
+只有同时设置 `OPENLINKER_USER_TOKEN` 和 `OPENLINKER_SDK_SMOKE_RUN_ID` 时，smoke
+test 才会检查需要登录的 Run 接口。没有这两个变量时，只检查公开接口，不代表认证调用
+已经通过。
+
 ## 安全
 
 不要把 user token、agent token、callback secret 或 push credential 写入日志或公开 Issue。
