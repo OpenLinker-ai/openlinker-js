@@ -29,6 +29,10 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Changed
 
+- Breaking: `FileRuntimeStore` now rejects a symbolic-link Runtime data
+  directory and symbolic-link key or state files. Existing deployments that
+  use symlinks for these private paths must point `dataDir` at the real
+  directory before upgrading.
 - Breaking: Runtime HTTP and WebSocket endpoints use the neutral
   `/api/v1/agent-runtime/*` namespace. Public Runtime API names and the contract
   filename are neutral as well; protocol negotiation remains an internal wire
