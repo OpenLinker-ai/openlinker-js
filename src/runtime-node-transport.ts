@@ -11,6 +11,11 @@ import {
   type RuntimeWebSocketSessionOptions,
 } from "./runtime-websocket.js";
 import type { RuntimeHelloPayload, RuntimeReadyPayload } from "./runtime-types.js";
+import {
+  RuntimeCredentialManager,
+  type RuntimeTLSMaterial,
+} from "./runtime-credential-manager.js";
+import { assertRuntimeUUID } from "./runtime-codec.js";
 
 const discoveryPath = "/.well-known/openlinker.json";
 const discoveryMaxBytes = 64 * 1024;
@@ -18,6 +23,7 @@ const runtimeWebSocketPath = "/api/v1/agent-runtime/ws";
 const workerAgent = "openlinker-js/runtime-worker";
 
 export const RuntimeFallbackReasonHeader = "OpenLinker-Runtime-Fallback-Reason" as const;
+export const RuntimeNodeIDHeader = "OpenLinker-Runtime-Node" as const;
 export type RuntimeFallbackReason =
   | "explicit"
   | "websocket_unavailable"
@@ -25,9 +31,9 @@ export type RuntimeFallbackReason =
   | "recovery";
 
 export interface RuntimeMTLSConfig {
-  certFile: string;
-  keyFile: string;
-  caFile: string;
+  certFile?: string | undefined;
+  keyFile?: string | undefined;
+  caFile?: string | undefined;
   serverName?: string | undefined;
 }
 
@@ -52,6 +58,9 @@ export interface RuntimeTransportPolicy {
 export interface RuntimeDiscoveryConnection {
   runtimeURL: string;
   policy: RuntimeTransportPolicy;
+  mtlsRequired?: boolean | undefined;
+  credentialEndpoint?: string | undefined;
+  trustBundleEndpoint?: string | undefined;
 }
 
 export interface RuntimeTransportSelection {
@@ -62,7 +71,11 @@ export interface RuntimeTransportSelection {
 export interface NodeRuntimeTransportOptions {
   runtimeURL: string;
   agentToken: string;
-  mtls: RuntimeMTLSConfig;
+  nodeId: string;
+  mtls?: RuntimeMTLSConfig | undefined;
+  mtlsRequired?: boolean | undefined;
+  tlsMaterial?: RuntimeTLSMaterial | undefined;
+  credentialManager?: RuntimeCredentialManager | undefined;
 }
 
 export interface RuntimeWebSocketConnection {
@@ -70,13 +83,6 @@ export interface RuntimeWebSocketConnection {
   readonly ready: RuntimeReadyPayload;
   readonly done: Promise<void>;
   close(code?: number, reason?: string): void;
-}
-
-interface RuntimeTLSMaterial {
-  cert: Buffer;
-  key: Buffer;
-  ca: Buffer;
-  serverName?: string | undefined;
 }
 
 /**
@@ -141,8 +147,11 @@ export class NodeRuntimeTransport {
   private constructor(
     runtimeURL: string,
     private readonly agentToken: string,
-    private readonly tls: RuntimeTLSMaterial,
-    private readonly dispatcher: Agent,
+    private readonly nodeId: string,
+    private tls: RuntimeTLSMaterial | undefined,
+    private dispatcher: Agent,
+    private readonly mtlsRequired: boolean,
+    private readonly credentials?: RuntimeCredentialManager,
   ) {
     this.runtimeURL = runtimeURL;
     this.client = new OpenLinkerRuntime({
@@ -150,33 +159,44 @@ export class NodeRuntimeTransport {
       agentToken,
       sdkAgent: workerAgent,
       fetch: async (input, init) => {
-        return await undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+        const headers = new Headers(init?.headers);
+        headers.set(RuntimeNodeIDHeader, this.nodeId);
+        const execute = async () => await undiciFetch(input as Parameters<typeof undiciFetch>[0], {
           ...(init as Parameters<typeof undiciFetch>[1]),
-          dispatcher,
+          headers,
+          dispatcher: this.dispatcher,
           redirect: "error",
         }) as unknown as Response;
+        try {
+          return await execute();
+        } catch (error) {
+          if (!this.credentials || !runtimeCredentialTLSFailure(error)) throw error;
+          await this.credentials.ensure(true);
+          if (this.mtlsRequired) await this.updateTLS(this.credentials.material(this.tls?.serverName));
+          return await execute();
+        }
       },
     });
   }
 
   static async connect(options: NodeRuntimeTransportOptions): Promise<NodeRuntimeTransport> {
-    const runtimeURL = validateRuntimeURL(options.runtimeURL);
+    const mtlsRequired = options.mtlsRequired ?? true;
+    const runtimeURL = validateRuntimeURL(options.runtimeURL, !mtlsRequired);
     if (!options.agentToken.trim()) throw new Error("Agent Token is required");
-    const tls = await loadTLSMaterial(options.mtls);
-    const dispatcher = new Agent({
-      connect: {
-        cert: tls.cert,
-        key: tls.key,
-        ca: tls.ca,
-        servername: tls.serverName,
-        rejectUnauthorized: true,
-        minVersion: "TLSv1.3",
-      },
-      headersTimeout: 35_000,
-      bodyTimeout: 0,
-      keepAliveTimeout: 90_000,
-    });
-    return new NodeRuntimeTransport(runtimeURL, options.agentToken, tls, dispatcher);
+    const nodeId = assertRuntimeUUID(options.nodeId, "Runtime Node ID");
+    const tls = options.tlsMaterial ?? (mtlsRequired ? await loadTLSMaterial(options.mtls ?? {}) : undefined);
+    const dispatcher = createDispatcher(tls, mtlsRequired);
+    return new NodeRuntimeTransport(
+      runtimeURL, options.agentToken, nodeId, tls, dispatcher, mtlsRequired, options.credentialManager,
+    );
+  }
+
+  async updateTLS(tls: RuntimeTLSMaterial): Promise<void> {
+    const replacement = createDispatcher(tls, true);
+    const previous = this.dispatcher;
+    this.tls = tls;
+    this.dispatcher = replacement;
+    await previous.close();
   }
 
   async dialWebSocket(
@@ -186,30 +206,47 @@ export class NodeRuntimeTransport {
     fallbackReason?: RuntimeFallbackReason,
   ): Promise<RuntimeWebSocketConnection> {
     const url = new URL(this.runtimeURL);
-    url.protocol = "wss:";
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.pathname = runtimeWebSocketPath;
     const socketOptions: ClientOptions & ConnectionOptions = {
       headers: {
         authorization: `Bearer ${this.agentToken}`,
         "x-openlinker-sdk": workerAgent,
+        [RuntimeNodeIDHeader]: this.nodeId,
       },
-      cert: this.tls.cert,
-      key: this.tls.key,
-      ca: this.tls.ca,
-      servername: this.tls.serverName,
-      rejectUnauthorized: true,
-      minVersion: "TLSv1.3",
       followRedirects: false,
       handshakeTimeout: 10_000,
       maxPayload: 4 * 1024 * 1024,
       perMessageDeflate: false,
     };
+    if (this.mtlsRequired && this.tls) {
+      socketOptions.cert = this.tls.cert;
+      socketOptions.key = this.tls.key;
+      socketOptions.ca = this.tls.ca;
+      socketOptions.servername = this.tls.serverName;
+      socketOptions.rejectUnauthorized = true;
+      socketOptions.minVersion = "TLSv1.3";
+    }
     if (fallbackReason) {
       assertRuntimeFallbackReason(fallbackReason);
       socketOptions.headers![RuntimeFallbackReasonHeader] = fallbackReason;
     }
-    const socket = new WebSocket(url, [], socketOptions);
-    await waitForSocketOpen(socket, signal);
+    let socket = new WebSocket(url, [], socketOptions);
+    try {
+      await waitForSocketOpen(socket, signal);
+    } catch (error) {
+      socket.terminate();
+      if (!this.credentials || !this.mtlsRequired || !runtimeCredentialTLSFailure(error)) throw error;
+      await this.credentials.ensure(true, signal);
+      const material = this.credentials.material(this.tls?.serverName);
+      await this.updateTLS(material);
+      socketOptions.cert = material.cert;
+      socketOptions.key = material.key;
+      socketOptions.ca = material.ca;
+      socketOptions.servername = material.serverName;
+      socket = new WebSocket(url, [], socketOptions);
+      await waitForSocketOpen(socket, signal);
+    }
     let resolveDone: (() => void) | undefined;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
@@ -244,8 +281,8 @@ export function validatePlatformURL(raw: string): string {
   return validateOrigin(raw, true, "OpenLinker address");
 }
 
-export function validateRuntimeURL(raw: string): string {
-  return validateOrigin(raw, false, "Runtime connection address");
+export function validateRuntimeURL(raw: string, allowLoopbackHTTP = false): string {
+  return validateOrigin(raw, allowLoopbackHTTP, "Runtime connection address");
 }
 
 async function loadTLSMaterial(config: RuntimeMTLSConfig): Promise<RuntimeTLSMaterial> {
@@ -268,6 +305,22 @@ async function loadTLSMaterial(config: RuntimeMTLSConfig): Promise<RuntimeTLSMat
     ca,
     ...(config.serverName?.trim() ? { serverName: config.serverName.trim() } : {}),
   };
+}
+
+function createDispatcher(tls: RuntimeTLSMaterial | undefined, mtlsRequired: boolean): Agent {
+  return new Agent({
+    connect: mtlsRequired && tls ? {
+      cert: tls.cert,
+      key: tls.key,
+      ca: tls.ca,
+      servername: tls.serverName,
+      rejectUnauthorized: true,
+      minVersion: "TLSv1.3",
+    } : { rejectUnauthorized: true, minVersion: "TLSv1.2" },
+    headersTimeout: 35_000,
+    bodyTimeout: 0,
+    keepAliveTimeout: 90_000,
+  });
 }
 
 function validateOrigin(raw: string, allowLoopbackHTTP: boolean, label: string): string {
@@ -293,6 +346,13 @@ function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
   return normalized === "localhost" || normalized === "::1" ||
     /^127(?:\.[0-9]{1,3}){3}$/.test(normalized);
+}
+
+function runtimeCredentialTLSFailure(error: unknown): boolean {
+  const message = (error instanceof Error ? `${error.name}: ${error.message}` : String(error)).toLowerCase();
+  return ["tls", "ssl", "x509", "certificate", "unknown authority"].some((marker) =>
+    message.includes(marker)
+  );
 }
 
 async function readBoundedBody(response: Response, maximum: number): Promise<Uint8Array> {
@@ -322,12 +382,21 @@ async function readBoundedBody(response: Response, maximum: number): Promise<Uin
 export function decodeRuntimeDiscoveryManifest(value: unknown): RuntimeDiscoveryConnection {
   if (!isObject(value) || !isObject(value.base_urls) || !isObject(value.runtime) ||
     typeof value.base_urls.runtime !== "string" || value.runtime.enabled !== true ||
-    value.runtime.mtls_required !== true) {
-    throw new Error("OpenLinker connection information does not provide the required mTLS Runtime address");
+    typeof value.runtime.mtls_required !== "boolean") {
+    throw new Error("OpenLinker connection information does not provide a Runtime address");
   }
+  const mtlsRequired = value.runtime.mtls_required;
+  const credentialEndpoint = typeof value.runtime.credential_endpoint === "string"
+    ? value.runtime.credential_endpoint
+    : "";
   return {
-    runtimeURL: validateRuntimeURL(value.base_urls.runtime),
+    runtimeURL: validateRuntimeURL(value.base_urls.runtime, !mtlsRequired),
     policy: decodeRuntimeTransportPolicy(value.runtime),
+    mtlsRequired,
+    credentialEndpoint,
+    ...(typeof value.runtime.trust_bundle_endpoint === "string"
+      ? { trustBundleEndpoint: value.runtime.trust_bundle_endpoint }
+      : {}),
   };
 }
 

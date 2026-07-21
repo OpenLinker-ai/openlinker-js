@@ -53,6 +53,7 @@ import {
   type RuntimeRunResultPayload,
   type RuntimeRunSummary,
 } from "./runtime-types.js";
+import { RuntimeCredentialManager } from "./runtime-credential-manager.js";
 import {
   RuntimeWebSocketError,
   type RuntimeWebSocketSessionOptions,
@@ -137,9 +138,9 @@ export interface RuntimeWorkerConfig {
   platformURL?: string | undefined;
   runtimeURL?: string | undefined;
   transport?: RuntimeTransportMode | undefined;
-  nodeId: string;
+  nodeId?: string | undefined;
   nodeVersion?: string | undefined;
-  agentId: string;
+  agentId?: string | undefined;
   agentToken: string;
   mtls?: RuntimeMTLSConfig | undefined;
   store?: RuntimeStore | undefined;
@@ -439,6 +440,8 @@ export class RuntimeWorker {
   private policyLastObserved = -1;
   private policyLastRecovery: Promise<void> | undefined;
   private policyTerminalError: RuntimePolicyRecoveryError | undefined;
+  private credentialManager: RuntimeCredentialManager | undefined;
+  private runtimeMTLSRequired = true;
 
   constructor(
     config: RuntimeWorkerConfig,
@@ -664,20 +667,73 @@ export class RuntimeWorker {
     await this.store.open();
     this.identityValue = await this.store.beginSession();
 
-    let runtimeURL: string;
-    if (config.runtimeURL) {
-      runtimeURL = validateRuntimeURL(config.runtimeURL);
+    const explicitMTLS = Boolean(config.mtls?.certFile && config.mtls.keyFile && config.mtls.caFile);
+    let connection: RuntimeDiscoveryConnection;
+    if (config.runtimeURL && explicitMTLS) {
+      connection = {
+        runtimeURL: validateRuntimeURL(config.runtimeURL),
+        policy: { allowedTransports: ["ws", "pull"], defaultTransport: "auto" },
+        mtlsRequired: true,
+      };
     } else {
-      const connection = await this.dependencies.discoverRuntimeConnection(config.platformURL!, signal);
-      runtimeURL = validateRuntimeURL(connection.runtimeURL);
+      if (!config.platformURL) {
+        throw new Error("automatic Runtime credentials require platformURL for discovery");
+      }
+      connection = await this.dependencies.discoverRuntimeConnection(config.platformURL, signal);
+      if (config.runtimeURL) connection = { ...connection, runtimeURL: config.runtimeURL };
       this.applyTransportPolicy(connection.policy);
+    }
+    const mtlsRequired = connection.mtlsRequired ?? true;
+    this.runtimeMTLSRequired = mtlsRequired;
+    const runtimeURL = validateRuntimeURL(connection.runtimeURL, !mtlsRequired);
+    let tlsMaterial;
+    if (!mtlsRequired) {
+      if (!config.nodeId || !config.agentId) {
+        throw new Error("RuntimeWorker nodeId and agentId are required for token-only Runtime transport");
+      }
+    } else if (!explicitMTLS) {
+      if (!config.dataDir?.trim()) {
+        throw new Error("automatic Runtime credentials require dataDir");
+      }
+      const platformOrigin = config.platformURL ? validatePlatformURL(config.platformURL) : "";
+      const manager = await RuntimeCredentialManager.open({
+        dataDir: config.dataDir,
+        credentialEndpoint: connection.credentialEndpoint || `${platformOrigin}/api/v1/runtime-credentials`,
+        agentToken: config.agentToken,
+        nodeId: config.nodeId || undefined,
+        agentId: config.agentId || undefined,
+        nodeVersion: config.nodeVersion,
+        capacity: config.capacity,
+        logger: config.logger,
+      });
+      await manager.ensure(false, signal);
+      const identity = manager.identity();
+      this.config = Object.freeze({ ...this.config, ...identity });
+      this.credentialManager = manager;
+      if (mtlsRequired) tlsMaterial = manager.material(config.mtls?.serverName);
     }
     const effectiveConfig = this.config;
     this.transport = await this.dependencies.connectTransport({
       runtimeURL,
       agentToken: effectiveConfig.agentToken,
-      mtls: effectiveConfig.mtls!,
+      nodeId: effectiveConfig.nodeId,
+      mtls: effectiveConfig.mtls,
+      mtlsRequired,
+      ...(tlsMaterial ? { tlsMaterial } : {}),
+      ...(this.credentialManager ? { credentialManager: this.credentialManager } : {}),
     });
+    if (this.credentialManager) {
+      const transport = this.transport;
+      this.credentialManager.onUpdate(async (material) => {
+        if (mtlsRequired && transport instanceof NodeRuntimeTransport) {
+          await transport.updateTLS({
+            ...material,
+            ...(config.mtls?.serverName ? { serverName: config.mtls.serverName } : {}),
+          });
+        }
+      });
+      this.credentialManager.start(this.runtimeAbort.signal);
+    }
     const observedRevision = this.policyRevision;
     try {
       await this.startConfiguredTransport(false, signal);
@@ -1968,11 +2024,23 @@ export class RuntimeWorker {
       this.config.platformURL,
       signal ?? this.runtimeAbort.signal,
     );
+    const mtlsRequired = connection.mtlsRequired ?? true;
+    if (mtlsRequired !== this.runtimeMTLSRequired) {
+      throw new RuntimePolicyRecoveryError(new Error(
+        "Runtime mTLS requirement changed; restart the Worker to apply the new security mode",
+      ));
+    }
     this.applyTransportPolicy(connection.policy);
     const replacement = await this.dependencies.connectTransport({
-      runtimeURL: validateRuntimeURL(connection.runtimeURL),
+      runtimeURL: validateRuntimeURL(connection.runtimeURL, connection.mtlsRequired === false),
       agentToken: this.config.agentToken,
-      mtls: this.config.mtls!,
+      nodeId: this.config.nodeId,
+      mtls: this.config.mtls,
+      mtlsRequired,
+      ...(this.credentialManager && connection.mtlsRequired !== false
+        ? { tlsMaterial: this.credentialManager.material(this.config.mtls?.serverName) }
+        : {}),
+      ...(this.credentialManager ? { credentialManager: this.credentialManager } : {}),
     });
     const previous = this.transport;
     const previousMode = this.activeMode;
@@ -2077,6 +2145,8 @@ export class RuntimeWorker {
 }
 
 interface RequiredTimingConfig {
+  nodeId: string;
+  agentId: string;
   transport: RuntimeTransportMode;
   nodeVersion: string;
   capacity: number;
@@ -2095,8 +2165,8 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
   if (!(["auto", "ws", "pull"] as string[]).includes(transport)) {
     throw new Error("RuntimeWorker transport must be auto, ws, or pull");
   }
-  if (!isUUID(config.nodeId)) throw new Error("RuntimeWorker nodeId must be a non-zero lowercase UUID");
-  if (!isUUID(config.agentId)) throw new Error("RuntimeWorker agentId must be a non-zero lowercase UUID");
+  if (config.nodeId && !isUUID(config.nodeId)) throw new Error("RuntimeWorker nodeId must be a non-zero lowercase UUID");
+  if (config.agentId && !isUUID(config.agentId)) throw new Error("RuntimeWorker agentId must be a non-zero lowercase UUID");
   if (!config.agentToken?.trim()) throw new Error("RuntimeWorker requires Agent Token");
   if (typeof config.handler !== "function") throw new Error("RuntimeWorker requires handler");
   if (!config.runtimeURL && !config.platformURL) throw new Error("RuntimeWorker requires platformURL or runtimeURL");
@@ -2106,8 +2176,15 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
   if (config.store instanceof MemoryRuntimeStore && !config.allowUnsafeMemoryStore) {
     throw new Error("MemoryRuntimeStore requires allowUnsafeMemoryStore: true");
   }
-  if (!config.mtls?.certFile || !config.mtls.keyFile || !config.mtls.caFile) {
-    throw new Error("RuntimeWorker requires mTLS cert, key, and CA files");
+  const mtlsFields = [config.mtls?.certFile, config.mtls?.keyFile, config.mtls?.caFile].filter(Boolean).length;
+  if (mtlsFields !== 0 && mtlsFields !== 3) {
+    throw new Error("RuntimeWorker mTLS files must be configured together");
+  }
+  if (mtlsFields === 3 && (!config.nodeId || !config.agentId)) {
+    throw new Error("RuntimeWorker nodeId and agentId are required with explicit mTLS files");
+  }
+  if (mtlsFields === 0 && !config.platformURL) {
+    throw new Error("automatic Runtime credentials require platformURL");
   }
   const capacity = boundedInteger(config.capacity ?? 1, 1, RuntimeMaxNodeCapacity, "capacity");
   const claimWaitMs = boundedInteger(config.claimWaitMs ?? 25_000, 1_000, 30_000, "claimWaitMs");
@@ -2129,6 +2206,8 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
   );
   return {
     ...config,
+    nodeId: config.nodeId?.trim() ?? "",
+    agentId: config.agentId?.trim() ?? "",
     transport,
     nodeVersion: config.nodeVersion?.trim() || "openlinker-js/runtime-worker",
     capacity,

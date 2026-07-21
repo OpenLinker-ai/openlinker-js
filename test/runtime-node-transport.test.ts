@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import {
   OpenLinkerError,
+  NodeRuntimeTransport,
+  RuntimeContractDigest,
+  RuntimeNodeIDHeader,
+  RuntimeRequiredFeatures,
   RuntimeWebSocketError,
   decodeRuntimeDiscoveryManifest,
+  discoverRuntimeConnection,
   discoverRuntimeURL,
   isRuntimePolicyRecoverySignal,
   resolveRuntimeFallbackReason,
@@ -14,6 +21,48 @@ import {
   validatePlatformURL,
   validateRuntimeURL,
 } from "../dist/runtime.js";
+
+test("token-only Node transport pins the configured Node selector on HTTP requests", async (t) => {
+  const nodeId = "11111111-1111-4111-8111-111111111111";
+  const server = createServer((request, response) => {
+    assert.equal(request.headers[RuntimeNodeIDHeader.toLowerCase()], nodeId);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      core_instance_id: "22222222-2222-4222-8222-222222222222",
+      attachment_id: "33333333-3333-4333-8333-333333333333",
+      features: [...RuntimeRequiredFeatures],
+      offer_ttl_seconds: 30,
+      lease_ttl_seconds: 60,
+      database_time: new Date().toISOString(),
+    }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const transport = await NodeRuntimeTransport.connect({
+    runtimeURL: `http://127.0.0.1:${address.port}`,
+    agentToken: "ol_agent_token_only",
+    nodeId,
+    mtlsRequired: false,
+  });
+  t.after(async () => transport.close());
+
+  await transport.client.createRuntimeSession({
+    nodeId,
+    agentId: "44444444-4444-4444-8444-444444444444",
+    workerId: "55555555-5555-4555-8555-555555555555",
+    runtimeSessionId: "66666666-6666-4666-8666-666666666666",
+    sessionEpoch: 1,
+    nodeVersion: "openlinker-js/test",
+    capacity: 1,
+    features: [...RuntimeRequiredFeatures],
+    contractDigest: RuntimeContractDigest,
+  }, {
+    headers: { [RuntimeNodeIDHeader]: "ffffffff-ffff-4fff-8fff-ffffffffffff" },
+  });
+});
 
 test("Runtime discovery policy fixtures stay consistent with Core transport semantics", async (t) => {
   const fixture = JSON.parse(await readFile(
@@ -141,7 +190,7 @@ test("Runtime discovery is credential-free, bounded, and returns a neutral HTTPS
   assert.equal(headers.has("cookie"), false);
 });
 
-test("Runtime origins reject credentials, paths, redirects, and non-mTLS manifests", async () => {
+test("Runtime origins reject unsafe input and accept an explicit token-only policy", async () => {
   assert.equal(validateRuntimeURL("https://runtime.example"), "https://runtime.example");
   assert.equal(validatePlatformURL("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
   for (const invalid of [
@@ -157,10 +206,12 @@ test("Runtime origins reject credentials, paths, redirects, and non-mTLS manifes
   await assert.rejects(discoverRuntimeURL("https://openlinker.example", {
     fetch: async () => new Response("", { status: 302, headers: { location: "https://other.example" } }),
   }), /HTTP 302/);
-  await assert.rejects(discoverRuntimeURL("https://openlinker.example", {
+  const tokenOnly = await discoverRuntimeConnection("https://openlinker.example", {
     fetch: async () => new Response(JSON.stringify({
       base_urls: { runtime: "https://runtime.example" },
       runtime: { enabled: true, mtls_required: false },
     })),
-  }), /required mTLS Runtime address/);
+  });
+  assert.equal(tokenOnly.mtlsRequired, false);
+  assert.equal(tokenOnly.runtimeURL, "https://runtime.example");
 });
