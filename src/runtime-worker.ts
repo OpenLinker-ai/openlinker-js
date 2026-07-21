@@ -441,6 +441,7 @@ export class RuntimeWorker {
   private policyLastRecovery: Promise<void> | undefined;
   private policyTerminalError: RuntimePolicyRecoveryError | undefined;
   private credentialManager: RuntimeCredentialManager | undefined;
+  private runtimeMTLSRequired = true;
 
   constructor(
     config: RuntimeWorkerConfig,
@@ -683,9 +684,14 @@ export class RuntimeWorker {
       this.applyTransportPolicy(connection.policy);
     }
     const mtlsRequired = connection.mtlsRequired ?? true;
+    this.runtimeMTLSRequired = mtlsRequired;
     const runtimeURL = validateRuntimeURL(connection.runtimeURL, !mtlsRequired);
     let tlsMaterial;
-    if (!explicitMTLS || !mtlsRequired) {
+    if (!mtlsRequired) {
+      if (!config.nodeId || !config.agentId) {
+        throw new Error("RuntimeWorker nodeId and agentId are required for token-only Runtime transport");
+      }
+    } else if (!explicitMTLS) {
       if (!config.dataDir?.trim()) {
         throw new Error("automatic Runtime credentials require dataDir");
       }
@@ -710,6 +716,7 @@ export class RuntimeWorker {
     this.transport = await this.dependencies.connectTransport({
       runtimeURL,
       agentToken: effectiveConfig.agentToken,
+      nodeId: effectiveConfig.nodeId,
       mtls: effectiveConfig.mtls,
       mtlsRequired,
       ...(tlsMaterial ? { tlsMaterial } : {}),
@@ -2017,12 +2024,19 @@ export class RuntimeWorker {
       this.config.platformURL,
       signal ?? this.runtimeAbort.signal,
     );
+    const mtlsRequired = connection.mtlsRequired ?? true;
+    if (mtlsRequired !== this.runtimeMTLSRequired) {
+      throw new RuntimePolicyRecoveryError(new Error(
+        "Runtime mTLS requirement changed; restart the Worker to apply the new security mode",
+      ));
+    }
     this.applyTransportPolicy(connection.policy);
     const replacement = await this.dependencies.connectTransport({
       runtimeURL: validateRuntimeURL(connection.runtimeURL, connection.mtlsRequired === false),
       agentToken: this.config.agentToken,
+      nodeId: this.config.nodeId,
       mtls: this.config.mtls,
-      mtlsRequired: connection.mtlsRequired ?? true,
+      mtlsRequired,
       ...(this.credentialManager && connection.mtlsRequired !== false
         ? { tlsMaterial: this.credentialManager.material(this.config.mtls?.serverName) }
         : {}),

@@ -14,6 +14,7 @@ import {
   RuntimeWorker,
 } from "../dist/runtime.js";
 import type {
+  NodeRuntimeTransportOptions,
   RuntimeAttemptIdentity,
   RuntimeDiscoveryConnection,
   RuntimeDrainPayload,
@@ -58,6 +59,64 @@ const ids = {
   result: "77777777-7777-4777-8777-777777777777",
   attachment: "88888888-8888-4888-8888-888888888888",
 };
+
+test("RuntimeWorker token-only mode uses configured identity without opening mTLS credentials", async () => {
+  let connected: NodeRuntimeTransportOptions | undefined;
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_token_only",
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => ({
+      runtimeURL: "https://runtime.example",
+      policy: { allowedTransports: ["pull"], defaultTransport: "pull" },
+      mtlsRequired: false,
+      credentialEndpoint: "not-a-valid-credential-endpoint",
+    }),
+    connectTransport: async (options): Promise<RuntimeWorkerTransport> => {
+      connected = options;
+      return fakeTransport(fakeClient());
+    },
+  });
+
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "pull_active");
+  assert.ok(connected);
+  assert.equal(connected.nodeId, ids.node);
+  assert.equal(connected.mtlsRequired, false);
+  assert.equal(connected.credentialManager, undefined);
+  assert.equal(connected.tlsMaterial, undefined);
+  await worker.stop();
+  await running;
+});
+
+test("RuntimeWorker token-only mode requires configured Node and Agent identity", async () => {
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "pull",
+    agentToken: "ol_agent_token_only",
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => ({
+      runtimeURL: "https://runtime.example",
+      policy: { allowedTransports: ["pull"], defaultTransport: "pull" },
+      mtlsRequired: false,
+    }),
+    connectTransport: async () => {
+      throw new Error("token-only startup must fail before transport connection");
+    },
+  });
+
+  await assert.rejects(worker.start(), /nodeId and agentId are required for token-only/);
+});
 
 test("RuntimeWorker persists before ACK, confirms before handler, and retries stable spool IDs", async () => {
   const store = new MemoryRuntimeStore();
@@ -3224,6 +3283,44 @@ test("RuntimeWorker policy recovery fails closed without canonical discovery or 
     assert.equal(discoveryCalls, 2);
     assert.equal(connectCalls, 1, "incompatible policy connected before allowlist validation");
   });
+});
+
+test("RuntimeWorker policy recovery rejects an mTLS requirement change", async () => {
+  let discoveryCalls = 0;
+  let connectCalls = 0;
+  const initial = fakeClient({
+    async claimRuntimeRun() {
+      throw new OpenLinkerError("RUNTIME_POLICY_CHANGED", { status: 403, code: "FORBIDDEN" });
+    },
+  });
+  const worker = new RuntimeWorker({
+    platformURL: "https://openlinker.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_token_only",
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    discoverRuntimeConnection: async () => {
+      discoveryCalls += 1;
+      return {
+        runtimeURL: `https://runtime-${discoveryCalls}.example`,
+        policy: { allowedTransports: ["pull"], defaultTransport: "pull" },
+        mtlsRequired: discoveryCalls !== 1,
+      };
+    },
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => {
+      connectCalls += 1;
+      return fakeTransport(initial);
+    },
+  });
+
+  await assert.rejects(worker.start(), /mTLS requirement changed/);
+  assert.equal(discoveryCalls, 2);
+  assert.equal(connectCalls, 1, "security mode changed before replacement transport connection");
 });
 
 test("RuntimeWorker rediscovers once on an established WebSocket 1008 policy close", async () => {

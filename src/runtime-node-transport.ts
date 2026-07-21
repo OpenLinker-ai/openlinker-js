@@ -15,6 +15,7 @@ import {
   RuntimeCredentialManager,
   type RuntimeTLSMaterial,
 } from "./runtime-credential-manager.js";
+import { assertRuntimeUUID } from "./runtime-codec.js";
 
 const discoveryPath = "/.well-known/openlinker.json";
 const discoveryMaxBytes = 64 * 1024;
@@ -22,6 +23,7 @@ const runtimeWebSocketPath = "/api/v1/agent-runtime/ws";
 const workerAgent = "openlinker-js/runtime-worker";
 
 export const RuntimeFallbackReasonHeader = "OpenLinker-Runtime-Fallback-Reason" as const;
+export const RuntimeNodeIDHeader = "OpenLinker-Runtime-Node" as const;
 export type RuntimeFallbackReason =
   | "explicit"
   | "websocket_unavailable"
@@ -69,6 +71,7 @@ export interface RuntimeTransportSelection {
 export interface NodeRuntimeTransportOptions {
   runtimeURL: string;
   agentToken: string;
+  nodeId: string;
   mtls?: RuntimeMTLSConfig | undefined;
   mtlsRequired?: boolean | undefined;
   tlsMaterial?: RuntimeTLSMaterial | undefined;
@@ -144,6 +147,7 @@ export class NodeRuntimeTransport {
   private constructor(
     runtimeURL: string,
     private readonly agentToken: string,
+    private readonly nodeId: string,
     private tls: RuntimeTLSMaterial | undefined,
     private dispatcher: Agent,
     private readonly mtlsRequired: boolean,
@@ -155,8 +159,11 @@ export class NodeRuntimeTransport {
       agentToken,
       sdkAgent: workerAgent,
       fetch: async (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set(RuntimeNodeIDHeader, this.nodeId);
         const execute = async () => await undiciFetch(input as Parameters<typeof undiciFetch>[0], {
           ...(init as Parameters<typeof undiciFetch>[1]),
+          headers,
           dispatcher: this.dispatcher,
           redirect: "error",
         }) as unknown as Response;
@@ -176,10 +183,11 @@ export class NodeRuntimeTransport {
     const mtlsRequired = options.mtlsRequired ?? true;
     const runtimeURL = validateRuntimeURL(options.runtimeURL, !mtlsRequired);
     if (!options.agentToken.trim()) throw new Error("Agent Token is required");
+    const nodeId = assertRuntimeUUID(options.nodeId, "Runtime Node ID");
     const tls = options.tlsMaterial ?? (mtlsRequired ? await loadTLSMaterial(options.mtls ?? {}) : undefined);
     const dispatcher = createDispatcher(tls, mtlsRequired);
     return new NodeRuntimeTransport(
-      runtimeURL, options.agentToken, tls, dispatcher, mtlsRequired, options.credentialManager,
+      runtimeURL, options.agentToken, nodeId, tls, dispatcher, mtlsRequired, options.credentialManager,
     );
   }
 
@@ -204,6 +212,7 @@ export class NodeRuntimeTransport {
       headers: {
         authorization: `Bearer ${this.agentToken}`,
         "x-openlinker-sdk": workerAgent,
+        [RuntimeNodeIDHeader]: this.nodeId,
       },
       followRedirects: false,
       handshakeTimeout: 10_000,
