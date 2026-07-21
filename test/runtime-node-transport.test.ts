@@ -6,6 +6,7 @@ import {
   OpenLinkerError,
   RuntimeWebSocketError,
   decodeRuntimeDiscoveryManifest,
+  discoverRuntimeConnection,
   discoverRuntimeURL,
   isRuntimePolicyRecoverySignal,
   resolveRuntimeFallbackReason,
@@ -141,7 +142,7 @@ test("Runtime discovery is credential-free, bounded, and returns a neutral HTTPS
   assert.equal(headers.has("cookie"), false);
 });
 
-test("Runtime origins reject credentials, paths, redirects, and non-mTLS manifests", async () => {
+test("Runtime origins reject unsafe input and accept an explicit token-only policy", async () => {
   assert.equal(validateRuntimeURL("https://runtime.example"), "https://runtime.example");
   assert.equal(validatePlatformURL("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
   for (const invalid of [
@@ -157,10 +158,12 @@ test("Runtime origins reject credentials, paths, redirects, and non-mTLS manifes
   await assert.rejects(discoverRuntimeURL("https://openlinker.example", {
     fetch: async () => new Response("", { status: 302, headers: { location: "https://other.example" } }),
   }), /HTTP 302/);
-  await assert.rejects(discoverRuntimeURL("https://openlinker.example", {
+  const tokenOnly = await discoverRuntimeConnection("https://openlinker.example", {
     fetch: async () => new Response(JSON.stringify({
       base_urls: { runtime: "https://runtime.example" },
       runtime: { enabled: true, mtls_required: false },
     })),
-  }), /required mTLS Runtime address/);
+  });
+  assert.equal(tokenOnly.mtlsRequired, false);
+  assert.equal(tokenOnly.runtimeURL, "https://runtime.example");
 });

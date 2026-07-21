@@ -172,17 +172,10 @@ import {
 
 const worker = new RuntimeWorker({
   platformURL: "https://openlinker.example.com",
-  nodeId: process.env.OPENLINKER_NODE_ID!,
-  agentId: process.env.OPENLINKER_AGENT_ID!,
   agentToken: process.env.OPENLINKER_AGENT_TOKEN!,
   capacity: 1,
   transport: "auto",
   dataDir: "/var/lib/my-agent/runtime",
-  mtls: {
-    certFile: "/run/openlinker/node.crt",
-    keyFile: "/run/openlinker/node.key",
-    caFile: "/run/openlinker/core-ca.crt",
-  },
   async handler(run) {
     await run.emit("run.message.delta", { text: "working" });
     return { output: { answer: 42 } };
