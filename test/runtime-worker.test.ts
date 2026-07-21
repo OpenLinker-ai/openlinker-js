@@ -77,7 +77,6 @@ test("RuntimeWorker token-only mode uses configured identity without opening mTL
       runtimeURL: "https://runtime.example",
       policy: { allowedTransports: ["pull"], defaultTransport: "pull" },
       mtlsRequired: false,
-      credentialEndpoint: "not-a-valid-credential-endpoint",
     }),
     connectTransport: async (options): Promise<RuntimeWorkerTransport> => {
       connected = options;
