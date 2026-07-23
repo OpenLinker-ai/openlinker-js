@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { JsonObject } from "./types.js";
 import { OpenLinkerError, type RequestOptions } from "./client.js";
 import {
@@ -688,9 +688,13 @@ export class RuntimeWorker {
     const runtimeURL = validateRuntimeURL(connection.runtimeURL, !mtlsRequired);
     let tlsMaterial;
     if (!mtlsRequired) {
-      if (!config.nodeId || !config.agentId) {
-        throw new Error("RuntimeWorker nodeId and agentId are required for token-only Runtime transport");
+      if (!config.agentId) {
+        throw new Error("RuntimeWorker agentId is required for token-only Runtime transport");
       }
+      this.config = Object.freeze({
+        ...this.config,
+        nodeId: config.nodeId || tokenScopedRuntimeNodeId(config.agentToken),
+      });
     } else if (!explicitMTLS) {
       if (!config.dataDir?.trim()) {
         throw new Error("automatic Runtime credentials require dataDir");
@@ -2467,13 +2471,15 @@ function websocketCloseError(code: number, reason: string): RuntimeWebSocketErro
 function isPermanentRuntimeError(error: unknown): boolean {
   if (error instanceof RuntimeDrainUnsupportedError || error instanceof RuntimePolicyRecoveryError ||
       isRuntimePolicyRecoverySignal(error)) return true;
+  if (error instanceof RuntimeWebSocketError &&
+      [4401, 4406, 4409, 4412].includes(error.closeCode ?? 0)) return true;
   const code = runtimeErrorCode(error);
   if ([
-    "UNAUTHORIZED", "FORBIDDEN", "PERMISSION_DENIED", "RUNTIME_CLIENT_UPGRADE_REQUIRED",
-    "RUNTIME_REQUIRED_FEATURE_MISSING", "RUNTIME_SESSION_CONFLICT",
+    "AUTHENTICATION_FAILED", "UNAUTHORIZED", "FORBIDDEN", "PERMISSION_DENIED",
+    "RUNTIME_CLIENT_UPGRADE_REQUIRED", "RUNTIME_REQUIRED_FEATURE_MISSING",
+    "RUNTIME_SESSION_CONFLICT",
   ].includes(code)) return true;
-  return error instanceof OpenLinkerError && error.status >= 400 && error.status < 500 &&
-    ![408, 409, 429].includes(error.status);
+  return false;
 }
 
 function runtimeErrorCode(error: unknown): string {
@@ -2559,6 +2565,18 @@ function emptySpoolStatus(): Readonly<RuntimeSpoolStatus> {
 function isUUID(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value) &&
     value !== "00000000-0000-0000-0000-000000000000";
+}
+
+function tokenScopedRuntimeNodeId(agentToken: string): string {
+  const bytes = createHash("sha256")
+    .update("openlinker/runtime-worker/token-scoped-node/v1\0", "utf8")
+    .update(agentToken, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {

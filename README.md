@@ -159,8 +159,8 @@ SSE continues to use `streamRunEvents` unchanged.
 ## OpenLinker Runtime
 
 `RuntimeWorker` is the production entry for a self-hosted Agent process. It
-discovers the dedicated Runtime origin, loads the Node mTLS identity, prefers
-WebSocket, recovers through HTTP pull, manages the Session and leases, and
+discovers the dedicated Runtime origin and its token-only or mTLS policy,
+prefers WebSocket, recovers through HTTP pull, manages the Session and leases, and
 persists every assignment, Event, and Result before acknowledging it. The
 handler is called only after Core confirms the assignment.
 
@@ -172,6 +172,7 @@ import {
 
 const worker = new RuntimeWorker({
   platformURL: "https://openlinker.example.com",
+  agentId: process.env.OPENLINKER_AGENT_ID!,
   agentToken: process.env.OPENLINKER_AGENT_TOKEN!,
   capacity: 1,
   transport: "auto",
@@ -186,6 +187,9 @@ await worker.start();
 ```
 
 By default the worker creates an encrypted `FileRuntimeStore` in `dataDir`.
+When discovery selects token-only security and `nodeId` is omitted, the SDK
+derives the same stable token-scoped Node ID as the Go and Python SDKs. mTLS
+files are needed only for explicit external-PKI compatibility.
 The store owns a stable Worker identity and monotonic Session epoch, uses an
 exclusive process lock, atomic fsync-backed writes, authenticated encryption,
 private file modes, and fail-closed corruption and capacity checks.

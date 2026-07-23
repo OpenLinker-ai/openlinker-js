@@ -151,8 +151,8 @@ if (page.meta.terminal && page.meta.stream_complete) {
 
 ## OpenLinker Runtime
 
-`RuntimeWorker` 是自托管 Agent 进程的生产入口。它会发现 Runtime 专用地址，加载 Node
-mTLS 身份，优先连接 WebSocket，并在连接异常时用 HTTP Pull 恢复；Session、续租、resume、
+`RuntimeWorker` 是自托管 Agent 进程的生产入口。它会发现 Runtime 专用地址及 token-only/mTLS
+策略，优先连接 WebSocket，并在连接异常时用 HTTP Pull 恢复；Session、续租、resume、
 取消、drain、assignment 确认以及 Event/Result 上传都由它统一管理。只有 Core 明确确认
 assignment 且该状态已经落盘后，handler 才会运行。
 
@@ -164,17 +164,11 @@ import {
 
 const worker = new RuntimeWorker({
   platformURL: "https://openlinker.example.com",
-  nodeId: process.env.OPENLINKER_NODE_ID!,
   agentId: process.env.OPENLINKER_AGENT_ID!,
   agentToken: process.env.OPENLINKER_AGENT_TOKEN!,
   capacity: 1,
   transport: "auto",
   dataDir: "/var/lib/my-agent/runtime",
-  mtls: {
-    certFile: "/run/openlinker/node.crt",
-    keyFile: "/run/openlinker/node.key",
-    caFile: "/run/openlinker/core-ca.crt",
-  },
   async handler(run) {
     await run.emit("run.message.delta", { text: "working" });
     return { output: { answer: 42 } };
@@ -183,6 +177,9 @@ const worker = new RuntimeWorker({
 
 await worker.start();
 ```
+
+发现选择 token-only 且省略 `nodeId` 时，SDK 会派生与 Go/Python SDK 一致、仅限该 Agent Token
+的稳定 Node ID。只有外部 PKI 兼容模式才需要显式 mTLS 文件。
 
 默认情况下，worker 会在 `dataDir` 创建加密的 `FileRuntimeStore`。它保存稳定的 Worker
 身份和单调递增的 Session epoch，并提供进程排他锁、原子写入、fsync、认证加密、私有文件
