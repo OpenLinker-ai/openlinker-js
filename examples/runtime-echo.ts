@@ -22,18 +22,20 @@ let executions = 0;
 const worker = new RuntimeWorker({
   platformURL: required("OPENLINKER_URL"),
   runtimeURL: String(process.env.OPENLINKER_RUNTIME_URL ?? "").trim() || undefined,
-  nodeId: required("OPENLINKER_NODE_ID"),
+  nodeId: String(process.env.OPENLINKER_NODE_ID ?? "").trim() || undefined,
   nodeVersion: "openlinker-js/runtime-worker",
   agentId: required("OPENLINKER_AGENT_ID"),
   agentToken: required("OPENLINKER_AGENT_TOKEN"),
   transport: transport as RuntimeTransportMode,
   capacity: 1,
   dataDir: required("OPENLINKER_RUNTIME_DATA_DIR"),
-  mtls: {
-    certFile: required("OPENLINKER_RUNTIME_MTLS_CERT_FILE"),
-    keyFile: required("OPENLINKER_RUNTIME_MTLS_KEY_FILE"),
-    caFile: required("OPENLINKER_RUNTIME_MTLS_CA_FILE"),
-  },
+  mtls: String(process.env.OPENLINKER_RUNTIME_MTLS_CERT_FILE ?? "").trim()
+    ? {
+        certFile: required("OPENLINKER_RUNTIME_MTLS_CERT_FILE"),
+        keyFile: required("OPENLINKER_RUNTIME_MTLS_KEY_FILE"),
+        caFile: required("OPENLINKER_RUNTIME_MTLS_CA_FILE"),
+      }
+    : undefined,
   retryMinimumMs: positiveInteger("OPENLINKER_RUNTIME_RETRY_MIN_MS", 100),
   retryMaximumMs: positiveInteger("OPENLINKER_RUNTIME_RETRY_MAX_MS", 1_000),
   heartbeatIntervalMs: positiveInteger("OPENLINKER_RUNTIME_HEARTBEAT_MS", 2_000),

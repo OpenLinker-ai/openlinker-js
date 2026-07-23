@@ -95,10 +95,12 @@ test("RuntimeWorker token-only mode uses configured identity without opening mTL
   await running;
 });
 
-test("RuntimeWorker token-only mode requires configured Node and Agent identity", async () => {
+test("RuntimeWorker token-only mode derives a stable Node identity", async () => {
+  let connected: NodeRuntimeTransportOptions | undefined;
   const worker = new RuntimeWorker({
     platformURL: "https://openlinker.example",
     transport: "pull",
+    agentId: ids.agent,
     agentToken: "ol_agent_token_only",
     store: new MemoryRuntimeStore(),
     allowUnsafeMemoryStore: true,
@@ -109,12 +111,17 @@ test("RuntimeWorker token-only mode requires configured Node and Agent identity"
       policy: { allowedTransports: ["pull"], defaultTransport: "pull" },
       mtlsRequired: false,
     }),
-    connectTransport: async () => {
-      throw new Error("token-only startup must fail before transport connection");
+    connectTransport: async (options) => {
+      connected = options;
+      return fakeTransport(fakeClient());
     },
   });
 
-  await assert.rejects(worker.start(), /nodeId and agentId are required for token-only/);
+  const running = worker.start();
+  await waitFor(() => worker.transportState === "pull_active");
+  assert.equal(connected?.nodeId, "d6bb911d-7ad6-528b-9a8e-34e2785975fd");
+  await worker.stop();
+  await running;
 });
 
 test("RuntimeWorker persists before ACK, confirms before handler, and retries stable spool IDs", async () => {
@@ -1362,6 +1369,68 @@ test("RuntimeWorker stops Pull without polling churn after permanent authenticat
   assert.equal(sessionCloses, 1);
 });
 
+test("RuntimeWorker terminates idle Pull on the next bounded heartbeat", async () => {
+  const claimStarted = deferred();
+  const commandStarted = deferred();
+  const heartbeatCapacities: number[] = [];
+  let sessionCloses = 0;
+  const client = fakeClient({
+    async heartbeatRuntimeSession(hello) {
+      heartbeatCapacities.push(hello.capacity);
+      throw new OpenLinkerError("Agent Token is inactive", {
+        status: 401,
+        code: "UNAUTHORIZED",
+      });
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      claimStarted.resolve();
+      await delay(60_000, options?.signal);
+      return undefined;
+    },
+    async pollRuntimeCommands(_session, _wait, options) {
+      commandStarted.resolve();
+      await delay(60_000, options?.signal);
+      return { commands: [], databaseTime: new Date().toISOString() };
+    },
+    async closeRuntimeSession() {
+      sessionCloses += 1;
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    heartbeatIntervalMs: 250,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await Promise.all([claimStarted.promise, commandStarted.promise]);
+  await Promise.race([
+    assert.rejects(running, (error: unknown) => {
+      assert.ok(error instanceof OpenLinkerError);
+      assert.equal(error.code, "UNAUTHORIZED");
+      return true;
+    }),
+    delay(1_000).then(() => assert.fail("idle Pull survived its bounded heartbeat")),
+  ]);
+
+  assert.deepEqual(
+    heartbeatCapacities,
+    [1, 0],
+    "one liveness heartbeat must detect revocation before the best-effort shutdown heartbeat",
+  );
+  assert.equal(sessionCloses, 1);
+  assert.equal(worker.transportState, "stopped");
+});
+
 test("RuntimeWorker keeps retrying transient Pull failures", async () => {
   let claimCalls = 0;
   const recovered = deferred();
@@ -1369,6 +1438,48 @@ test("RuntimeWorker keeps retrying transient Pull failures", async () => {
     async claimRuntimeRun(_wait, _request, options) {
       claimCalls += 1;
       if (claimCalls < 3) throw new Error("temporary claim failure");
+      recovered.resolve();
+      await delay(60_000, options?.signal);
+      return undefined;
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => fakeTransport(client),
+  });
+
+  const running = worker.start();
+  await recovered.promise;
+  assert.equal(worker.transportState, "pull_active");
+  assert.equal(claimCalls, 3);
+  await worker.stop();
+  await running;
+});
+
+test("RuntimeWorker treats an unknown auth-like HTTP error as recoverable", async () => {
+  let claimCalls = 0;
+  const recovered = deferred();
+  const client = fakeClient({
+    async claimRuntimeRun(_wait, _request, options) {
+      claimCalls += 1;
+      if (claimCalls < 3) {
+        throw new OpenLinkerError("temporary authentication backend failure", {
+          status: 401,
+          code: "AUTH_BACKEND_BUSY",
+        });
+      }
       recovered.resolve();
       await delay(60_000, options?.signal);
       return undefined;
@@ -3081,6 +3192,51 @@ test("RuntimeWorker auto mode still falls back to Pull for a non-conflict WebSoc
   assert.equal(sessionCreates, 1);
   await worker.stop();
   await running;
+});
+
+test("RuntimeWorker does not fall back to Pull after a permanent WebSocket auth close", async () => {
+  let sessionCreates = 0;
+  const client = fakeClient({
+    async createRuntimeSession() {
+      sessionCreates += 1;
+      return ready();
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "auto",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => ({ output: {} }),
+  }, {
+    connectTransport: async (): Promise<RuntimeWorkerTransport> => ({
+      http: client,
+      async dialWebSocket() {
+        throw new RuntimeWebSocketError(
+          "authentication failed",
+          "TRANSPORT_CLOSED",
+          false,
+          4401,
+        );
+      },
+      async close() {},
+    }),
+  });
+
+  await assert.rejects(worker.start(), (error: unknown) => {
+    assert.ok(error instanceof RuntimeWebSocketError);
+    assert.equal(error.closeCode, 4401);
+    return true;
+  });
+  assert.equal(sessionCreates, 0);
+  assert.equal(worker.transportState, "stopped");
 });
 
 test("RuntimeWorker coalesces concurrent policy signals into one canonical rediscovery", async () => {

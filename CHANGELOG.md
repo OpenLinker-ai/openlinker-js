@@ -29,6 +29,13 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Changed
 
+- Token-only Runtime Workers now derive a deterministic, token-scoped Node ID
+  when `nodeId` is omitted. Explicit mTLS deployments still require their
+  provisioned Node identity.
+- Runtime authentication fatality is now conservative and forward-compatible:
+  only enumerated permanent HTTP error and WebSocket close shapes terminate a
+  Worker; unknown auth-like failures remain recoverable for DB-backed
+  revalidation.
 - Breaking: `FileRuntimeStore` now rejects a symbolic-link Runtime data
   directory and symbolic-link key or state files. Existing deployments that
   use symlinks for these private paths must point `dataDir` at the real
