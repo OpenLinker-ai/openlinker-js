@@ -144,7 +144,16 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
     async claimRuntimeRun(_wait, _request, options) {
       if (!claimed) {
         claimed = true;
-        return assignmentFor(hello);
+        return {
+          ...assignmentFor(hello),
+          metadata: {
+            source: "worker-test",
+            _openlinker_runtime_authority: {
+              principal_scope_id: `ps1_${"A".repeat(43)}`,
+              source: "core",
+            },
+          },
+        };
       }
       await delay(5, options?.signal);
       return undefined;
@@ -213,6 +222,13 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
     heartbeatIntervalMs: 10_000,
     handler: async (run) => {
       handlerCalls += 1;
+      assert.deepEqual(run.metadata, { source: "worker-test" });
+      assert.deepEqual(run.authority, {
+        principalScopeId: `ps1_${"A".repeat(43)}`,
+        runtimeSessionId: hello.runtimeSessionId,
+        runtimeSessionEpoch: 1,
+        runtimeAttachmentId: ids.attachment,
+      });
       await run.emit("run.progress", { step: 1 });
       return { output: { answer: 42 } };
     },
@@ -240,6 +256,76 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
   await worker.stop();
   await running;
   assert.equal(worker.transportState, "stopped");
+});
+
+test("RuntimeWorker rejects malformed internal authority before the handler", async () => {
+  const store = new MemoryRuntimeStore();
+  let hello!: RuntimeHelloPayload;
+  let claimed = false;
+  const finalized = deferred();
+  let handlerCalls = 0;
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return {
+          ...assignmentFor(hello),
+          metadata: {
+            keep: "ordinary",
+            _openlinker_runtime_authority: {
+              principal_scope_id: "not/an/opaque-id",
+              source: "core",
+            },
+          },
+        };
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async finalizeRuntimeResult(result) {
+      assert.equal(result.status, "failed");
+      assert.deepEqual(result.error, {
+        errorCode: "ASSIGNMENT_AUTHORITY_INVALID",
+        message: "assignment Runtime authority is invalid",
+      });
+      finalized.resolve();
+      return {
+        resultId: result.resultId,
+        classification: "non_retryable_failure",
+        runStatus: "failed",
+        dispatchState: "terminal",
+        replayed: false,
+      };
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async () => {
+      handlerCalls += 1;
+      return { output: {} };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+  const running = worker.start();
+  await finalized.promise;
+  assert.equal(handlerCalls, 0);
+  await worker.stop();
+  await running;
 });
 
 test("RuntimeWorker renews a finished Attempt until its durable spool is ACKed", async (t) => {

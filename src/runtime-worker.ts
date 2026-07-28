@@ -110,11 +110,19 @@ export interface RuntimeCallOptions {
   metadata?: JsonObject | undefined;
 }
 
+export interface RuntimeAuthorityContext {
+  readonly principalScopeId: string;
+  readonly runtimeSessionId: string;
+  readonly runtimeSessionEpoch: number;
+  readonly runtimeAttachmentId: string;
+}
+
 export interface RuntimeContext {
   readonly runId: string;
   readonly agentId: string;
   readonly input: JsonObject;
   readonly metadata: JsonObject;
+  readonly authority?: RuntimeAuthorityContext | undefined;
   readonly signal: AbortSignal;
   emit(eventType: string, payload?: JsonObject): Promise<void>;
   callAgent(
@@ -1265,11 +1273,17 @@ export class RuntimeWorker {
 
   private runtimeContext(active: ActiveAttempt): RuntimeContext {
     const assignment = active.stored.assignment;
+    const internal = runtimeAuthorityFromMetadata(
+      assignment.metadata ?? {},
+      this.requiredIdentity(),
+      this.ready,
+    );
     return {
       runId: assignment.attemptIdentity.runId,
       agentId: assignment.attemptIdentity.agentId,
       input: cloneJSON(assignment.input),
-      metadata: cloneJSON(assignment.metadata ?? {}),
+      metadata: internal.metadata,
+      ...(internal.authority ? { authority: internal.authority } : {}),
       signal: active.controller.signal,
       emit: async (eventType, payload = {}) => {
         if (active.controller.signal.aborted || active.handlerFinished) {
@@ -2148,6 +2162,53 @@ export class RuntimeWorker {
   }
 }
 
+const runtimeAuthorityMetadataKey = "_openlinker_runtime_authority";
+
+function runtimeAuthorityFromMetadata(
+  rawMetadata: JsonObject,
+  identity: RuntimeWorkerIdentity,
+  ready: RuntimeReadyPayload | undefined,
+): { metadata: JsonObject; authority?: RuntimeAuthorityContext | undefined } {
+  const metadata = cloneJSON(rawMetadata);
+  const present = Object.prototype.hasOwnProperty.call(metadata, runtimeAuthorityMetadataKey);
+  const raw = metadata[runtimeAuthorityMetadataKey];
+  delete metadata[runtimeAuthorityMetadataKey];
+  if (!present) {
+    return { metadata };
+  }
+  if (!ready || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new RuntimeAttemptError(
+      "ASSIGNMENT_AUTHORITY_INVALID",
+      "assignment Runtime authority is invalid",
+    );
+  }
+  const value = raw as JsonObject;
+  if (
+    Object.keys(value).length !== 2 ||
+    value.source !== "core" ||
+    typeof value.principal_scope_id !== "string" ||
+    !isRuntimePrincipalScopeID(value.principal_scope_id) ||
+    !isUUID(identity.runtimeSessionId) ||
+    !Number.isSafeInteger(identity.sessionEpoch) ||
+    identity.sessionEpoch < 1 ||
+    !isUUID(ready.attachmentId)
+  ) {
+    throw new RuntimeAttemptError(
+      "ASSIGNMENT_AUTHORITY_INVALID",
+      "assignment Runtime authority is invalid",
+    );
+  }
+  return {
+    metadata,
+    authority: Object.freeze({
+      principalScopeId: value.principal_scope_id,
+      runtimeSessionId: identity.runtimeSessionId,
+      runtimeSessionEpoch: identity.sessionEpoch,
+      runtimeAttachmentId: ready.attachmentId,
+    }),
+  };
+}
+
 interface RequiredTimingConfig {
   nodeId: string;
   agentId: string;
@@ -2565,6 +2626,15 @@ function emptySpoolStatus(): Readonly<RuntimeSpoolStatus> {
 function isUUID(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value) &&
     value !== "00000000-0000-0000-0000-000000000000";
+}
+
+function isRuntimePrincipalScopeID(value: string): boolean {
+  return (
+    value.length >= 1 &&
+    value.length <= 256 &&
+    value.trim() === value &&
+    /^[A-Za-z0-9._:-]+$/u.test(value)
+  );
 }
 
 function tokenScopedRuntimeNodeId(agentToken: string): string {
