@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Accept and validate Core-owned standard and Browser Runtime authority envelopes, expose Browser interaction policy and canonical mutation-origin evidence to Runtime handlers, and continue rejecting unknown or tampered authority fields before handler execution.
+
 All notable changes to `@openlinker/sdk` will be documented in this file.
 
 This SDK is currently pre-1.0. Breaking changes may happen before the Core API,

@@ -115,6 +115,11 @@ export interface RuntimeAuthorityContext {
   readonly runtimeSessionId: string;
   readonly runtimeSessionEpoch: number;
   readonly runtimeAttachmentId: string;
+  readonly executionProfile: "" | "standard" | "browser";
+  readonly browserInteractionPolicy: "" | "restricted" | "full";
+  readonly browserInteractionPolicyGeneration: number;
+  readonly browserMutationOrigins: readonly string[];
+  readonly browserMutationOriginsSHA256: string;
 }
 
 export interface RuntimeContext {
@@ -2163,6 +2168,117 @@ export class RuntimeWorker {
 }
 
 const runtimeAuthorityMetadataKey = "_openlinker_runtime_authority";
+const runtimeAuthorityKeys = new Set([
+  "principal_scope_id",
+  "source",
+  "execution_profile",
+  "browser_interaction_policy",
+  "browser_interaction_policy_generation",
+  "browser_mutation_origins",
+  "browser_mutation_origins_sha256",
+]);
+
+interface RuntimeAuthorityWire {
+  principal_scope_id: string;
+  source: "core";
+  execution_profile?: "standard" | "browser" | undefined;
+  browser_interaction_policy?: "restricted" | "full" | undefined;
+  browser_interaction_policy_generation?: number | undefined;
+  browser_mutation_origins?: string[] | undefined;
+  browser_mutation_origins_sha256?: string | undefined;
+}
+
+function invalidRuntimeAuthority(): never {
+  throw new RuntimeAttemptError(
+    "ASSIGNMENT_AUTHORITY_INVALID",
+    "assignment Runtime authority is invalid",
+  );
+}
+
+function canonicalRuntimeBrowserMutationOrigin(raw: string): string {
+  if (!raw || raw.trim() !== raw || raw.includes("%")) invalidRuntimeAuthority();
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    invalidRuntimeAuthority();
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.hostname.endsWith(".") ||
+    parsed.origin !== raw
+  ) {
+    invalidRuntimeAuthority();
+  }
+  const hostname = parsed.hostname;
+  if (hostname.startsWith("[") && /^\[::ffff:/iu.test(hostname)) invalidRuntimeAuthority();
+  if (!hostname.startsWith("[")) {
+    if (hostname.length > 253) invalidRuntimeAuthority();
+    for (const label of hostname.split(".")) {
+      if (
+        !label ||
+        label.length > 63 ||
+        label.startsWith("-") ||
+        label.endsWith("-") ||
+        !/^[a-z0-9-]+$/u.test(label)
+      ) {
+        invalidRuntimeAuthority();
+      }
+    }
+  }
+  return parsed.origin;
+}
+
+function validateRuntimeAuthorityWire(value: JsonObject): RuntimeAuthorityWire {
+  if (Object.keys(value).some((key) => !runtimeAuthorityKeys.has(key))) invalidRuntimeAuthority();
+  if (
+    value.source !== "core" ||
+    typeof value.principal_scope_id !== "string" ||
+    !isRuntimePrincipalScopeID(value.principal_scope_id)
+  ) {
+    invalidRuntimeAuthority();
+  }
+  const executionProfile = value.execution_profile;
+  const policy = value.browser_interaction_policy;
+  const generation = value.browser_interaction_policy_generation;
+  const origins = value.browser_mutation_origins;
+  const digest = value.browser_mutation_origins_sha256;
+  if (executionProfile === undefined || executionProfile === "standard") {
+    if (policy !== undefined || generation !== undefined || origins !== undefined || digest !== undefined) {
+      invalidRuntimeAuthority();
+    }
+    return value as unknown as RuntimeAuthorityWire;
+  }
+  if (
+    executionProfile !== "browser" ||
+    (policy !== "restricted" && policy !== "full") ||
+    !Number.isSafeInteger(generation) ||
+    (generation as number) < 1 ||
+    !Array.isArray(origins) ||
+    origins.length > 32 ||
+    !origins.every((origin) => typeof origin === "string") ||
+    typeof digest !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(digest)
+  ) {
+    invalidRuntimeAuthority();
+  }
+  const canonical = (origins as string[]).map(canonicalRuntimeBrowserMutationOrigin).sort();
+  if (
+    canonical.some((origin, index) => origin !== origins[index]) ||
+    new Set(canonical).size !== canonical.length ||
+    (policy === "restricted" && canonical.length !== 0) ||
+    (policy === "full" && canonical.length === 0) ||
+    createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex") !== digest
+  ) {
+    invalidRuntimeAuthority();
+  }
+  return value as unknown as RuntimeAuthorityWire;
+}
 
 function runtimeAuthorityFromMetadata(
   rawMetadata: JsonObject,
@@ -2176,28 +2292,17 @@ function runtimeAuthorityFromMetadata(
   if (!present) {
     return { metadata };
   }
-  if (!ready || !raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new RuntimeAttemptError(
-      "ASSIGNMENT_AUTHORITY_INVALID",
-      "assignment Runtime authority is invalid",
-    );
-  }
-  const value = raw as JsonObject;
+  if (!ready || !raw || typeof raw !== "object" || Array.isArray(raw)) invalidRuntimeAuthority();
+  const value = validateRuntimeAuthorityWire(raw as JsonObject);
   if (
-    Object.keys(value).length !== 2 ||
-    value.source !== "core" ||
-    typeof value.principal_scope_id !== "string" ||
-    !isRuntimePrincipalScopeID(value.principal_scope_id) ||
     !isUUID(identity.runtimeSessionId) ||
     !Number.isSafeInteger(identity.sessionEpoch) ||
     identity.sessionEpoch < 1 ||
     !isUUID(ready.attachmentId)
   ) {
-    throw new RuntimeAttemptError(
-      "ASSIGNMENT_AUTHORITY_INVALID",
-      "assignment Runtime authority is invalid",
-    );
+    invalidRuntimeAuthority();
   }
+  const origins = Object.freeze([...(value.browser_mutation_origins ?? [])]);
   return {
     metadata,
     authority: Object.freeze({
@@ -2205,6 +2310,11 @@ function runtimeAuthorityFromMetadata(
       runtimeSessionId: identity.runtimeSessionId,
       runtimeSessionEpoch: identity.sessionEpoch,
       runtimeAttachmentId: ready.attachmentId,
+      executionProfile: value.execution_profile ?? "",
+      browserInteractionPolicy: value.browser_interaction_policy ?? "",
+      browserInteractionPolicyGeneration: value.browser_interaction_policy_generation ?? 0,
+      browserMutationOrigins: origins,
+      browserMutationOriginsSHA256: value.browser_mutation_origins_sha256 ?? "",
     }),
   };
 }
