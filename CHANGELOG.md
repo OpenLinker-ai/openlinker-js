@@ -9,6 +9,9 @@ runtime helper, callback, and A2A contracts are declared stable.
 
 ### Added
 
+- Added typed Browser interaction policy, policy generation, canonical mutation
+  origins, origin digest, and Browser contract evidence to `RunResponse` and
+  the public Core client contract fixture.
 - Added the SDK-owned `RuntimeWorker` with credential-free Runtime discovery,
   Node mTLS, WebSocket-first automatic Pull recovery, Session lifecycle,
   assignment confirmation, renewal, resume, cancellation, drain, capacity,

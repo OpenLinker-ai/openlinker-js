@@ -156,6 +156,11 @@ test("runAgent maps camelCase input to Core request body", async () => {
         runtime_transport: "websocket",
         runtime_transport_reason: "recovery",
         runtime_transport_changed_at: "2026-07-18T00:00:00Z",
+        browser_interaction_policy: "full",
+        browser_interaction_policy_generation: 7,
+        browser_mutation_origins: ["https://example.com"],
+        browser_mutation_origins_sha256: "a".repeat(64),
+        browser_contract_id: "openlinker.browser.v2",
         dispatch_state: "terminal",
         attempt_count: 1,
         max_attempts: 3,
@@ -188,6 +193,10 @@ test("runAgent maps camelCase input to Core request body", async () => {
   assert.equal(response.agent_connection_mode, "runtime");
   assert.equal(response.runtime_transport, "websocket");
   assert.equal(response.runtime_transport_reason, "recovery");
+  assert.equal(response.browser_interaction_policy, "full");
+  assert.equal(response.browser_interaction_policy_generation, 7);
+  assert.deepEqual(response.browser_mutation_origins, ["https://example.com"]);
+  assert.equal(response.browser_contract_id, "openlinker.browser.v2");
   assert.equal(response.dispatch_state, "terminal");
   assert.equal(response.attempt_count, 1);
   const call = calls[0];
