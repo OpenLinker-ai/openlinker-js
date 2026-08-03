@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -151,6 +152,7 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
             _openlinker_runtime_authority: {
               principal_scope_id: `ps1_${"A".repeat(43)}`,
               source: "core",
+              execution_profile: "standard",
             },
           },
         };
@@ -228,6 +230,11 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
         runtimeSessionId: hello.runtimeSessionId,
         runtimeSessionEpoch: 1,
         runtimeAttachmentId: ids.attachment,
+        executionProfile: "standard",
+        browserInteractionPolicy: "",
+        browserInteractionPolicyGeneration: 0,
+        browserMutationOrigins: [],
+        browserMutationOriginsSHA256: "",
       });
       await run.emit("run.progress", { step: 1 });
       return { output: { answer: 42 } };
@@ -258,6 +265,88 @@ test("RuntimeWorker persists before ACK, confirms before handler, and retries st
   assert.equal(worker.transportState, "stopped");
 });
 
+test("RuntimeWorker validates and exposes Browser authority", async () => {
+  const store = new MemoryRuntimeStore();
+  let hello!: RuntimeHelloPayload;
+  let claimed = false;
+  const finalized = deferred();
+  const origins = ["https://github.com", "https://openlinker.ai"];
+  const digest = createHash("sha256").update(JSON.stringify(origins), "utf8").digest("hex");
+  const client = fakeClient({
+    async createRuntimeSession(value) {
+      hello = value;
+      return ready();
+    },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!claimed) {
+        claimed = true;
+        return {
+          ...assignmentFor(hello),
+          metadata: {
+            keep: "ordinary",
+            _openlinker_runtime_authority: {
+              principal_scope_id: `ps1_${"A".repeat(43)}`,
+              source: "core",
+              execution_profile: "browser",
+              browser_interaction_policy: "full",
+              browser_interaction_policy_generation: 7,
+              browser_mutation_origins: origins,
+              browser_mutation_origins_sha256: digest,
+            },
+          },
+        };
+      }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async finalizeRuntimeResult(result) {
+      assert.equal(result.status, "success");
+      finalized.resolve();
+      return {
+        resultId: result.resultId,
+        classification: "success",
+        runStatus: "success",
+        dispatchState: "terminal",
+        replayed: false,
+      };
+    },
+  });
+  const worker = new RuntimeWorker({
+    runtimeURL: "https://runtime.example",
+    transport: "pull",
+    nodeId: ids.node,
+    agentId: ids.agent,
+    agentToken: "ol_agent_private",
+    mtls: { certFile: "unused.crt", keyFile: "unused.key", caFile: "unused-ca.crt" },
+    store,
+    allowUnsafeMemoryStore: true,
+    retryMinimumMs: 1,
+    retryMaximumMs: 1,
+    heartbeatIntervalMs: 10_000,
+    handler: async (run) => {
+      assert.deepEqual(run.metadata, { keep: "ordinary" });
+      assert.deepEqual(run.authority, {
+        principalScopeId: `ps1_${"A".repeat(43)}`,
+        runtimeSessionId: hello.runtimeSessionId,
+        runtimeSessionEpoch: 1,
+        runtimeAttachmentId: ids.attachment,
+        executionProfile: "browser",
+        browserInteractionPolicy: "full",
+        browserInteractionPolicyGeneration: 7,
+        browserMutationOrigins: origins,
+        browserMutationOriginsSHA256: digest,
+      });
+      return { output: { ok: true } };
+    },
+  }, {
+    connectTransport: async () => fakeTransport(client),
+  });
+  const running = worker.start();
+  await finalized.promise;
+  await worker.stop();
+  await running;
+});
+
 test("RuntimeWorker rejects malformed internal authority before the handler", async () => {
   const store = new MemoryRuntimeStore();
   let hello!: RuntimeHelloPayload;
@@ -277,8 +366,13 @@ test("RuntimeWorker rejects malformed internal authority before the handler", as
           metadata: {
             keep: "ordinary",
             _openlinker_runtime_authority: {
-              principal_scope_id: "not/an/opaque-id",
+              principal_scope_id: `ps1_${"A".repeat(43)}`,
               source: "core",
+              execution_profile: "browser",
+              browser_interaction_policy: "full",
+              browser_interaction_policy_generation: 1,
+              browser_mutation_origins: ["https://github.com"],
+              browser_mutation_origins_sha256: "0".repeat(64),
             },
           },
         };
