@@ -15,6 +15,8 @@ versions that match the release tag.
    and any Core version assumptions.
 3. Confirm `package.json` and `package-lock.json` use the same version, and that
    `v<package version>` exactly matches the intended GitHub release tag.
+   Product coordination tags are not npm package versions and do not satisfy
+   this requirement for a registry publication.
 4. Do not advertise `npm install @openlinker/sdk` as an available installation
    path until the intended public version is visible through `npm view`.
 5. Run `npm audit` and review the result.
@@ -34,10 +36,16 @@ When maintainers intentionally publish to npm:
 
 ```bash
 npm version <major|minor|patch|prerelease>
+npm run release:check
 npm publish --access public
 npm view "@openlinker/sdk@$(node -p 'require("./package.json").version')" version
 git push origin main --follow-tags
 ```
+
+`npm publish` runs the same fail-closed check automatically through
+`prepublishOnly`. Do not use `--ignore-scripts` to bypass the release gate. The
+gate requires matching package and lockfile versions, an exact
+`v<package version>` tag at `HEAD`, and a clean Git worktree.
 
 Pre-1.0 releases may include breaking changes, but they must be called out in
 `CHANGELOG.md`.

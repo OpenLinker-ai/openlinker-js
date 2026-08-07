@@ -56,8 +56,10 @@
     "build": "npm run clean && tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
     "build:examples": "tsc -p tsconfig.examples.json",
-    "test": "npm run build && npm run build:test && node --test .test-dist/*.test.js",
-    "typecheck": "npm run build && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.examples.json --noEmit"
+    "test": "npm run build && npm run build:test && node --test .test-dist/*.test.js scripts/*.test.mjs",
+    "typecheck": "npm run build && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.examples.json --noEmit",
+    "release:check": "node ./scripts/check-npm-release.mjs",
+    "prepublishOnly": "npm run release:check"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
