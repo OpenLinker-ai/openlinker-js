@@ -13,6 +13,7 @@ English documentation: [RELEASE.md](./RELEASE.md)
 2. 确认 `CHANGELOG.md` 描述了公共 API 变化、兼容性说明和 Core 版本假设。
 3. 确认 `package.json` 与 `package-lock.json` 版本一致，并且 `v<package version>` 与准备
    发布的 GitHub tag 完全一致。
+   产品协调 tag 不是 npm package version，不能代替 registry 发布所需的精确版本 tag。
 4. 在目标公开版本能通过 `npm view` 查询到之前，不要把
    `npm install @openlinker/sdk` 写成已经可用的安装路径。
 5. 运行 `npm audit` 并审查结果。
@@ -29,10 +30,15 @@ English documentation: [RELEASE.md](./RELEASE.md)
 
 ```bash
 npm version <major|minor|patch|prerelease>
+npm run release:check
 npm publish --access public
 npm view "@openlinker/sdk@$(node -p 'require("./package.json").version')" version
 git push origin main --follow-tags
 ```
+
+`npm publish` 会通过 `prepublishOnly` 自动再执行一次同样的 fail-closed 检查。
+不得使用 `--ignore-scripts` 绕过发布门禁。门禁要求 package 与 lockfile 版本一致、
+精确的 `v<package version>` tag 指向 `HEAD`，并且 Git 工作树干净。
 
 pre-1.0 版本可以包含 breaking change，但必须在 `CHANGELOG.md` 中说明。
 
