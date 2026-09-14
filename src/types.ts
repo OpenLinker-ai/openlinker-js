@@ -11,6 +11,62 @@ export type ConnectionMode = "direct_http" | "mcp_server" | "runtime";
 export type RunStatus =
   "running" | "success" | "failed" | "timeout" | "canceled";
 
+export interface RecommendTaskRequest {
+  query: string;
+  templateId?: string;
+  skillIds?: string[];
+  mcpTools?: string[];
+  agentSlugs?: string[];
+}
+
+export interface TaskSkillRef {
+  id: string;
+  category: string;
+  name: string;
+  description?: string;
+}
+
+export interface TaskMCPToolRef { name: string; description: string }
+
+export interface TaskAgentSummary {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  price_per_call_cents: number;
+  total_calls: number;
+  avg_rating?: number | null;
+  creator_name: string;
+  tags: string[];
+}
+
+export interface TaskRecommendation {
+  agent: TaskAgentSummary;
+  match_score: number;
+  why: string;
+  matched_skills: TaskSkillRef[];
+}
+
+export interface TaskNextAction {
+  type: string;
+  label: string;
+  hint: string;
+  href: string;
+  reason_code?: string;
+  reason: string;
+}
+
+export interface RecommendTaskResponse {
+  task_id: string;
+  visibility: string;
+  parsed_skills: string[];
+  parsed_skill_refs: TaskSkillRef[];
+  mcp_tools: string[];
+  mcp_tool_refs: TaskMCPToolRef[];
+  recommendations: TaskRecommendation[];
+  next_action?: TaskNextAction | null;
+}
+
 export interface ListAgentsParams {
   query?: string;
   tags?: string[];

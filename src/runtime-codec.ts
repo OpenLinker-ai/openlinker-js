@@ -17,6 +17,7 @@ import {
   type RuntimeAttemptIdentity,
   type RuntimeCallAgentRequest,
   type RuntimeRunSummary,
+  type RuntimeDelegatedRun,
   type RuntimeClaimRequest,
   type RuntimeCommandsResponse,
   type RuntimeCancelState,
@@ -666,6 +667,22 @@ export function decodeRuntimeRunSummary(value: unknown): RuntimeRunSummary {
       break;
   }
   return summary;
+}
+
+export function decodeRuntimeDelegatedRun(value: unknown): RuntimeDelegatedRun {
+  const object = exactObject(value, ["run_id", "status", "dispatch_state"],
+    ["output", "error_code", "error_message"], "delegated Run read response");
+  const result: RuntimeDelegatedRun = decodeRuntimeRunSummary({
+    run_id: object.run_id, status: object.status, dispatch_state: object.dispatch_state,
+  });
+  if (hasOwn(object, "output")) result.output = assertJSONObject(object.output, "delegated Run output");
+  for (const [wire, field] of [["error_code", "errorCode"], ["error_message", "errorMessage"]] as const) {
+    if (hasOwn(object, wire)) {
+      if (typeof object[wire] !== "string") throw runtimeError(`delegated Run ${wire} must be a string`);
+      result[field] = object[wire];
+    }
+  }
+  return result;
 }
 
 export function decodeRuntimeErrorEnvelope(value: unknown): RuntimeErrorEnvelope {

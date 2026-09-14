@@ -13,6 +13,8 @@ import {
   RuntimeRequiredFeatures,
   RuntimeWebSocketError,
   RuntimeWorker,
+  RuntimeDelegatedRunReadFeature,
+  RuntimeDelegationUnsupportedError,
 } from "../dist/runtime.js";
 import type {
   NodeRuntimeTransportOptions,
@@ -28,6 +30,7 @@ import type {
   RuntimeWorkerClient,
   RuntimeWorkerDuplex,
   RuntimeWorkerTransport,
+  RuntimeContext,
 } from "../dist/runtime.js";
 
 type DeferredResolve<T> = [T] extends [void]
@@ -3761,6 +3764,140 @@ test("RuntimeWorker retains a WebSocket policy close delivered before dial settl
   assert.equal(discoveryCalls, 2);
   await worker.stop();
   await running;
+});
+
+for (const mode of ["pull", "ws", "auto"] as const) {
+  for (const negotiated of [false, true]) {
+    test(`delegated Run reads reach the handler in ${mode}, negotiated=${negotiated}`, async () => {
+      let hello: RuntimeHelloPayload;
+      let callbacks: RuntimeWorkerCallbacks | undefined;
+      let offered = false;
+      let context: RuntimeContext | undefined;
+      let readCalls = 0;
+      const complete = deferred();
+      const socketDone = deferred();
+      const token = `ol_inv_v2.current.${Buffer.from('{"audience":"openlinker.runtime.v2/delegation"}').toString("base64url")}.signature`;
+      const offer = () => ({ ...assignmentFor(hello),
+        nodeEnvelope: "ol_ctx_v2.current.payload.signature",
+        agentInvocationToken: negotiated ? token : "ol_inv_v2.current.payload.signature" });
+      const http = fakeClient({
+        async createRuntimeSession(value) { hello = value; return ready(); },
+        async claimRuntimeRun(_wait, _request, options) {
+          if (!offered) { offered = true; return offer(); }
+          await delay(5, options?.signal);
+          return undefined;
+        },
+        async readRuntimeDelegatedRun(auth, runId) {
+          readCalls++;
+          assert.equal(auth.token, token);
+          assert.equal(auth.invocationContext, "ol_ctx_v2.current.payload.signature");
+          assert.equal(auth.idempotencyKey, `read-delegated-${ids.run}`);
+          return { runId, status: "success", dispatchState: "terminal", output: { answer: 42 } };
+        },
+      });
+      const worker = new RuntimeWorker({
+        platformURL: "https://core.example", nodeId: ids.node, agentId: ids.agent,
+        agentToken: "ol_agent_test", transport: mode, store: new MemoryRuntimeStore(),
+        allowUnsafeMemoryStore: true, optionalFeatures: [RuntimeDelegatedRunReadFeature],
+        handler: async (run) => {
+          context = run;
+          assert.equal(run.canReadDelegatedRuns, negotiated);
+          if (negotiated) assert.deepEqual((await run.readDelegatedRun(ids.run)).output, { answer: 42 });
+          else await assert.rejects(() => run.readDelegatedRun(ids.run), RuntimeDelegationUnsupportedError);
+          complete.resolve();
+          return { output: {} };
+        },
+      }, {
+        discoverRuntimeConnection: async () => ({ runtimeURL: "https://runtime.example", mtlsRequired: false,
+          policy: { allowedTransports: ["ws", "pull"], defaultTransport: "auto" } }),
+        connectTransport: async () => ({ http,
+          async dialWebSocket(value, handlers) {
+            hello = value; callbacks = handlers;
+            return { ...fakeDuplex(socketDone.promise), close: () => socketDone.resolve() };
+          }, async close() {},
+        }),
+      });
+      const running = worker.start();
+      try {
+        if (mode !== "pull") {
+          await waitFor(() => worker.transportState === "ws_active");
+          await callbacks!.onAssigned!(offer());
+        }
+        await Promise.race([complete.promise, delay(2_000).then(() => { throw new Error("handler did not read delegation"); })]);
+        assert.ok(hello!.features.includes(RuntimeDelegatedRunReadFeature));
+        assert.equal(readCalls, negotiated ? 1 : 0);
+        await delay(10);
+        await assert.rejects(() => context!.readDelegatedRun(ids.run), /abort/i);
+      } finally {
+        await worker.stop();
+        await running;
+      }
+    });
+  }
+}
+
+for (const finish of ["return", "cancel"] as const) {
+test(`handler ${finish} aborts an in-flight delegated read`, async () => {
+  let hello: RuntimeHelloPayload;
+  let offered = false;
+  let read: Promise<unknown> | undefined;
+  let cancelRequested = false;
+  const entered = deferred();
+  const aborted = deferred();
+  const token = `ol_inv_v2.current.${Buffer.from('{"audience":"openlinker.runtime.v2/delegation"}').toString("base64url")}.signature`;
+  const http = fakeClient({
+    async createRuntimeSession(value) { hello = value; return ready(); },
+    async claimRuntimeRun(_wait, _request, options) {
+      if (!offered) { offered = true; return { ...assignmentFor(hello), agentInvocationToken: token }; }
+      await delay(5, options?.signal);
+      return undefined;
+    },
+    async readRuntimeDelegatedRun(_auth, _id, options) {
+      entered.resolve();
+      try { await delay(60_000, options?.signal); }
+      finally { aborted.resolve(); }
+      throw new Error("read was not canceled");
+    },
+    async pollRuntimeCommands(_session, _wait, options) {
+      await delay(5, options?.signal);
+      if (finish === "cancel" && read && !cancelRequested) {
+        cancelRequested = true;
+        const identity = assignmentFor(hello).attemptIdentity;
+        return { databaseTime: new Date().toISOString(), commands: [{ type: "run.cancel", payload: {
+          cancellationId: "99999999-9999-4999-8999-999999999999",
+          attemptIdentity: identity,
+          deadlineAt: new Date(Date.now() + 1_000).toISOString(), reasonCode: "caller_requested",
+        } }] };
+      }
+      return { databaseTime: new Date().toISOString(), commands: [] };
+    },
+  });
+  const worker = new RuntimeWorker({ platformURL: "https://core.example", transport: "pull",
+    nodeId: ids.node, agentId: ids.agent, agentToken: "ol_agent_test", store: new MemoryRuntimeStore(),
+    allowUnsafeMemoryStore: true, handler: async (context) => {
+      read = context.readDelegatedRun(ids.run);
+      void read.catch(() => {});
+      await entered.promise;
+      if (finish === "cancel") await read;
+      return { output: {} };
+    },
+  }, { discoverRuntimeConnection: async () => ({ runtimeURL: "https://runtime.example", mtlsRequired: false,
+      policy: { allowedTransports: ["pull"], defaultTransport: "pull" } }),
+    connectTransport: async () => fakeTransport(http) });
+  const running = worker.start();
+  try {
+    await Promise.race([aborted.promise, delay(2_000).then(() => { throw new Error("read outlived handler"); })]);
+    await assert.rejects(read!, finish === "return" ? /abort/i : { code: "RUN_CANCELED" });
+  } finally { await worker.stop(); await running; }
+});
+}
+
+test("optional Worker features reject ambiguous configuration without replacing required features", () => {
+  const config = { platformURL: "https://core.example", agentToken: "ol_agent_test",
+    store: new MemoryRuntimeStore(), allowUnsafeMemoryStore: true, handler: () => ({ output: {} }) };
+  for (const features of [[""], ["feature", "feature"], ["lease_fence"], [" Bad"], ["a".repeat(101)]]) {
+    assert.throws(() => new RuntimeWorker({ ...config, optionalFeatures: features }), /optional feature/i);
+  }
 });
 
 function fakeTransport(http: RuntimeWorkerClient): RuntimeWorkerTransport {
