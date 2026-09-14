@@ -35,6 +35,8 @@ import type {
   PlatformRunCallbackConfig,
   RegisterAgentViaTokenRequest,
   RegisterAgentViaTokenResponse,
+  RecommendTaskRequest,
+  RecommendTaskResponse,
   RunAgentRequest,
   RunArtifactResponse,
   RunMessageResponse,
@@ -328,6 +330,20 @@ export class OpenLinkerClient {
     );
   }
 
+  /** Creates a private Core task and resolves callable Agent recommendations. */
+  async recommendTask(
+    request: RecommendTaskRequest,
+    options: RequestOptions = {},
+  ): Promise<RecommendTaskResponse> {
+    return this.request("POST", "/tasks/recommend", {
+      query: request.query,
+      template_id: request.templateId,
+      skill_ids: request.skillIds,
+      mcp_tools: request.mcpTools,
+      agent_slugs: request.agentSlugs,
+    }, options);
+  }
+
   async runAgent(
     request: RunAgentRequest,
     options: RequestOptions = {},
@@ -388,6 +404,10 @@ export class OpenLinkerClient {
     options: RequestOptions = {},
   ): Promise<RunResponse> {
     return this.request("GET", `/runs/${encodeURIComponent(runId)}`, undefined, options);
+  }
+
+  async cancelRun(runId: string, options: RequestOptions = {}): Promise<RunResponse> {
+    return this.request("POST", `/runs/${encodeURIComponent(runId)}/cancel`, undefined, options);
   }
 
   async listRunEvents(

@@ -5,6 +5,21 @@ export const RuntimeContractID = "openlinker.runtime.v2" as const;
 export const RuntimeContractDigest =
   "4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481" as const;
 export const RuntimeAttachmentHeader = "OpenLinker-Runtime-Attachment" as const;
+export const RuntimeDelegatedRunReadFeature = "delegated_run_read.v1" as const;
+
+export class RuntimeDelegationUnsupportedError extends Error {
+  readonly code = "RUNTIME_DELEGATION_UNSUPPORTED";
+  constructor() {
+    super("Core/SDK did not negotiate delegated Run results");
+    this.name = "RuntimeDelegationUnsupportedError";
+  }
+}
+
+export interface RuntimeDelegatedRun extends RuntimeRunSummary {
+  output?: JsonObject | undefined;
+  errorCode?: string | undefined;
+  errorMessage?: string | undefined;
+}
 export const RuntimeRequiredFeatures = Object.freeze([
   "lease_fence",
   "assignment_confirm",

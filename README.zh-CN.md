@@ -321,6 +321,22 @@ extended card 和 Push Notification Config 方法。
 - `pollRuntimeCommands`、`ackRuntimeCancel` 和 `callRuntimeAgent`
 - `buildRuntimeInvocationProof`
 
+## 委派结果与 Core 任务接口
+
+Worker 设置 `optionalFeatures: [RuntimeDelegatedRunReadFeature]`（从
+`@openlinker/sdk/runtime` 导入常量）后可申请委派结果读取。Handler 检查
+`run.canReadDelegatedRuns`，再用 `await run.readDelegatedRun(childRunId)` 读取直接子 Run
+的状态、输出和错误；子 Run 未结束时可在 Handler 存活期间再次查询。请求仅使用当前
+Attempt 临时凭据，Core 验签并核对存活父任务与直接子 Run 归属。旧任务或不支持该方法的
+自定义传输抛出 `RuntimeDelegationUnsupportedError`；Handler 结束或取消会停止进行中的
+读取。必需功能集和基础 contract digest 不变。
+
+平台 Client 新增 `cancelRun(runId)` 和
+`recommendTask({ query: "研究资料", skillIds: ["skill-id"] })`。取消成功只表示 Core 接收
+请求，须检查 `cancel_state` 与后续 Run 状态。推荐会创建私有 Core Task，需要
+`tasks:create` 权限。任务与委派读取分别登记在 `contracts/core-tasks.v1.json` 和
+`contracts/core-runtime-delegation.json`。
+
 ## 开发
 
 ```bash

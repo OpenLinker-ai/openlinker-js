@@ -4,6 +4,22 @@ import type {
 } from "./runtime-types.js";
 
 export const RuntimeCallAgentPath = "/api/v1/agent-runtime/call-agent" as const;
+export const RuntimeDelegatedRunReadPath = "/api/v1/agent-runtime/delegated-runs/read" as const;
+
+/** Feature detection only. Core verifies signatures and live Attempt/child ownership. */
+export function runtimeDelegationReadAdvertised(token: string): boolean {
+  if (!validCapability(token, "ol_inv_v2.")) return false;
+  try {
+    const payload = token.split(".")[2]!;
+    if (!/^[A-Za-z0-9_-]+$/.test(payload)) return false;
+    const bytes = Uint8Array.from(atob(payload.replace(/-/g, "+").replace(/_/g, "/")),
+      (character) => character.charCodeAt(0));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))?.audience ===
+      "openlinker.runtime.v2/delegation";
+  } catch {
+    return false;
+  }
+}
 
 const RuntimeInvocationProofDomain = "openlinker/runtime-v2/invocation-proof";
 const encoder = new TextEncoder();

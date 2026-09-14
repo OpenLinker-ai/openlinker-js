@@ -1,5 +1,19 @@
 # Changelog
 
+## SDK feature synchronization — Unreleased
+
+- Align the three SDKs on Core Run cancellation and private task recommendation
+  contracts; keep task recommendation separate from the general client manifest.
+- Document optional Attempt-scoped delegated result reads and the negotiated
+  `delegated_run_read.v1` capability without changing the base Runtime digest.
+- Add the missing client methods, delegated read transport/handler methods, and
+  validated optional Worker features. Preserve credential separation and stop
+  delegated reads when the handler finishes or its Attempt is canceled.
+- TypeScript source compatibility: `RuntimeContext` now requires
+  `canReadDelegatedRuns` and `readDelegatedRun`. Handwritten test doubles must
+  implement both members; SDK-created contexts already provide them. The
+  low-level custom transport method remains optional.
+
 ## Unreleased
 
 - Accept and validate Core-owned standard and Browser Runtime authority envelopes, expose Browser interaction policy and canonical mutation-origin evidence to Runtime handlers, and continue rejecting unknown or tampered authority fields before handler execution.

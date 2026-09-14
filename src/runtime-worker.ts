@@ -29,6 +29,7 @@ import {
 } from "./runtime-store.js";
 import {
   RuntimeContractDigest,
+  RuntimeDelegationUnsupportedError,
   RuntimeMaxNodeCapacity,
   RuntimeRequiredFeatures,
   RuntimeResumeActions,
@@ -37,6 +38,7 @@ import {
   type RuntimeAssignmentRejectedPayload,
   type RuntimeAttemptIdentity,
   type RuntimeCommandsResponse,
+  type RuntimeDelegatedRun,
   type RuntimeDrainPayload,
   type RuntimeHelloPayload,
   type RuntimeLeaseRenewedPayload,
@@ -54,6 +56,7 @@ import {
   type RuntimeRunSummary,
 } from "./runtime-types.js";
 import { RuntimeCredentialManager } from "./runtime-credential-manager.js";
+import { runtimeDelegationReadAdvertised } from "./runtime-invocation.js";
 import {
   RuntimeWebSocketError,
   type RuntimeWebSocketSessionOptions,
@@ -123,6 +126,8 @@ export interface RuntimeAuthorityContext {
 }
 
 export interface RuntimeContext {
+  readonly canReadDelegatedRuns: boolean;
+  readDelegatedRun(runId: string): Promise<RuntimeDelegatedRun>;
   readonly runId: string;
   readonly agentId: string;
   readonly input: JsonObject;
@@ -148,6 +153,7 @@ export interface RuntimeWorkerLogger {
 }
 
 export interface RuntimeWorkerConfig {
+  optionalFeatures?: readonly string[] | undefined;
   platformURL?: string | undefined;
   runtimeURL?: string | undefined;
   transport?: RuntimeTransportMode | undefined;
@@ -282,6 +288,11 @@ export interface RuntimeWorkerClient {
     request: { targetAgentId: string; input: JsonObject; metadata?: JsonObject; reason?: string },
     options?: RequestOptions,
   ): Promise<RuntimeRunSummary>;
+  readRuntimeDelegatedRun?(
+    authorization: { invocationContext: string; token: string; idempotencyKey: string },
+    runId: string,
+    options?: RequestOptions,
+  ): Promise<RuntimeDelegatedRun>;
 }
 
 export interface RuntimeWorkerDuplex {
@@ -335,6 +346,7 @@ export interface RuntimeWorkerDependencies {
 interface ActiveAttempt {
   stored: RuntimeStoredAssignment;
   controller: AbortController;
+  readController: AbortController;
   done: Promise<void>;
   resolveDone: () => void;
   startedAt: number;
@@ -1182,6 +1194,7 @@ export class RuntimeWorker {
     const active: ActiveAttempt = {
       stored,
       controller,
+      readController: new AbortController(),
       done: done.promise,
       resolveDone: done.resolve,
       startedAt: this.dependencies.now(),
@@ -1227,6 +1240,7 @@ export class RuntimeWorker {
       ? result.durationMs
       : Math.max(0, this.dependencies.now() - active.startedAt);
     active.handlerFinished = true;
+    active.readController.abort();
     // Core owns the canceled terminal state. Once a matching cancel command
     // has fenced this Attempt, a late handler return must never create a
     // competing Result spool entry.
@@ -1290,6 +1304,22 @@ export class RuntimeWorker {
       metadata: internal.metadata,
       ...(internal.authority ? { authority: internal.authority } : {}),
       signal: active.controller.signal,
+      canReadDelegatedRuns: runtimeDelegationReadAdvertised(assignment.agentInvocationToken) &&
+        typeof this.requiredTransport().http.readRuntimeDelegatedRun === "function",
+      readDelegatedRun: async (runId) => {
+        if (active.controller.signal.aborted || active.handlerFinished) throw abortError(active.controller.signal);
+        if (!runtimeDelegationReadAdvertised(assignment.agentInvocationToken)) throw new RuntimeDelegationUnsupportedError();
+        const signal = combinedSignal(active.controller.signal, active.readController.signal);
+        return this.policyOperation(() => {
+          const http = this.requiredTransport().http;
+          if (!http.readRuntimeDelegatedRun) throw new RuntimeDelegationUnsupportedError();
+          return http.readRuntimeDelegatedRun({
+            invocationContext: assignment.nodeEnvelope,
+            token: assignment.agentInvocationToken,
+            idempotencyKey: `read-delegated-${runId}`,
+          }, runId, { signal });
+        }, signal);
+      },
       emit: async (eventType, payload = {}) => {
         if (active.controller.signal.aborted || active.handlerFinished) {
           throw abortError(active.controller.signal);
@@ -1892,7 +1922,7 @@ export class RuntimeWorker {
       sessionEpoch: identity.sessionEpoch,
       nodeVersion: this.config.nodeVersion,
       capacity: this.capacitySnapshot().capacity,
-      features: RuntimeRequiredFeatures,
+      features: [...RuntimeRequiredFeatures, ...(this.config.optionalFeatures ?? [])],
       contractDigest: RuntimeContractDigest,
     };
   }
@@ -2336,6 +2366,18 @@ interface RequiredTimingConfig {
 }
 
 function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & RequiredTimingConfig {
+  if (config.optionalFeatures !== undefined && !Array.isArray(config.optionalFeatures)) {
+    throw new Error("Runtime optional features must be an array");
+  }
+  const optionalFeatures = [...(config.optionalFeatures ?? [])];
+  const seen = new Set<string>(RuntimeRequiredFeatures);
+  for (const feature of optionalFeatures) {
+    if (typeof feature !== "string" || !/^[a-z0-9][a-z0-9_.-]{0,99}$/.test(feature)) {
+      throw new Error("Runtime optional feature is invalid");
+    }
+    if (seen.has(feature)) throw new Error("Runtime optional features must be unique and distinct from required features");
+    seen.add(feature);
+  }
   const transport = (config.transport ?? "auto").toLowerCase() as RuntimeTransportMode;
   if (!(["auto", "ws", "pull"] as string[]).includes(transport)) {
     throw new Error("RuntimeWorker transport must be auto, ws, or pull");
@@ -2381,6 +2423,7 @@ function normalizeConfig(config: RuntimeWorkerConfig): RuntimeWorkerConfig & Req
   );
   return {
     ...config,
+    optionalFeatures: Object.freeze(optionalFeatures.sort()),
     nodeId: config.nodeId?.trim() ?? "",
     agentId: config.agentId?.trim() ?? "",
     transport,

@@ -348,6 +348,25 @@ Reliable Worker and strict Runtime protocol, from `@openlinker/sdk/runtime`:
 - `pollRuntimeCommands`, `ackRuntimeCancel`, and `callRuntimeAgent`
 - `buildRuntimeInvocationProof`
 
+## Delegated results and Core task operations
+
+Set `optionalFeatures: [RuntimeDelegatedRunReadFeature]` on `RuntimeWorker`
+(import the constant from `@openlinker/sdk/runtime`). In a confirmed handler,
+`run.canReadDelegatedRuns` indicates whether `await run.readDelegatedRun(childRunId)`
+can read a direct child's status, output and error fields. A running child can be
+polled while the handler remains active. Reads use only the Attempt invocation
+capability, and Core checks its signature, live parent and direct child ownership.
+Legacy assignments or custom transports without this method fail with
+`RuntimeDelegationUnsupportedError`. Handler completion or cancellation stops
+in-flight reads. Optional features do not alter the base contract digest.
+
+The platform client exposes `cancelRun(runId)` and
+`recommendTask({ query: "research", skillIds: ["skill-id"] })`. Cancellation is a
+Core request; inspect `cancel_state` and the later Run status before treating it
+as terminal. Recommendation creates a private Core task and requires `tasks:create`.
+The task endpoint and optional Runtime read are listed separately in
+`contracts/core-tasks.v1.json` and `contracts/core-runtime-delegation.json`.
+
 ## Development
 
 ```bash

@@ -21,6 +21,7 @@ import {
   decodeRuntimeResultAck,
   decodeRuntimeResumeResponse,
   decodeRuntimeRunSummary,
+  decodeRuntimeDelegatedRun,
   encodeRuntimeAssignmentAck,
   encodeRuntimeAssignmentReject,
   encodeRuntimeCallAgent,
@@ -38,6 +39,8 @@ import {
 } from "./runtime-codec.js";
 import {
   RuntimeCallAgentPath,
+  RuntimeDelegatedRunReadPath,
+  runtimeDelegationReadAdvertised,
   assertRuntimeCallAgentAuthorization,
   buildRuntimeInvocationProof,
 } from "./runtime-invocation.js";
@@ -65,9 +68,10 @@ import type {
   RuntimeRunResultAckPayload,
   RuntimeRunResultPayload,
   RuntimeRunSummary,
+  RuntimeDelegatedRun,
   RuntimeSessionCloseRequest,
 } from "./runtime-types.js";
-import { RuntimeAttachmentHeader, RuntimeMaxMessageBytes } from "./runtime-types.js";
+import { RuntimeAttachmentHeader, RuntimeMaxMessageBytes, RuntimeDelegationUnsupportedError } from "./runtime-types.js";
 
 export * from "./runtime-types.js";
 export * from "./runtime-invocation.js";
@@ -430,6 +434,32 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
       throw new Error("OpenLinker Runtime: delegated call status does not match its Run summary");
     }
     return summary;
+  }
+
+  async readRuntimeDelegatedRun(
+    authorization: RuntimeCallAgentAuthorization,
+    runId: string,
+    options: RequestOptions = {},
+  ): Promise<RuntimeDelegatedRun> {
+    assertRuntimeCallAgentAuthorization(authorization);
+    assertRuntimeUUID(runId, "delegated Run ID");
+    if (!runtimeDelegationReadAdvertised(authorization.token)) throw new RuntimeDelegationUnsupportedError();
+    const body = new TextEncoder().encode(JSON.stringify({ run_id: runId }));
+    const proof = await buildRuntimeInvocationProof(authorization.token, {
+      method: "POST", path: RuntimeDelegatedRunReadPath, body,
+      context: authorization.invocationContext, idempotencyKey: authorization.idempotencyKey,
+    });
+    const response = await this.fetchAgentRuntimeBytesRaw("POST", RuntimeDelegatedRunReadPath,
+      body, authorization.token, new Headers({
+        "Idempotency-Key": authorization.idempotencyKey,
+        "OpenLinker-Invocation-Context": authorization.invocationContext,
+        "OpenLinker-Invocation-Proof": proof,
+      }), withoutRuntimeAttachment(options));
+    await assertRuntimeResponseOK(response);
+    if (response.status !== 200) throw new Error("OpenLinker Runtime: delegated Run read must return 200");
+    const result = decodeRuntimeDelegatedRun(await readRuntimeJSON(response));
+    if (result.runId !== runId) throw new Error("OpenLinker Runtime: delegated Run ID mismatch");
+    return result;
   }
 
   private async runtimeAttachedRequiredJSON(
