@@ -1,6 +1,16 @@
 # Changelog
 
-## SDK feature synchronization — Unreleased
+## v0.2.0 — 2026-10-04
+
+- Align package, lockfile and SDK agent version metadata with the formal
+  `v0.2.0` source release. Public API and Runtime behavior are unchanged by
+  this version update; the compatibility changes below apply to this release.
+- Update the Undici 6.x minimum and lockfile to the patched 6.28.1 release
+  (GHSA-rfgv-xxqx-mfg5, GHSA-3wwx-pv8p-q78v, GHSA-r53p-7pc4-xj5r).
+- This GitHub release supplies a versioned npm tarball; it does not by itself
+  establish publication to the npm registry.
+
+### SDK feature synchronization
 
 - Align the three SDKs on Core Run cancellation and private task recommendation
   contracts; keep task recommendation separate from the general client manifest.
@@ -9,21 +19,12 @@
 - Add the missing client methods, delegated read transport/handler methods, and
   validated optional Worker features. Preserve credential separation and stop
   delegated reads when the handler finishes or its Attempt is canceled.
-- TypeScript source compatibility: `RuntimeContext` now requires
+- Breaking (TypeScript source): `RuntimeContext` now requires
   `canReadDelegatedRuns` and `readDelegatedRun`. Handwritten test doubles must
   implement both members; SDK-created contexts already provide them. The
   low-level custom transport method remains optional.
 
-## Unreleased
-
 - Accept and validate Core-owned standard and Browser Runtime authority envelopes, expose Browser interaction policy and canonical mutation-origin evidence to Runtime handlers, and continue rejecting unknown or tampered authority fields before handler execution.
-
-All notable changes to `@openlinker/sdk` will be documented in this file.
-
-This SDK is currently pre-1.0. Breaking changes may happen before the Core API,
-runtime helper, callback, and A2A contracts are declared stable.
-
-## Unreleased
 
 ### Added
 

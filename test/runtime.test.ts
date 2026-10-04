@@ -77,6 +77,7 @@ test("Runtime HTTP flow keeps claim and assignment ACK separate", async () => {
       const headers = new Headers(request.headers);
       assert.equal(headers.get("authorization"), "Bearer ol_agent_v2");
       assert.equal(headers.get("content-type"), "application/json");
+      assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/runtime/0.2.0");
       assert.equal(request.method, "POST");
       assert.equal(
         headers.get(RuntimeAttachmentHeader),
