@@ -1,6 +1,6 @@
 {
   "name": "@openlinker/sdk",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Official TypeScript SDK for OpenLinker Core: Agent calls from browsers and Edge runtimes, runs, SSE, webhooks, A2A, and a server-only durable Runtime Worker.",
   "type": "module",
   "license": "Apache-2.0",
@@ -70,7 +70,7 @@
     "access": "public"
   },
   "dependencies": {
-    "undici": "^6.28.0",
+    "undici": "^6.28.1",
     "ws": "^8.21.3"
   }
 }

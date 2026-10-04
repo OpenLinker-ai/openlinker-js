@@ -177,7 +177,7 @@ export class OpenLinkerClient {
     this.#agentToken = options.agentToken;
     this.#headers = options.headers;
     this.#fetch = fetchImpl as FetchLike;
-    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.1.4";
+    this.#sdkAgent = options.sdkAgent ?? "@openlinker/sdk/0.2.0";
     this.#runtimeMode = options.runtimeMode === true;
   }
 

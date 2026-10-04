@@ -97,7 +97,7 @@ export class OpenLinkerRuntime extends OpenLinkerClient {
       baseUrl: options.baseUrl,
       headers: sanitizeRuntimeHeaderProvider(options.headers),
       fetch: options.fetch,
-      sdkAgent: options.sdkAgent ?? "@openlinker/sdk/runtime/0.1.4",
+      sdkAgent: options.sdkAgent ?? "@openlinker/sdk/runtime/0.2.0",
       agentToken: options.agentToken,
       runtimeMode: true,
     } as unknown as ConstructorParameters<typeof OpenLinkerClient>[0]);

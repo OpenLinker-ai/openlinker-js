@@ -95,7 +95,7 @@ test("listAgents builds Core API URL and authorization header", async () => {
   );
   const headers = new Headers(call.init.headers);
   assert.equal(headers.get("authorization"), "Bearer ol_user_test");
-  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.1.4");
+  assert.equal(headers.get("x-openlinker-sdk"), "@openlinker/sdk/0.2.0");
 });
 
 test("client rejects agent token and points callers to runtime entry", () => {
