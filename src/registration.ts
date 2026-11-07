@@ -109,6 +109,8 @@ interface PendingRegistrationJournal {
   save(record: PendingRegistration): Promise<boolean>;
   /** Removes the record only while it still holds `agentToken`. */
   clear(agentToken: string): Promise<void>;
+  /** Syncs the record's directory; rejects on a genuine I/O error. */
+  sync(): Promise<void>;
 }
 
 /**
@@ -145,6 +147,10 @@ function onRegistrationEnvPath<T>(path: string, task: () => Promise<T>): Promise
  * existing ancestor directory resolved through symlinks (for example /tmp/x.env
  * and /private/tmp/x.env on macOS). Resolving the nearest existing ancestor,
  * not only the parent, keeps the name stable when the parent is created later.
+ *
+ * EnvRegistrationStore has always resolved its path with `path.resolve`, which
+ * collapses ".." lexically, and does all file I/O on that path; resolving it
+ * the same way here keeps the key on the very file the store reads and writes.
  */
 function canonicalRegistrationEnvPath(path: string): string {
   const absolute = resolve(path);
@@ -224,6 +230,7 @@ export class EnvRegistrationStore implements RegistrationStore {
       load: () => serialized(() => loadPendingRegistration(this.path)),
       save: (record) => serialized(async () => savePendingRegistration(this.path, record)),
       clear: (agentToken) => serialized(async () => clearPendingRegistration(this.path, agentToken)),
+      sync: () => serialized(async () => fsyncDirectory(dirname(this.path))),
     });
   }
 
@@ -501,6 +508,10 @@ async function redeemNewRegistration(
     // A record that differs in any way (platform, request, mint parameters or
     // creator) is never replayed; it stays until the attempt below replaces it.
     if (previous && pendingRegistrationMatches(previous, apiBase, body, mint)) {
+      // An earlier start may have written this record and then failed to
+      // sync its directory, so confirm it is durable before Core is asked to
+      // redeem it.
+      await journal.sync();
       const replay: PendingRegistration = {
         ...previous,
         request: {
@@ -871,7 +882,7 @@ const pendingRegistrationWriteAttempts = 3;
  * rename, so the record is durable before the token is redeemed.
  */
 function savePendingRegistration(path: string, record: PendingRegistration): boolean {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  makePendingRegistrationDirectory(dirname(path));
   for (let attempt = 0; attempt < pendingRegistrationWriteAttempts; attempt += 1) {
     const before = readIfPresent(path);
     const content = before?.toString("utf8") ?? "";
@@ -903,6 +914,23 @@ function savePendingRegistration(path: string, record: PendingRegistration): boo
     if (replaceRegistrationEnvIfUnchanged(path, rendered, before)) return true;
   }
   return false;
+}
+
+/**
+ * Creates `directory` as `mkdir -p` does and then syncs the parent of every
+ * directory it created, top down, so the record's path is durable before the
+ * token is redeemed. It runs before the record is written, so a failed sync
+ * leaves no record behind.
+ */
+function makePendingRegistrationDirectory(directory: string): void {
+  const firstCreated = mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (firstCreated === undefined) return;
+  const created: string[] = [];
+  for (let current = directory; ; current = dirname(current)) {
+    created.unshift(current);
+    if (current === firstCreated || dirname(current) === current) break;
+  }
+  for (const each of created) fsyncDirectory(dirname(each));
 }
 
 /**

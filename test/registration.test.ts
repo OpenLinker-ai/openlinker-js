@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { writeFileSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -706,6 +706,17 @@ async function aliasOf(t: { after(fn: () => Promise<void>): void }, path: string
   return join(alias, basename(path));
 }
 
+/**
+ * `path` as "<link>/sub/../<name>", where link is a symlinked directory: the
+ * same file whether ".." is resolved lexically, as EnvRegistrationStore
+ * resolves its path, or after the symlink, as the file system does.
+ */
+async function dotdotAliasOf(t: { after(fn: () => Promise<void>): void }, path: string): Promise<string> {
+  await mkdir(join(dirname(path), "sub"), { recursive: true });
+  const alias = await aliasOf(t, path);
+  return join(dirname(alias), "sub") + "/../" + basename(path);
+}
+
 const completedRegistrationA: AgentRegistration = {
   agentId: "agent-a",
   agentSlug: "agent-a",
@@ -788,9 +799,13 @@ test("a pending cleanup waits for another store's completed save on the same fil
 });
 
 test("concurrent first registrations for one file share a single attempt", async (t) => {
-  for (const aliased of [false, true]) {
+  for (const mode of ["same path", "symlinked directory", "dotdot through a symlinked directory"]) {
     const pathA = await tempEnv(t);
-    const pathB = aliased ? await aliasOf(t, pathA) : pathA;
+    const pathB = mode === "same path"
+      ? pathA
+      : mode === "symlinked directory"
+        ? await aliasOf(t, pathA)
+        : await dotdotAliasOf(t, pathA);
     const core = replayCore();
     core.state.dropAfterCommit = 1;
     const input = {
@@ -822,7 +837,7 @@ test("concurrent first registrations for one file share a single attempt", async
     );
     const registrationB = await outcomeB;
     // B replays A's recorded token, so nothing is orphaned.
-    assert.equal((registrationB as AgentRegistration).agentToken, "ol_agent_minted_1", `aliased=${aliased}`);
+    assert.equal((registrationB as AgentRegistration).agentToken, "ol_agent_minted_1", mode);
     assert.equal(core.state.createTokenCalls, 1);
     assert.deepEqual(core.state.registerTokens, ["ol_agent_minted_1", "ol_agent_minted_1"]);
     const loaded = await new EnvRegistrationStore(pathA).loadAgentRegistration();
@@ -863,6 +878,101 @@ test("a genuine directory sync error fails the start before redemption", async (
   );
   assert.equal(core.state.createTokenCalls, 1);
   assert.deepEqual(core.state.registerTokens, []);
+});
+
+/**
+ * Reports every directory fsync to `onSync`, which may throw to fail it, until
+ * the returned function restores the real calls.
+ */
+function interceptDirectorySync(
+  t: { after(fn: () => void): void },
+  onSync: (directory: string) => void,
+): () => void {
+  const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  const directories = new Map<number, string>();
+  fs.openSync = ((path: Parameters<typeof originalOpen>[0], ...rest: unknown[]) => {
+    const descriptor = (originalOpen as (...args: unknown[]) => number)(path, ...rest);
+    if (fs.fstatSync(descriptor).isDirectory()) directories.set(descriptor, String(path));
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    const directory = directories.get(descriptor);
+    directories.delete(descriptor);
+    if (directory !== undefined) onSync(directory);
+    originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+  const restore = () => {
+    fs.openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  };
+  t.after(restore);
+  return restore;
+}
+
+test("a persistent directory sync error never redeems the record", async (t) => {
+  const path = await tempEnv(t);
+  const core = replayCore();
+  const input = {
+    slug: "demo-agent",
+    name: "Demo Agent",
+    apiBase: replayBase,
+    userToken: "ol_user_creator",
+    fetch: core.fetch,
+  };
+  const restore = interceptDirectorySync(t, () => {
+    throw Object.assign(new Error("EIO: directory sync failed"), { code: "EIO" });
+  });
+  // The first start fails after writing the record, the second before
+  // replaying it, and neither redeems.
+  for (const start of [1, 2]) {
+    await assert.rejects(ensureAgent({ ...input, store: new EnvRegistrationStore(path) }), { code: "EIO" }, `start ${start}`);
+  }
+  assert.equal(core.state.createTokenCalls, 1);
+  assert.deepEqual(core.state.registerTokens, []);
+
+  // Once the directory syncs, the recorded token is redeemed.
+  restore();
+  const registration = await ensureAgent({ ...input, store: new EnvRegistrationStore(path) });
+  assert.equal(registration.agentToken, "ol_agent_minted_1");
+  assert.equal(core.state.createTokenCalls, 1);
+  assert.deepEqual(core.state.registerTokens, ["ol_agent_minted_1"]);
+});
+
+test("a pending-record write syncs the parent of every directory it creates, top down", async (t) => {
+  for (const failTop of [false, true]) {
+    const root = dirname(await tempEnv(t));
+    const path = join(root, "a", "b", ".env");
+    const core = replayCore();
+    const synced: string[] = [];
+    interceptDirectorySync(t, (directory) => {
+      synced.push(directory);
+      if (failTop && directory === root) {
+        throw Object.assign(new Error("EIO: directory sync failed"), { code: "EIO" });
+      }
+    });
+    const outcome = ensureAgent({
+      slug: "demo-agent",
+      name: "Demo Agent",
+      apiBase: replayBase,
+      userToken: "ol_user_creator",
+      store: new EnvRegistrationStore(path),
+      fetch: core.fetch,
+    });
+    if (failTop) {
+      // The parent sync runs before the record is written, so a failure
+      // leaves nothing to replay and nothing is redeemed.
+      await assert.rejects(outcome, { code: "EIO" });
+      await assert.rejects(stat(path), { code: "ENOENT" });
+      assert.deepEqual(core.state.registerTokens, []);
+    } else {
+      assert.equal((await outcome).agentToken, "ol_agent_minted_1");
+      assert.deepEqual(synced.slice(0, 3), [root, join(root, "a"), join(root, "a", "b")]);
+    }
+  }
 });
 
 test("an unsupported directory sync is skipped", async (t) => {
