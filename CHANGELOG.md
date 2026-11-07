@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `ensureAgent` with the default `EnvRegistrationStore` records a pending
+  registration before redeeming a pending Agent Token, so a crash or lost
+  response after Core committed can be retried with the same token instead of
+  failing with 401 or a slug conflict. A record is replayed only when the API
+  base, every request field, the mint parameters, the credential actually sent
+  for minting and the endpoint credential (fingerprints only) match exactly;
+  otherwise the previous flow runs. Subclassed stores, clients that override
+  `createAgentToken`, the public API and normal-path requests are unchanged.
+  Recovery needs a Core that replays redeemed registrations.
+
 ## v0.2.0 — 2026-10-04
 
 - Align package, lockfile and SDK agent version metadata with the formal

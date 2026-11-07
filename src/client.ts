@@ -141,7 +141,63 @@ class ResponseBodyTooLargeError extends Error {
   }
 }
 
+/**
+ * A pending Agent Token mint whose request headers were resolved once.
+ * Package-internal: neither package entry point exports it.
+ */
+export interface PreparedAgentTokenMint {
+  /** The Authorization header the mint request carries, or "" without one. */
+  readonly authorization: string;
+  /**
+   * Sends the mint request with exactly those headers; the client's header and
+   * User Token providers are not called again.
+   */
+  createAgentToken(request: CreateAgentTokenRequest): Promise<AgentTokenResponse>;
+}
+
+let prepareMint: ((client: OpenLinkerClient) => Promise<PreparedAgentTokenMint>) | undefined;
+
+/**
+ * Resolves the headers a createAgentToken call sends, once, so registration
+ * can fingerprint the credential that mints and then mint with that same
+ * credential. Package-internal: neither package entry point exports it.
+ * Returns undefined for a value that is not an OpenLinkerClient, and for a
+ * client whose createAgentToken is not the built-in one (overridden by a
+ * subclass, on the instance or on the prototype): such a client must keep
+ * minting through its own method.
+ */
+export async function prepareAgentTokenMint(
+  client: OpenLinkerClient,
+): Promise<PreparedAgentTokenMint | undefined> {
+  if (
+    !(client instanceof OpenLinkerClient)
+    || client.createAgentToken !== builtinCreateAgentToken
+    || !prepareMint
+  ) {
+    return undefined;
+  }
+  return await prepareMint(client);
+}
+
 export class OpenLinkerClient {
+  static {
+    prepareMint = async (client) => {
+      // The same headers createAgentToken builds: no request options, a JSON body.
+      const headers = await client.buildHeaders({}, true);
+      return {
+        authorization: headers.get("authorization") ?? "",
+        createAgentToken: (request) => client.request<AgentTokenResponse>(
+          "POST",
+          "/creator/agent-tokens",
+          toCreateAgentTokenBody(request),
+          {},
+          undefined,
+          headers,
+        ),
+      };
+    };
+  }
+
   readonly baseUrl: string;
 
   readonly #userToken:
@@ -959,8 +1015,17 @@ export class OpenLinkerClient {
     body: unknown,
     options: RequestOptions,
     query?: URLSearchParams,
+    preparedHeaders?: Headers,
   ): Promise<T> {
-    const response = await this.fetchRaw(method, path, body, options, query);
+    const response = await this.fetchRaw(
+      method,
+      path,
+      body,
+      options,
+      query,
+      "application/json",
+      preparedHeaders,
+    );
     if (!response.ok) {
       throw await errorFromResponse(response);
     }
@@ -974,8 +1039,9 @@ export class OpenLinkerClient {
     options: RequestOptions,
     query?: URLSearchParams,
     accept = "application/json",
+    preparedHeaders?: Headers,
   ): Promise<Response> {
-    const headers = await this.buildHeaders(options, body !== undefined);
+    const headers = preparedHeaders ?? await this.buildHeaders(options, body !== undefined);
     headers.set("accept", accept);
     const init: RequestInit = {
       method,
@@ -1045,6 +1111,12 @@ export class OpenLinkerClient {
   }
 
 }
+
+/**
+ * The built-in createAgentToken, captured when the module loads, so a later
+ * replacement on the prototype is still recognised as an override.
+ */
+const builtinCreateAgentToken = OpenLinkerClient.prototype.createAgentToken;
 
 function normalizeBaseUrl(raw: string): string {
   let base = raw.trim().replace(/\/+$/, "");
