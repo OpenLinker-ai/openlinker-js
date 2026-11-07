@@ -6,12 +6,13 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 import { OpenLinkerClient, OpenLinkerError, prepareAgentTokenMint } from "./client.js";
@@ -129,13 +130,69 @@ const pendingRegistrationJournals = new WeakMap<RegistrationStore, PendingRegist
 const registrationEnvPathQueues = new Map<string, Promise<void>>();
 
 function onRegistrationEnvPath<T>(path: string, task: () => Promise<T>): Promise<T> {
-  const run = (registrationEnvPathQueues.get(path) ?? Promise.resolve()).then(task);
+  const key = canonicalRegistrationEnvPath(path);
+  const run = (registrationEnvPathQueues.get(key) ?? Promise.resolve()).then(task);
   const settled = run.then(() => undefined, () => undefined);
-  registrationEnvPathQueues.set(path, settled);
+  registrationEnvPathQueues.set(key, settled);
   void settled.then(() => {
-    if (registrationEnvPathQueues.get(path) === settled) registrationEnvPathQueues.delete(path);
+    if (registrationEnvPathQueues.get(key) === settled) registrationEnvPathQueues.delete(key);
   });
   return run;
+}
+
+/**
+ * Names one env file however it is reached: the absolute path with its longest
+ * existing ancestor directory resolved through symlinks (for example /tmp/x.env
+ * and /private/tmp/x.env on macOS). Resolving the nearest existing ancestor,
+ * not only the parent, keeps the name stable when the parent is created later.
+ */
+function canonicalRegistrationEnvPath(path: string): string {
+  const absolute = resolve(path);
+  let directory = dirname(absolute);
+  let rest = basename(absolute);
+  for (;;) {
+    try {
+      return join(realpathSync(directory), rest);
+    } catch {
+      const parent = dirname(directory);
+      if (parent === directory) return absolute;
+      rest = join(basename(directory), rest);
+      directory = parent;
+    }
+  }
+}
+
+/**
+ * One lock per canonical env file path. It serializes a whole first
+ * registration in this process: loading the stored registration and the
+ * record, choosing, minting, writing the record, redeeming, and saving or
+ * cleaning up. A second start for the same file waits, then reuses the
+ * completed registration or replays the matching record. It is taken before
+ * any path queue task and is the only lock held across network calls.
+ * Processes are not coordinated, as before.
+ */
+const firstRegistrationLocks = new Map<string, Promise<void>>();
+
+/**
+ * Takes the first-registration lock of an EnvRegistrationStore and returns an
+ * idempotent release. Other stores are not locked, as before.
+ */
+async function lockFirstRegistration(store: RegistrationStore): Promise<() => void> {
+  if (!pendingRegistrationJournalFor(store)) return () => {};
+  const key = canonicalRegistrationEnvPath((store as EnvRegistrationStore).path);
+  const previous = firstRegistrationLocks.get(key) ?? Promise.resolve();
+  let unlock = () => {};
+  const held = new Promise<void>((resolve) => { unlock = resolve; });
+  const tail = previous.then(() => held);
+  firstRegistrationLocks.set(key, tail);
+  await previous;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    unlock();
+    if (firstRegistrationLocks.get(key) === tail) firstRegistrationLocks.delete(key);
+  };
 }
 
 /**
@@ -227,7 +284,25 @@ export async function ensureAgent(
     throw new TypeError(`unsupported registration policy ${policy}`);
   }
   const store = input.store ?? new EnvRegistrationStore(input.envPath);
+  const release = await lockFirstRegistration(store);
+  try {
+    return await ensureAgentWithStore(input, client, policy, store, release);
+  } finally {
+    release();
+  }
+}
+
+async function ensureAgentWithStore(
+  input: EnsureAgentRequest,
+  client: OpenLinkerClient | undefined,
+  policy: RegistrationPolicy,
+  store: RegistrationStore,
+  releaseFirstRegistrationLock: () => void,
+): Promise<AgentRegistration> {
   const stored = await store.loadAgentRegistration();
+  // A completed registration is reused, validated or rotated as before,
+  // without holding the first-registration lock.
+  if (stored) releaseFirstRegistrationLock();
   const userToken = first(input.userToken, process.env.OPENLINKER_USER_TOKEN);
   const agentToken = first(
     input.agentToken,
@@ -863,9 +938,12 @@ function replaceRegistrationEnvIfUnchanged(
   }
 }
 
+const unsupportedDirectorySyncCodes = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP"]);
+
 /**
  * Flushes a directory's entries so a rename or remove inside it is durable.
- * Best effort: platforms that cannot sync a directory, such as Windows, skip it.
+ * Platforms or file systems that cannot sync a directory (Windows, or EINVAL,
+ * ENOTSUP and EOPNOTSUPP) skip it; any other error is thrown.
  */
 function fsyncDirectory(directory: string): void {
   if (process.platform === "win32") return;
@@ -873,8 +951,12 @@ function fsyncDirectory(directory: string): void {
   try {
     descriptor = openSync(directory, "r");
     fsyncSync(descriptor);
-  } catch {
-    // Unsupported here; the rename itself has still happened.
+  } catch (error) {
+    // A directory that cannot be synced is skipped; a genuine I/O error is
+    // reported, so a record write fails before the token is redeemed.
+    if (!unsupportedDirectorySyncCodes.has((error as NodeJS.ErrnoException).code ?? "")) {
+      throw error;
+    }
   } finally {
     if (descriptor !== undefined) {
       try {

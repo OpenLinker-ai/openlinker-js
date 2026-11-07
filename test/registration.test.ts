@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { writeFileSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
@@ -696,6 +697,15 @@ function gateRenamesOnto(t: { after(fn: () => void): void }, path: string) {
   return { renameStarted, open: () => open() };
 }
 
+/** `path` reached through a symlinked directory: the same file under another name. */
+async function aliasOf(t: { after(fn: () => Promise<void>): void }, path: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "openlinker-js-alias-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const alias = join(directory, "alias");
+  await symlink(dirname(path), alias, "dir");
+  return join(alias, basename(path));
+}
+
 const completedRegistrationA: AgentRegistration = {
   agentId: "agent-a",
   agentSlug: "agent-a",
@@ -712,9 +722,10 @@ test("a pending-record write waits for another store's completed save on the sam
   const path = await tempEnv(t);
   const core = replayCore();
   core.state.slugs.add("taken-agent");
-  const gate = gateRenamesOnto(t, path);
+  const aliasPath = await aliasOf(t, path);
+  const gate = gateRenamesOnto(t, aliasPath);
   // Start A's completed save is in flight: its rename is dispatched.
-  const savedA = new EnvRegistrationStore(path).saveAgentRegistration(completedRegistrationA);
+  const savedA = new EnvRegistrationStore(aliasPath).saveAgentRegistration(completedRegistrationA);
   await gate.renameStarted;
 
   const outcomeB = ensureAgent({
@@ -742,12 +753,13 @@ test("a pending cleanup waits for another store's completed save on the same fil
   const path = await tempEnv(t);
   const core = replayCore();
   core.state.slugs.add("taken-agent");
-  const gate = gateRenamesOnto(t, path);
+  const aliasPath = await aliasOf(t, path);
+  const gate = gateRenamesOnto(t, aliasPath);
   let savedA: Promise<void> | undefined;
   const fetch: FetchLike = async (url, init) => {
     if (String(url).endsWith("/agent-registration/agents")) {
       // Start A's completed save is in flight when B's redemption is refused.
-      savedA = new EnvRegistrationStore(path).saveAgentRegistration(completedRegistrationA);
+      savedA = new EnvRegistrationStore(aliasPath).saveAgentRegistration(completedRegistrationA);
       await gate.renameStarted;
     }
     return await core.fetch(url, init);
@@ -773,6 +785,107 @@ test("a pending cleanup waits for another store's completed save on the same fil
   const loaded = await new EnvRegistrationStore(path).loadAgentRegistration();
   assert.equal(loaded?.agentToken, "ol_agent_completed_a");
   assert.equal(readPending(await readFile(path, "utf8")), undefined);
+});
+
+test("concurrent first registrations for one file share a single attempt", async (t) => {
+  for (const aliased of [false, true]) {
+    const pathA = await tempEnv(t);
+    const pathB = aliased ? await aliasOf(t, pathA) : pathA;
+    const core = replayCore();
+    core.state.dropAfterCommit = 1;
+    const input = {
+      slug: "demo-agent",
+      name: "Demo Agent",
+      apiBase: replayBase,
+      userToken: "ol_user_creator",
+    };
+    let fetchCalls = 0;
+    let outcomeB: Promise<unknown> | undefined;
+    const fetch: FetchLike = async (url, init) => {
+      fetchCalls += 1;
+      if (!outcomeB && String(url).endsWith("/creator/agent-tokens")) {
+        // Start B while A is minting. Without the first-registration lock B
+        // would read the empty record, mint a second token and reach Core.
+        outcomeB = ensureAgent({ ...input, store: new EnvRegistrationStore(pathB), fetch })
+          .then((registration) => registration, (error: unknown) => error);
+        for (const deadline = Date.now() + 100; fetchCalls < 2 && Date.now() < deadline;) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+      return await core.fetch(url, init);
+    };
+
+    // A's redemption commits but its response is lost.
+    await assert.rejects(
+      ensureAgent({ ...input, store: new EnvRegistrationStore(pathA), fetch }),
+      /fetch failed/,
+    );
+    const registrationB = await outcomeB;
+    // B replays A's recorded token, so nothing is orphaned.
+    assert.equal((registrationB as AgentRegistration).agentToken, "ol_agent_minted_1", `aliased=${aliased}`);
+    assert.equal(core.state.createTokenCalls, 1);
+    assert.deepEqual(core.state.registerTokens, ["ol_agent_minted_1", "ol_agent_minted_1"]);
+    const loaded = await new EnvRegistrationStore(pathA).loadAgentRegistration();
+    assert.equal(loaded?.agentToken, "ol_agent_minted_1");
+  }
+});
+
+/** Makes directory fsyncs fail with `code` until the test ends. */
+function failDirectorySync(t: { after(fn: () => void): void }, code: string): void {
+  const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+  const original = fs.fsyncSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (fs.fstatSync(descriptor).isDirectory()) {
+      throw Object.assign(new Error(`${code}: directory sync failed`), { code });
+    }
+    original(descriptor);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fs.fsyncSync = original;
+    syncBuiltinESMExports();
+  });
+}
+
+test("a genuine directory sync error fails the start before redemption", async (t) => {
+  const core = replayCore();
+  failDirectorySync(t, "EIO");
+  await assert.rejects(
+    ensureAgent({
+      slug: "demo-agent",
+      name: "Demo Agent",
+      apiBase: replayBase,
+      userToken: "ol_user_creator",
+      store: new EnvRegistrationStore(await tempEnv(t)),
+      fetch: core.fetch,
+    }),
+    { code: "EIO" },
+  );
+  assert.equal(core.state.createTokenCalls, 1);
+  assert.deepEqual(core.state.registerTokens, []);
+});
+
+test("an unsupported directory sync is skipped", async (t) => {
+  for (const code of ["EINVAL", "ENOTSUP", "EOPNOTSUPP"]) {
+    const core = replayCore();
+    const restore = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+    const original = restore.fsyncSync;
+    failDirectorySync(t, code);
+    try {
+      const registration = await ensureAgent({
+        slug: "demo-agent",
+        name: "Demo Agent",
+        apiBase: replayBase,
+        userToken: "ol_user_creator",
+        store: new EnvRegistrationStore(await tempEnv(t)),
+        fetch: core.fetch,
+      });
+      assert.equal(registration.agentToken, "ol_agent_minted_1", code);
+    } finally {
+      restore.fsyncSync = original;
+      syncBuiltinESMExports();
+    }
+  }
 });
 
 test("a contended pending-record write is given up and the start continues as before", async (t) => {
