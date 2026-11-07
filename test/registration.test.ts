@@ -670,6 +670,111 @@ test("a pending-record write keeps a registration another start completed meanwh
   assert.equal(readPending(await readFile(path, "utf8")), undefined);
 });
 
+/**
+ * Holds every async rename onto `path` (a completed save's final step) until
+ * `open` is called; `renameStarted` resolves when the first one is waiting.
+ */
+function gateRenamesOnto(t: { after(fn: () => void): void }, path: string) {
+  const fsp = createRequire(import.meta.url)("node:fs/promises") as typeof import("node:fs/promises");
+  const original = fsp.rename;
+  let open = () => {};
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  let started = () => {};
+  const renameStarted = new Promise<void>((resolve) => { started = resolve; });
+  fsp.rename = (async (from: Parameters<typeof original>[0], to: Parameters<typeof original>[1]) => {
+    if (String(to) === path) {
+      started();
+      await opened;
+    }
+    return await original(from, to);
+  }) as typeof fsp.rename;
+  syncBuiltinESMExports();
+  t.after(() => {
+    fsp.rename = original;
+    syncBuiltinESMExports();
+  });
+  return { renameStarted, open: () => open() };
+}
+
+const completedRegistrationA: AgentRegistration = {
+  agentId: "agent-a",
+  agentSlug: "agent-a",
+  agentName: "Agent A",
+  agentToken: "ol_agent_completed_a",
+  tokenId: "token-a",
+  tokenPrefix: "ol_agent_a",
+  apiBase: replayBase,
+  registeredAt: "2026-11-08T00:00:00Z",
+  updatedAt: "2026-11-08T00:00:00Z",
+};
+
+test("a pending-record write waits for another store's completed save on the same file", async (t) => {
+  const path = await tempEnv(t);
+  const core = replayCore();
+  core.state.slugs.add("taken-agent");
+  const gate = gateRenamesOnto(t, path);
+  // Start A's completed save is in flight: its rename is dispatched.
+  const savedA = new EnvRegistrationStore(path).saveAgentRegistration(completedRegistrationA);
+  await gate.renameStarted;
+
+  const outcomeB = ensureAgent({
+    slug: "taken-agent",
+    name: "Taken Agent",
+    apiBase: replayBase,
+    userToken: "ol_user_creator",
+    store: new EnvRegistrationStore(path),
+    fetch: core.fetch,
+  }).then(() => undefined, (error: unknown) => error);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  // B's journal operations wait for A's save, so B has not redeemed yet.
+  assert.deepEqual(core.state.registerTokens, []);
+
+  gate.open();
+  await savedA;
+  const errorB = await outcomeB;
+  assert.ok(errorB instanceof OpenLinkerError && errorB.status === 409);
+  const loaded = await new EnvRegistrationStore(path).loadAgentRegistration();
+  assert.equal(loaded?.agentToken, "ol_agent_completed_a");
+  assert.equal(readPending(await readFile(path, "utf8")), undefined);
+});
+
+test("a pending cleanup waits for another store's completed save on the same file", async (t) => {
+  const path = await tempEnv(t);
+  const core = replayCore();
+  core.state.slugs.add("taken-agent");
+  const gate = gateRenamesOnto(t, path);
+  let savedA: Promise<void> | undefined;
+  const fetch: FetchLike = async (url, init) => {
+    if (String(url).endsWith("/agent-registration/agents")) {
+      // Start A's completed save is in flight when B's redemption is refused.
+      savedA = new EnvRegistrationStore(path).saveAgentRegistration(completedRegistrationA);
+      await gate.renameStarted;
+    }
+    return await core.fetch(url, init);
+  };
+  let settledB = false;
+  const outcomeB = ensureAgent({
+    slug: "taken-agent",
+    name: "Taken Agent",
+    apiBase: replayBase,
+    userToken: "ol_user_creator",
+    store: new EnvRegistrationStore(path),
+    fetch,
+  }).then(() => undefined, (error: unknown) => error).finally(() => { settledB = true; });
+  await gate.renameStarted;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  // B's cleanup waits for A's save to finish.
+  assert.equal(settledB, false);
+
+  gate.open();
+  await savedA;
+  const errorB = await outcomeB;
+  assert.ok(errorB instanceof OpenLinkerError && errorB.status === 409);
+  const loaded = await new EnvRegistrationStore(path).loadAgentRegistration();
+  assert.equal(loaded?.agentToken, "ol_agent_completed_a");
+  assert.equal(readPending(await readFile(path, "utf8")), undefined);
+});
+
 test("a contended pending-record write is given up and the start continues as before", async (t) => {
   const path = await tempEnv(t);
   const core = replayCore();

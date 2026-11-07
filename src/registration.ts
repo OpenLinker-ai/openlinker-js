@@ -118,6 +118,27 @@ interface PendingRegistrationJournal {
 const pendingRegistrationJournals = new WeakMap<RegistrationStore, PendingRegistrationJournal>();
 
 /**
+ * One queue per resolved env file path. Every mutation of a registration env
+ * file (completed save, pending-record write and pending-record removal) runs
+ * as one task on it, from its first read through its final rename or remove,
+ * so store instances for the same file in this process cannot interleave, and
+ * no completed save's in-flight rename can land during a journal operation.
+ * Processes are not coordinated; that remains the pre-existing limitation of
+ * sharing one env file between concurrent registrations.
+ */
+const registrationEnvPathQueues = new Map<string, Promise<void>>();
+
+function onRegistrationEnvPath<T>(path: string, task: () => Promise<T>): Promise<T> {
+  const run = (registrationEnvPathQueues.get(path) ?? Promise.resolve()).then(task);
+  const settled = run.then(() => undefined, () => undefined);
+  registrationEnvPathQueues.set(path, settled);
+  void settled.then(() => {
+    if (registrationEnvPathQueues.get(path) === settled) registrationEnvPathQueues.delete(path);
+  });
+  return run;
+}
+
+/**
  * Journals only when the store's class is exactly EnvRegistrationStore.
  * Subclasses (for example ones that encrypt or relocate registrations) and
  * custom stores keep their previous behaviour, so no token is written anywhere
@@ -138,7 +159,7 @@ export class EnvRegistrationStore implements RegistrationStore {
   constructor(path = defaultRegistrationEnvPath) {
     this.path = resolve(path.trim() || defaultRegistrationEnvPath);
     const serialized = <T>(task: () => Promise<T>): Promise<T> => {
-      const operation = this.operation.then(task);
+      const operation = this.operation.then(() => onRegistrationEnvPath(this.path, task));
       this.operation = operation.then(() => undefined, () => undefined);
       return operation;
     };
@@ -173,7 +194,7 @@ export class EnvRegistrationStore implements RegistrationStore {
   }
 
   async saveAgentRegistration(registration: AgentRegistration): Promise<void> {
-    const operation = this.operation.then(async () => {
+    const operation = this.operation.then(() => onRegistrationEnvPath(this.path, async () => {
       let values: Map<string, string>;
       try {
         values = await readRegistrationEnv(this.path);
@@ -191,7 +212,7 @@ export class EnvRegistrationStore implements RegistrationStore {
       setEnv(values, "OPENLINKER_REGISTERED_AT", registration.registeredAt);
       setEnv(values, "OPENLINKER_UPDATED_AT", registration.updatedAt);
       await writeRegistrationEnv(this.path, values);
-    });
+    }));
     this.operation = operation.catch(() => undefined);
     await operation;
   }
@@ -767,10 +788,12 @@ const pendingRegistrationWriteAttempts = 3;
  * written (still contended, or too large), so the attempt continues without
  * one, exactly as before the journal existed.
  *
- * Everything here is synchronous, so another store instance in this process
- * cannot interleave. There is no cross-process lock: a write between the final
- * re-read and the rename can still be lost, the same pre-existing limitation
- * as concurrent registrations against one env file.
+ * It runs as one task on the env file's path queue, synchronously, so no other
+ * store instance's mutation in this process can interleave. There is no
+ * cross-process lock: another process's write between the final re-read and
+ * the rename can still be lost, the same pre-existing limitation as concurrent
+ * registrations against one env file. The directory is synced after the
+ * rename, so the record is durable before the token is redeemed.
  */
 function savePendingRegistration(path: string, record: PendingRegistration): boolean {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -833,9 +856,33 @@ function replaceRegistrationEnvIfUnchanged(
     if (!sameRegistrationEnv(readIfPresent(path), before)) return false;
     renameSync(temporary, path);
     chmodSync(path, 0o600);
+    fsyncDirectory(dirname(path));
     return true;
   } finally {
     rmSync(temporary, { force: true });
+  }
+}
+
+/**
+ * Flushes a directory's entries so a rename or remove inside it is durable.
+ * Best effort: platforms that cannot sync a directory, such as Windows, skip it.
+ */
+function fsyncDirectory(directory: string): void {
+  if (process.platform === "win32") return;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(directory, "r");
+    fsyncSync(descriptor);
+  } catch {
+    // Unsupported here; the rename itself has still happened.
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Nothing to recover; the descriptor is released either way.
+      }
+    }
   }
 }
 
@@ -855,11 +902,12 @@ function sameRegistrationEnv(current: Buffer | undefined, before: Buffer | undef
  * - Otherwise only the pending key is removed, and only while it still holds
  *   `agentToken`; completed keys and other lines are kept as they are.
  *
- * Everything here is synchronous, so no other code in this process runs
- * between the comparison, the re-read and the mutation. There is no
- * cross-process lock: another process can still write between the re-read and
- * the rename or unlink, the same pre-existing limitation as concurrent
- * registrations against one env file.
+ * It runs as one task on the env file's path queue, synchronously, so no other
+ * store instance's mutation in this process can interleave between the
+ * comparison, the re-read and the mutation. There is no cross-process lock:
+ * another process can still write between the re-read and the rename or
+ * unlink, the same pre-existing limitation as concurrent registrations against
+ * one env file.
  */
 function clearPendingRegistration(path: string, agentToken: string): void {
   const before = readIfPresent(path);
@@ -872,6 +920,7 @@ function clearPendingRegistration(path: string, agentToken: string): void {
   if (record.createdFile && registrationEnvHasOnlyKey(content, pendingRegistrationEnvKey)) {
     if (!sameRegistrationEnv(readIfPresent(path), before)) return;
     rmSync(path, { force: true });
+    fsyncDirectory(dirname(path));
     return;
   }
   replaceRegistrationEnvIfUnchanged(
