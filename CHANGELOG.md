@@ -11,6 +11,10 @@
   otherwise the previous flow runs. Subclassed stores, clients that override
   `createAgentToken`, the public API and normal-path requests are unchanged.
   Recovery needs a Core that replays redeemed registrations.
+- Tests: the registration directory-sync error tests run only where directories
+  can be synced and are skipped on Windows. A new test simulates win32 on every
+  platform and checks that recovery, replay and cleanup never open or sync a
+  directory there. Production behaviour is unchanged.
 
 ## v0.2.0 — 2026-10-04
 

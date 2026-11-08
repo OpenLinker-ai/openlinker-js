@@ -845,6 +845,17 @@ test("concurrent first registrations for one file share a single attempt", async
   }
 });
 
+/**
+ * The directory-sync tests below inject errors into directory fsyncs, which
+ * only POSIX systems perform. Windows cannot sync a directory and production
+ * skips it there (as the Go SDK does), so those injections would never fire;
+ * "Windows registration never opens or syncs a directory" covers that branch on
+ * every platform instead.
+ */
+const posixDirectorySyncOnly = process.platform === "win32"
+  ? "Windows skips directory syncs; covered by the simulated win32 test"
+  : false;
+
 /** Makes directory fsyncs fail with `code` until the test ends. */
 function failDirectorySync(t: { after(fn: () => void): void }, code: string): void {
   const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
@@ -862,7 +873,7 @@ function failDirectorySync(t: { after(fn: () => void): void }, code: string): vo
   });
 }
 
-test("a genuine directory sync error fails the start before redemption", async (t) => {
+test("a genuine directory sync error fails the start before redemption", { skip: posixDirectorySyncOnly }, async (t) => {
   const core = replayCore();
   failDirectorySync(t, "EIO");
   await assert.rejects(
@@ -913,7 +924,7 @@ function interceptDirectorySync(
   return restore;
 }
 
-test("a persistent directory sync error never redeems the record", async (t) => {
+test("a persistent directory sync error never redeems the record", { skip: posixDirectorySyncOnly }, async (t) => {
   const path = await tempEnv(t);
   const core = replayCore();
   const input = {
@@ -942,7 +953,9 @@ test("a persistent directory sync error never redeems the record", async (t) => 
   assert.deepEqual(core.state.registerTokens, ["ol_agent_minted_1"]);
 });
 
-test("a pending-record write syncs the parent of every directory it creates, top down", async (t) => {
+test("a pending-record write syncs the parent of every directory it creates, top down", {
+  skip: posixDirectorySyncOnly,
+}, async (t) => {
   for (const failTop of [false, true]) {
     const root = dirname(await tempEnv(t));
     const path = join(root, "a", "b", ".env");
@@ -975,7 +988,7 @@ test("a pending-record write syncs the parent of every directory it creates, top
   }
 });
 
-test("an unsupported directory sync is skipped", async (t) => {
+test("an unsupported directory sync is skipped", { skip: posixDirectorySyncOnly }, async (t) => {
   for (const code of ["EINVAL", "ENOTSUP", "EOPNOTSUPP"]) {
     const core = replayCore();
     const restore = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
@@ -996,6 +1009,109 @@ test("an unsupported directory sync is skipped", async (t) => {
       syncBuiltinESMExports();
     }
   }
+});
+
+/**
+ * Behaves as Windows does for directory syncs until the returned restore runs
+ * or the test ends: `process.platform` reads "win32", every open of a
+ * directory is recorded, and fsync of a directory descriptor fails with EPERM,
+ * as FlushFileBuffers does on a directory handle there. Returns the recorded
+ * directories. On Windows itself only the recording and the EPERM apply.
+ */
+function simulateWindowsDirectories(t: { after(fn: () => void): void }): {
+  opened: string[];
+  restore: () => void;
+} {
+  const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  assert.ok(platform?.configurable, "process.platform must be configurable to simulate Windows");
+  const originalOpen = fs.openSync;
+  const originalFsync = fs.fsyncSync;
+  const opened: string[] = [];
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  fs.openSync = ((path: Parameters<typeof originalOpen>[0], ...rest: unknown[]) => {
+    let directory = false;
+    try {
+      directory = fs.statSync(path).isDirectory();
+    } catch {
+      // A missing path is reported by the real open below.
+    }
+    if (directory) opened.push(String(path));
+    return (originalOpen as (...args: unknown[]) => number)(path, ...rest);
+  }) as typeof fs.openSync;
+  fs.fsyncSync = ((descriptor: number) => {
+    if (fs.fstatSync(descriptor).isDirectory()) {
+      throw Object.assign(new Error("EPERM: operation not permitted, fsync"), { code: "EPERM" });
+    }
+    originalFsync(descriptor);
+  }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    Object.defineProperty(process, "platform", platform);
+    fs.openSync = originalOpen;
+    fs.fsyncSync = originalFsync;
+    syncBuiltinESMExports();
+  };
+  t.after(restore);
+  return { opened, restore };
+}
+
+test("Windows registration never opens or syncs a directory", async (t) => {
+  // Recovery: the record is written in directories the start creates, Core's
+  // response is lost after it commits, and the next start replays the record,
+  // saves the registration and drops the record.
+  const recoveredRoot = dirname(await tempEnv(t));
+  const recoveredPath = join(recoveredRoot, "a", "b", ".env");
+  // Refusal: Core rejects the attempt and the record's own file is removed.
+  const refusedPath = join(dirname(await tempEnv(t)), "new", ".env");
+  const recovering = replayCore();
+  recovering.state.dropAfterCommit = 1;
+  const refusing = replayCore();
+  refusing.state.slugs.add("taken-agent");
+  const input = { slug: "demo-agent", name: "Demo Agent", apiBase: replayBase, userToken: "ol_user_creator" };
+
+  const windows = simulateWindowsDirectories(t);
+  let registration: AgentRegistration;
+  try {
+    await assert.rejects(
+      ensureAgent({ ...input, store: new EnvRegistrationStore(recoveredPath), fetch: recovering.fetch }),
+      /fetch failed/,
+    );
+    assert.equal(
+      readPending(await readFile(recoveredPath, "utf8"))?.agent_token,
+      "ol_agent_minted_1",
+      "the record is written although no directory is synced",
+    );
+    registration = await ensureAgent({
+      ...input,
+      store: new EnvRegistrationStore(recoveredPath),
+      fetch: recovering.fetch,
+    });
+    await assert.rejects(
+      ensureAgent({
+        ...input,
+        slug: "taken-agent",
+        store: new EnvRegistrationStore(refusedPath),
+        fetch: refusing.fetch,
+      }),
+      (error: unknown) => error instanceof OpenLinkerError && error.status === 409,
+    );
+  } finally {
+    windows.restore();
+  }
+
+  assert.deepEqual(windows.opened, [], "a directory was opened for sync on win32");
+  assert.equal(registration.agentToken, "ol_agent_minted_1");
+  assert.equal(recovering.state.createTokenCalls, 1);
+  assert.deepEqual(recovering.state.registerTokens, ["ol_agent_minted_1", "ol_agent_minted_1"]);
+  const completed = await readFile(recoveredPath, "utf8");
+  assert.equal(readPending(completed), undefined);
+  assert.equal((await new EnvRegistrationStore(recoveredPath).loadAgentRegistration())?.agentToken, "ol_agent_minted_1");
+  assert.deepEqual(refusing.state.registerTokens, ["ol_agent_minted_1"]);
+  await assert.rejects(stat(refusedPath), { code: "ENOENT" });
 });
 
 test("a contended pending-record write is given up and the start continues as before", async (t) => {
